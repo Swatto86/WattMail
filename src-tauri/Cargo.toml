@@ -1,6 +1,6 @@
 [package]
 name = "wattmail-desktop"
-version = "0.1.1"
+version = "0.1.2"
 description = "WattMail desktop client"
 edition.workspace = true
 license.workspace = true
@@ -18,6 +18,8 @@ tauri = { version = "2", features = ["tray-icon"] }
 tauri-plugin-single-instance = "2"
 tauri-plugin-opener = "2"
 tauri-plugin-dialog = "2"
+tauri-plugin-updater = "2"
+tauri-plugin-process = "2"
 serde = { workspace = true }
 serde_json = { workspace = true }
 wattmail-domain = { workspace = true }

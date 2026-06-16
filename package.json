@@ -1,7 +1,7 @@
 {
   "name": "wattmail",
   "private": true,
-  "version": "0.1.1",
+  "version": "0.1.2",
   "type": "module",
   "description": "WattMail — a personal cross-platform email client (Rust + Tauri)",
   "author": "Swatto <claude.ai@swatto.co.uk>",
@@ -15,7 +15,9 @@
   "dependencies": {
     "@tauri-apps/api": "^2.1.1",
     "@tauri-apps/plugin-dialog": "^2.2.0",
-    "@tauri-apps/plugin-opener": "^2.2.5"
+    "@tauri-apps/plugin-opener": "^2.2.5",
+    "@tauri-apps/plugin-process": "^2.2.0",
+    "@tauri-apps/plugin-updater": "^2.3.0"
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2.1.0",

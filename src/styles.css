@@ -9,6 +9,29 @@ body,
   margin: 0;
 }
 
+/* Auto-update banner (top of shell) */
+.update-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-shrink: 0;
+  padding: 6px 12px;
+  font-size: 13px;
+  background: oklch(var(--in) / 0.15);
+  border-bottom: 1px solid oklch(var(--in) / 0.4);
+  color: oklch(var(--bc));
+}
+/* Two classes beats one, so `.hidden` actually wins over `.update-banner`. */
+.update-banner.hidden {
+  display: none;
+}
+.update-actions {
+  display: flex;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
 /* Thin scrollbar for the message list */
 .scroll-thin::-webkit-scrollbar {
   width: 10px;

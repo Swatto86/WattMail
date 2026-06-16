@@ -20,6 +20,8 @@ encrypted at rest.
 - **Compose / reply / reply-all / forward** with a rich-text editor and attachments.
 - **Privacy**: "load images" proxies images server-side (no remote requests from the
   webview); the cache is AES-256-GCM encrypted at rest.
+- **Auto-update** — checks the latest GitHub release on launch and installs signed
+  (minisign) updates in place.
 - Light / dark / system themes, system-tray, sort, resizable panes.
 
 ## Security & privacy model

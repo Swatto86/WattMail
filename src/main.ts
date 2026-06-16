@@ -4,6 +4,8 @@ import { listen } from "@tauri-apps/api/event";
 import { getVersion } from "@tauri-apps/api/app";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { open, save } from "@tauri-apps/plugin-dialog";
+import { check, type Update } from "@tauri-apps/plugin-updater";
+import { relaunch } from "@tauri-apps/plugin-process";
 import "./styles.css";
 
 // ---- Backend DTOs (mirror src-tauri/src/commands.rs) ----
@@ -155,6 +157,13 @@ function sortMessages(messages: Message[]): Message[] {
 const appRoot = document.querySelector<HTMLDivElement>("#app")!;
 appRoot.innerHTML = /* html */ `
   <div class="flex flex-col h-screen bg-base-100 text-base-content">
+    <div id="update-banner" class="update-banner hidden">
+      <span id="update-text"></span>
+      <div class="update-actions">
+        <button id="update-install" class="btn btn-xs btn-primary">Install &amp; restart</button>
+        <button id="update-later" class="btn btn-xs btn-ghost">Later</button>
+      </div>
+    </div>
     <div class="flex items-center gap-2 p-2 border-b border-base-300">
       <div class="toolbar-brand">
         <span class="brand-name">WattMail</span>
@@ -247,6 +256,10 @@ const brandVersion = document.querySelector<HTMLSpanElement>("#brand-version")!;
 const refreshBtn = document.querySelector<HTMLButtonElement>("#refresh")!;
 const gear = document.querySelector<HTMLButtonElement>("#gear")!;
 const sortSelect = document.querySelector<HTMLSelectElement>("#sort")!;
+const updateBanner = document.querySelector<HTMLDivElement>("#update-banner")!;
+const updateText = document.querySelector<HTMLSpanElement>("#update-text")!;
+const updateInstall = document.querySelector<HTMLButtonElement>("#update-install")!;
+const updateLater = document.querySelector<HTMLButtonElement>("#update-later")!;
 const signinView = document.querySelector<HTMLDivElement>("#signin")!;
 const signinBtn = document.querySelector<HTMLButtonElement>("#signin-btn")!;
 const signinMsg = document.querySelector<HTMLDivElement>("#signin-msg")!;
@@ -839,8 +852,39 @@ document.addEventListener("keydown", (e) => {
   else if (!composeOverlay.classList.contains("hidden")) closeCompose();
 });
 
+updateInstall.addEventListener("click", () => void installUpdate());
+updateLater.addEventListener("click", () => updateBanner.classList.add("hidden"));
+
 // Tray "Settings…" menu item asks the frontend to open the modal.
 void listen("open-settings", () => openSettings());
+
+// ---- Updates ----
+let pendingUpdate: Update | null = null;
+
+async function checkForUpdates(): Promise<void> {
+  try {
+    const update = await check();
+    if (!update) return;
+    pendingUpdate = update;
+    updateText.textContent = `WattMail ${update.version} is available.`;
+    updateBanner.classList.remove("hidden");
+  } catch {
+    /* offline, or no published update manifest yet — ignore */
+  }
+}
+
+async function installUpdate(): Promise<void> {
+  if (!pendingUpdate) return;
+  updateInstall.disabled = true;
+  updateText.textContent = "Downloading update…";
+  try {
+    await pendingUpdate.downloadAndInstall();
+    await relaunch();
+  } catch (e) {
+    updateText.textContent = `Update failed: ${e}`;
+    updateInstall.disabled = false;
+  }
+}
 
 // ---- Boot ----
 applyListWidth(loadListWidth());
@@ -867,6 +911,7 @@ async function boot(): Promise<void> {
     statusEl.textContent = `Startup error: ${e}`;
     showSignedOut();
   }
+  void checkForUpdates();
 }
 
 // Reveal the window once the shell is built — fast perceived startup, no flash

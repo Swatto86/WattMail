@@ -78,6 +78,28 @@ Entra app registration (public, not secret):
 
 ## Progress log
 
+### 2026-06-16 — Auto-update + repo made public (v0.1.2)
+- **Auto-update:** Tauri updater wired in (`tauri-plugin-updater` + `tauri-plugin-process`). On launch
+  the frontend calls `check()`; if a newer signed release exists, a top-of-shell banner offers
+  "Install & restart" (`downloadAndInstall()` → `relaunch()`). Manifest served from the rolling
+  release: `…/releases/latest/download/latest.json`. `createUpdaterArtifacts: true` makes
+  `tauri build` / `tauri-action` emit the signed `latest.json` + `.sig`.
+- **Signing:** minisign keypair at `~/.tauri/wattmail-updater.key` (empty password). Public key
+  embedded in `tauri.conf.json` (`plugins.updater.pubkey`); private key + empty password set as repo
+  secrets `TAURI_SIGNING_PRIVATE_KEY` / `…_PASSWORD`, consumed by `release.yml`.
+- **Repo made public:** updater can't fetch assets from a private repo unauthenticated, so
+  `Swatto86/WattMail` is now **public**. Pre-flight: gitleaks history scan of WattMail (clean) **and
+  all 21 public repos** (clean; one confirmed false positive). Entra client/tenant IDs are public
+  values, safe to ship.
+- **Updater only activates from v0.1.2 onward** — v0.1.1 has no updater, so this release must be
+  installed manually once; subsequent releases auto-update.
+- Verified: `npm run build` clean, `cargo build` clean, `clippy --all-targets -D warnings` clean.
+
+### 2026-06-16 — Release model: single rolling release (v0.1.1)
+- Releases are now a **single rolling release**: only the latest version's release + tag exist; cutting
+  a new one deletes the previous. `release.yml` now **publishes** (no longer draft). Cut v0.1.1 (tray
+  badge/tooltip + new-mail sound), removing v0.1.0. Process documented in memory `wattmail-release-workflow`.
+
 ### 2026-06-16 — Tray unread indicator + new-mail sound
 - A red-badged tray icon variant (`src-tauri/icons/tray-unread.png`, embedded via
   `include_image!`) is shown when the **Inbox** has unread mail; the tray tooltip reads
@@ -229,9 +251,8 @@ Entra app registration (public, not secret):
 | — | Attachments — view/download received, attach on compose | ✅ done |
 | — | Image proxy (server-side inline), cache encryption (AES-256-GCM), sort | ✅ done |
 | — | Rich-text compose; GitHub repo + CI/release pipeline | ✅ done |
-| — | Compose + send (`Mail.Send`) | ⬜ backlog |
+| — | Auto-update (Tauri updater, signed rolling-release `latest.json`); repo public | ✅ done |
 | — | Cross-platform pass (macOS/Linux config dir + keyring backends) | ⬜ backlog |
-| — | CI (full `tauri build`) + release/updater pipeline | ⬜ backlog |
 | — | Second provider (IMAP/SMTP) behind the contract | ⬜ backlog |
 
 ---
@@ -252,6 +273,7 @@ Entra app registration (public, not secret):
 | 06-16 | **Sync = provider-agnostic `sync(token)` returning an opaque cursor; UI reads cache-first** | Keeps the contract portable (Graph delta now, IMAP UID/modseq later); the SQLite cache makes refresh instant/offline and decouples the UI from the network. | Active |
 | 06-16 | **Send via `/me/sendMail` with a client-composed reply** (not Graph `/reply`) | One send path + full edit control over recipients/subject/body. Trade-off: no `In-Reply-To`/`References` headers, so replies don't thread server-side — deferred. | Active |
 | 06-16 | **Email body always rendered on white** (app chrome stays themed); **auto-sync every 60s** | Email HTML assumes a light background — authors' dark/grey text is unreadable on a dark body, and per-email inversion is unreliable. Auto-sync keeps the list current without manual Refresh. | Active |
+| 06-16 | **Auto-update via Tauri updater against the rolling release; repo made public** | An unauthenticated updater can't pull assets from a private repo; minisign-signed `latest.json` keeps trust without an auth token. Verified no secrets in WattMail or any public repo first. | Active |
 
 ---
 
