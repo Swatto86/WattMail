@@ -1,0 +1,47 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "WattMail",
+  "version": "0.1.0",
+  "identifier": "co.swatto.wattmail",
+  "build": {
+    "beforeDevCommand": "npm run dev",
+    "beforeBuildCommand": "npm run build",
+    "devUrl": "http://localhost:1420",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "WattMail",
+        "width": 1000,
+        "height": 680,
+        "minWidth": 680,
+        "minHeight": 420,
+        "resizable": true,
+        "fullscreen": false,
+        "visible": false,
+        "backgroundColor": "#1d232a"
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; frame-src 'self'; connect-src 'self' ipc: http://ipc.localhost ws://localhost:* http://localhost:*"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["nsis"],
+    "publisher": "Swatto",
+    "copyright": "© 2026 Swatto",
+    "license": "MIT",
+    "category": "Productivity",
+    "shortDescription": "A fast personal email client",
+    "longDescription": "WattMail — a personal cross-platform email client for Office 365, built with Rust and Tauri.",
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.ico"
+    ]
+  }
+}

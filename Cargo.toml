@@ -1,0 +1,45 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/domain",
+    "crates/application",
+    "crates/infrastructure",
+    "apps/auth-spike",
+    "src-tauri",
+]
+
+[workspace.package]
+edition = "2021"
+license = "MIT OR Apache-2.0"
+rust-version = "1.96"
+
+[workspace.dependencies]
+# Internal crates
+wattmail-domain = { path = "crates/domain" }
+wattmail-application = { path = "crates/application" }
+wattmail-infrastructure = { path = "crates/infrastructure" }
+
+# External
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "charset", "http2"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+anyhow = "1"
+async-trait = "0.1"
+tiny_http = "0.12"
+sha2 = "0.10"
+base64 = "0.22"
+rand = "0.8"
+url = "2"
+open = "5"
+ammonia = "4"
+
+# Release profile lives at the workspace root (member profiles are ignored).
+# Tuned for a small, fast binary — the AllTheThings recipe.
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = 3
+panic = "abort"
+strip = true

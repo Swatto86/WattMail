@@ -1,0 +1,36 @@
+[package]
+name = "wattmail-infrastructure"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+wattmail-domain.workspace = true
+tokio.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+async-trait.workspace = true
+tiny_http.workspace = true
+sha2.workspace = true
+base64.workspace = true
+rand.workspace = true
+url.workspace = true
+open.workspace = true
+ammonia.workspace = true
+rusqlite = { version = "0.32", features = ["bundled"] }
+aes-gcm = "0.10"
+regex = "1"
+
+# Platform-native secure credential stores. Declared per-target so a build only
+# pulls the credential backend for the OS it is compiled for.
+[target.'cfg(target_os = "windows")'.dependencies]
+keyring = { version = "3", features = ["windows-native"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+keyring = { version = "3", features = ["apple-native"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+keyring = { version = "3", features = ["sync-secret-service"] }

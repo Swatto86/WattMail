@@ -1,0 +1,145 @@
+//! WattMail desktop — Tauri presentation layer and composition root.
+//!
+//! Wires the infrastructure (`AuthService`, Graph) into Tauri commands and owns
+//! the window, tray, and settings. No domain logic lives here.
+
+mod commands;
+mod settings;
+
+use std::sync::RwLock;
+
+use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
+use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
+use tauri::{AppHandle, Emitter, Manager, WindowEvent};
+
+use settings::SettingsState;
+use wattmail_infrastructure::{AuthService, OAuthConfig, SqliteStore};
+
+// Public client identifiers — NOT secrets. Safe to ship in the binary.
+const CLIENT_ID: &str = "60d6101b-3d8a-4a09-8718-ad90c0d88f13";
+const TENANT_ID: &str = "652459b1-612f-4586-b424-a0069d51cc32";
+
+#[cfg_attr(mobile, tauri::mobile_entry_point)]
+pub fn run() {
+    let auth = AuthService::new(OAuthConfig::office365(TENANT_ID, CLIENT_ID))
+        .expect("initialise auth service");
+    let store = SqliteStore::open(cache_db_path()).expect("open mail cache");
+    let loaded = settings::load();
+
+    tauri::Builder::default()
+        // single-instance must be registered first: a second launch focuses the
+        // running window instead of opening a duplicate.
+        .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
+            show_main(app);
+        }))
+        .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_dialog::init())
+        .manage(auth)
+        .manage(store)
+        .manage(SettingsState(RwLock::new(loaded)))
+        .setup(|app| {
+            build_tray(app.handle())?;
+            // Safety net: if the frontend never reveals the window (e.g. a script
+            // error), show it anyway so the user isn't stuck with only a tray icon.
+            if let Some(window) = app.get_webview_window("main") {
+                std::thread::spawn(move || {
+                    std::thread::sleep(std::time::Duration::from_millis(3000));
+                    let _ = window.show();
+                });
+            }
+            Ok(())
+        })
+        .on_window_event(|window, event| {
+            if let WindowEvent::CloseRequested { api, .. } = event {
+                let close_to_tray = window
+                    .app_handle()
+                    .state::<SettingsState>()
+                    .0
+                    .read()
+                    .map(|s| s.close_to_tray)
+                    .unwrap_or(true);
+                if close_to_tray {
+                    let _ = window.hide();
+                    api.prevent_close();
+                }
+            }
+        })
+        .invoke_handler(tauri::generate_handler![
+            commands::is_signed_in,
+            commands::sign_in,
+            commands::sign_out,
+            commands::list_folders,
+            commands::folder_from_cache,
+            commands::sync_folder,
+            commands::load_message,
+            commands::prepare_reply,
+            commands::prepare_forward,
+            commands::send_message,
+            commands::attachments,
+            commands::save_attachment,
+            commands::mark_read,
+            commands::get_close_to_tray,
+            commands::set_close_to_tray,
+        ])
+        .run(tauri::generate_context!())
+        .expect("error while running WattMail");
+}
+
+/// Build the system-tray icon with a Show / Settings / Quit menu.
+fn build_tray(app: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
+    let show = MenuItem::with_id(app, "show", "Show WattMail", true, None::<&str>)?;
+    let settings = MenuItem::with_id(app, "settings", "Settings…", true, None::<&str>)?;
+    let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
+    let separator = PredefinedMenuItem::separator(app)?;
+    let menu = Menu::with_items(app, &[&show, &settings, &separator, &quit])?;
+
+    let icon = app
+        .default_window_icon()
+        .cloned()
+        .ok_or("missing default window icon")?;
+
+    TrayIconBuilder::with_id("main")
+        .icon(icon)
+        .tooltip("WattMail")
+        .menu(&menu)
+        .on_menu_event(|app, event| match event.id().as_ref() {
+            "show" => show_main(app),
+            "settings" => {
+                show_main(app);
+                let _ = app.emit("open-settings", ());
+            }
+            "quit" => app.exit(0),
+            _ => {}
+        })
+        .on_tray_icon_event(|tray, event| {
+            if let TrayIconEvent::Click {
+                button: MouseButton::Left,
+                button_state: MouseButtonState::Up,
+                ..
+            } = event
+            {
+                show_main(tray.app_handle());
+            }
+        })
+        .build(app)?;
+    Ok(())
+}
+
+/// Path to the local message cache (`%LOCALAPPDATA%\WattMail\cache.db` on Windows;
+/// a cross-platform config-dir abstraction lands with the macOS/Linux work).
+fn cache_db_path() -> std::path::PathBuf {
+    std::env::var_os("LOCALAPPDATA")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir)
+        .join("WattMail")
+        .join("cache.db")
+}
+
+/// Bring the main window to the foreground.
+fn show_main(app: &AppHandle) {
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.show();
+        let _ = window.unminimize();
+        let _ = window.set_focus();
+    }
+}

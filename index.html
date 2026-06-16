@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="en" data-theme="business">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>WattMail</title>
+    <!-- Apply the saved theme before first paint to avoid a flash of the wrong one. -->
+    <script>
+      try {
+        var p = localStorage.getItem("wattmail.theme") || "business";
+        var t =
+          p === "system"
+            ? matchMedia("(prefers-color-scheme: dark)").matches
+              ? "business"
+              : "corporate"
+            : p === "corporate"
+              ? "corporate"
+              : "business";
+        document.documentElement.dataset.theme = t;
+      } catch (e) {}
+    </script>
+  </head>
+  <body class="overflow-hidden select-none">
+    <div id="app"></div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

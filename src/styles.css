@@ -1,0 +1,391 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+html,
+body,
+#app {
+  height: 100vh;
+  margin: 0;
+}
+
+/* Thin scrollbar for the message list */
+.scroll-thin::-webkit-scrollbar {
+  width: 10px;
+}
+.scroll-thin::-webkit-scrollbar-thumb {
+  background: oklch(var(--bc) / 0.25);
+  border-radius: 6px;
+}
+.scroll-thin::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+/* Toolbar brand */
+.toolbar-brand {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  flex-shrink: 0;
+  padding: 2px 6px;
+  color: oklch(var(--bc));
+}
+.brand-name {
+  font-size: 14px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+.brand-version {
+  font-size: 11px;
+  opacity: 0.6;
+  font-family: ui-monospace, "Cascadia Code", monospace;
+}
+
+/* Message rows */
+.msg {
+  display: flex;
+  gap: 8px;
+  padding: 8px 12px;
+  border-bottom: 1px solid oklch(var(--bc) / 0.08);
+  cursor: pointer;
+}
+.msg:hover {
+  background: oklch(var(--bc) / 0.06);
+}
+.msg.selected,
+.msg.selected:hover {
+  background: oklch(var(--p) / 0.18);
+  box-shadow: inset 3px 0 0 oklch(var(--p));
+}
+.msg-dot {
+  width: 10px;
+  flex-shrink: 0;
+  display: flex;
+  justify-content: center;
+  padding-top: 5px;
+}
+.dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: oklch(var(--p));
+}
+.msg-main {
+  min-width: 0;
+  flex: 1;
+}
+.msg-top {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  align-items: baseline;
+}
+.msg-from {
+  font-size: 13px;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.msg-date {
+  font-size: 11px;
+  opacity: 0.6;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+.msg-subject {
+  font-size: 13px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.msg-preview {
+  font-size: 12px;
+  opacity: 0.6;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.msg.unread .msg-from,
+.msg.unread .msg-subject {
+  font-weight: 700;
+}
+
+/* Settings modal */
+.overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.5);
+}
+/* Two classes beats `.overlay` (one class), so `.hidden` actually hides it. */
+.overlay.hidden {
+  display: none;
+}
+.settings-panel {
+  width: 420px;
+  max-width: 90vw;
+  background: oklch(var(--b1));
+  color: oklch(var(--bc));
+  border: 1px solid oklch(var(--bc) / 0.14);
+  border-radius: 10px;
+  box-shadow: 0 16px 48px rgba(0, 0, 0, 0.5);
+  padding: 16px 18px;
+}
+.settings-title {
+  font-size: 15px;
+  font-weight: 600;
+  margin-bottom: 12px;
+}
+.settings-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 0;
+  font-size: 13px;
+}
+.settings-row .hint {
+  font-size: 11px;
+  opacity: 0.6;
+}
+.settings-msg {
+  min-height: 18px;
+  font-size: 12px;
+  color: oklch(var(--er));
+  margin-top: 4px;
+}
+.settings-actions {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 12px;
+}
+
+/* Reading pane */
+.reader-empty {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  opacity: 0.5;
+  font-size: 13px;
+}
+.reader-head {
+  padding: 14px 16px 10px;
+  border-bottom: 1px solid oklch(var(--bc) / 0.1);
+  flex-shrink: 0;
+}
+.reader-subject {
+  font-size: 16px;
+  font-weight: 700;
+  margin-bottom: 6px;
+}
+.reader-meta {
+  font-size: 12px;
+  opacity: 0.7;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.reader-banner {
+  flex-shrink: 0;
+  display: block;
+  width: calc(100% - 32px);
+  text-align: left;
+  margin: 10px 16px 0;
+  padding: 6px 10px;
+  font: inherit;
+  font-size: 12px;
+  border-radius: 6px;
+  background: oklch(var(--wa) / 0.15);
+  border: 1px solid oklch(var(--wa) / 0.4);
+  color: inherit;
+  cursor: pointer;
+}
+.reader-banner:hover {
+  background: oklch(var(--wa) / 0.28);
+}
+.reader-frame {
+  flex: 1;
+  width: 100%;
+  border: 0;
+  /* Email bodies render on white (email HTML assumes a light theme). */
+  background: #ffffff;
+}
+
+/* Folder sidebar */
+.folder {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  width: 100%;
+  padding: 5px 10px;
+  font-size: 13px;
+  text-align: left;
+  color: inherit;
+  background: transparent;
+  border: 0;
+  cursor: pointer;
+}
+.folder:hover {
+  background: oklch(var(--bc) / 0.06);
+}
+.folder.active,
+.folder.active:hover {
+  background: oklch(var(--p) / 0.18);
+  box-shadow: inset 3px 0 0 oklch(var(--p));
+}
+.folder-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.folder-badge {
+  flex-shrink: 0;
+  font-size: 11px;
+  opacity: 0.85;
+  background: oklch(var(--bc) / 0.12);
+  border-radius: 8px;
+  padding: 0 6px;
+}
+
+/* Split layout */
+#list {
+  width: var(--list-w, 380px);
+}
+.splitter {
+  width: 5px;
+  flex-shrink: 0;
+  cursor: col-resize;
+  background: oklch(var(--bc) / 0.08);
+}
+.splitter:hover {
+  background: oklch(var(--p) / 0.4);
+}
+
+/* Reader actions (reply / forward) */
+.reader-actions {
+  display: flex;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+/* Compose modal */
+.compose-panel {
+  width: 560px;
+  max-width: 92vw;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.compose-input {
+  width: 100%;
+}
+.compose-toolbar {
+  display: flex;
+  gap: 2px;
+  flex-wrap: wrap;
+}
+.compose-toolbar button {
+  min-width: 28px;
+  padding: 2px 6px;
+  font-size: 13px;
+  border-radius: 4px;
+  background: oklch(var(--bc) / 0.08);
+  border: 1px solid oklch(var(--bc) / 0.14);
+  color: inherit;
+  cursor: pointer;
+}
+.compose-toolbar button:hover {
+  background: oklch(var(--p) / 0.2);
+}
+.compose-body {
+  width: 100%;
+  min-height: 200px;
+  max-height: 45vh;
+  overflow-y: auto;
+  font-size: 13px;
+  line-height: 1.5;
+  padding: 8px 10px;
+  border-radius: 6px;
+  border: 1px solid oklch(var(--bc) / 0.2);
+  background: oklch(var(--b1));
+  color: oklch(var(--bc));
+}
+.compose-body:focus {
+  outline: none;
+  border-color: oklch(var(--p));
+}
+.compose-body:empty::before {
+  content: "Write your message…";
+  opacity: 0.5;
+  pointer-events: none;
+}
+.compose-quote-note {
+  font-size: 11px;
+  opacity: 0.6;
+}
+
+/* Attachments */
+.reader-attachments {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 8px 16px 0;
+  flex-shrink: 0;
+}
+.attach-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  padding: 3px 8px;
+  border-radius: 6px;
+  color: inherit;
+  background: oklch(var(--bc) / 0.08);
+  border: 1px solid oklch(var(--bc) / 0.14);
+  cursor: pointer;
+}
+.attach-chip:hover {
+  background: oklch(var(--p) / 0.18);
+}
+.attach-size {
+  opacity: 0.6;
+}
+.compose-attach-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.compose-attachments {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.attach-chip-c {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 12px;
+  padding: 2px 8px;
+  border-radius: 6px;
+  background: oklch(var(--bc) / 0.08);
+  border: 1px solid oklch(var(--bc) / 0.14);
+}
+.attach-remove {
+  border: 0;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  opacity: 0.7;
+  font-size: 14px;
+  line-height: 1;
+}
+.attach-remove:hover {
+  opacity: 1;
+}
