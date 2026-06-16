@@ -20,12 +20,21 @@ use wattmail_infrastructure::{AuthService, OAuthConfig, SqliteStore};
 const CLIENT_ID: &str = "60d6101b-3d8a-4a09-8718-ad90c0d88f13";
 const TENANT_ID: &str = "652459b1-612f-4586-b424-a0069d51cc32";
 
+/// CLI flag the autostart entry passes so a login-launched instance stays in the
+/// tray instead of showing its window. Manual launches omit it and show normally.
+const HIDDEN_FLAG: &str = "--hidden";
+
+/// Whether this process was launched into the tray (autostart). Read by the
+/// `started_hidden` command so the frontend skips revealing the window.
+pub(crate) struct StartHidden(pub bool);
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let auth = AuthService::new(OAuthConfig::office365(TENANT_ID, CLIENT_ID))
         .expect("initialise auth service");
     let store = SqliteStore::open(cache_db_path()).expect("open mail cache");
     let loaded = settings::load();
+    let start_hidden = std::env::args().any(|arg| arg == HIDDEN_FLAG);
 
     tauri::Builder::default()
         // single-instance must be registered first: a second launch focuses the
@@ -37,18 +46,27 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
+        // Autostart registers the app at login with `--hidden`, so it boots into
+        // the tray; a manual launch (no flag) shows the window as usual.
+        .plugin(tauri_plugin_autostart::init(
+            tauri_plugin_autostart::MacosLauncher::LaunchAgent,
+            Some(vec![HIDDEN_FLAG]),
+        ))
         .manage(auth)
         .manage(store)
         .manage(SettingsState(RwLock::new(loaded)))
-        .setup(|app| {
+        .manage(StartHidden(start_hidden))
+        .setup(move |app| {
             build_tray(app.handle())?;
             // Safety net: if the frontend never reveals the window (e.g. a script
-            // error), show it anyway so the user isn't stuck with only a tray icon.
-            if let Some(window) = app.get_webview_window("main") {
-                std::thread::spawn(move || {
-                    std::thread::sleep(std::time::Duration::from_millis(3000));
-                    let _ = window.show();
-                });
+            // error), show it anyway — unless we were autostarted into the tray.
+            if !start_hidden {
+                if let Some(window) = app.get_webview_window("main") {
+                    std::thread::spawn(move || {
+                        std::thread::sleep(std::time::Duration::from_millis(3000));
+                        let _ = window.show();
+                    });
+                }
             }
             Ok(())
         })
@@ -84,6 +102,7 @@ pub fn run() {
             commands::get_close_to_tray,
             commands::set_close_to_tray,
             commands::set_unread,
+            commands::started_hidden,
         ])
         .run(tauri::generate_context!())
         .expect("error while running WattMail");

@@ -78,6 +78,16 @@ Entra app registration (public, not secret):
 
 ## Progress log
 
+### 2026-06-16 — Start with Windows (hidden in tray) (v0.1.3)
+- **Autostart:** `tauri-plugin-autostart` registers WattMail at login with a `--hidden` arg
+  (Windows `HKCU\…\Run`). A login-launched instance detects the flag (`StartHidden` managed state),
+  **skips revealing the window** (frontend `started_hidden` command + the Rust 3s safety-net is
+  gated on it) and sits in the tray, still syncing in the background. A **manual** launch has no
+  flag and shows the window normally; the tray icon reveals it any time.
+- **Settings toggle** "Start with Windows" drives the plugin's `enable()`/`disable()` directly from
+  the frontend; the toggle reverts if the OS call fails. `autostart:default` capability added.
+- Verified: `npm run build` clean, `cargo build` clean, `clippy --all-targets -D warnings` clean.
+
 ### 2026-06-16 — Auto-update + repo made public (v0.1.2)
 - **Auto-update:** Tauri updater wired in (`tauri-plugin-updater` + `tauri-plugin-process`). On launch
   the frontend calls `check()`; if a newer signed release exists, a top-of-shell banner offers

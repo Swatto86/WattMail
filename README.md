@@ -22,6 +22,8 @@ encrypted at rest.
   webview); the cache is AES-256-GCM encrypted at rest.
 - **Auto-update** — checks the latest GitHub release on launch and installs signed
   (minisign) updates in place.
+- **Start with Windows** — optionally launches hidden into the system tray at login,
+  syncing in the background.
 - Light / dark / system themes, system-tray, sort, resizable panes.
 
 ## Security & privacy model

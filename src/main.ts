@@ -6,6 +6,11 @@ import { openUrl } from "@tauri-apps/plugin-opener";
 import { open, save } from "@tauri-apps/plugin-dialog";
 import { check, type Update } from "@tauri-apps/plugin-updater";
 import { relaunch } from "@tauri-apps/plugin-process";
+import {
+  enable as enableAutostart,
+  disable as disableAutostart,
+  isEnabled as isAutostartEnabled,
+} from "@tauri-apps/plugin-autostart";
 import "./styles.css";
 
 // ---- Backend DTOs (mirror src-tauri/src/commands.rs) ----
@@ -213,6 +218,10 @@ appRoot.innerHTML = /* html */ `
         <span>Close button minimises to tray<br /><span class="hint">Otherwise closing the window quits WattMail</span></span>
         <input type="checkbox" id="set-tray" class="toggle toggle-sm toggle-primary" />
       </label>
+      <label class="settings-row">
+        <span>Start with Windows<br /><span class="hint">Launch hidden in the system tray at sign-in</span></span>
+        <input type="checkbox" id="set-autostart" class="toggle toggle-sm toggle-primary" />
+      </label>
       <div class="settings-row">
         <span>Account<br /><span class="hint" id="set-account">&mdash;</span></span>
         <button id="signout-btn" class="btn btn-sm btn-error">Sign out</button>
@@ -272,6 +281,7 @@ const statusEl = document.querySelector<HTMLDivElement>("#status")!;
 const settingsOverlay = document.querySelector<HTMLDivElement>("#settings-overlay")!;
 const setTheme = document.querySelector<HTMLSelectElement>("#set-theme")!;
 const setTray = document.querySelector<HTMLInputElement>("#set-tray")!;
+const setAutostart = document.querySelector<HTMLInputElement>("#set-autostart")!;
 const setAccount = document.querySelector<HTMLSpanElement>("#set-account")!;
 const signoutBtn = document.querySelector<HTMLButtonElement>("#signout-btn")!;
 const settingsMsg = document.querySelector<HTMLDivElement>("#settings-msg")!;
@@ -653,6 +663,9 @@ function openSettings(): void {
   invoke<boolean>("get_close_to_tray")
     .then((v) => (setTray.checked = v))
     .catch(() => {});
+  isAutostartEnabled()
+    .then((v) => (setAutostart.checked = v))
+    .catch(() => {});
   settingsOverlay.classList.remove("hidden");
 }
 function closeSettings(): void {
@@ -843,6 +856,14 @@ setTray.addEventListener("change", () => {
     (e) => (settingsMsg.textContent = `Could not save: ${e}`),
   );
 });
+setAutostart.addEventListener("change", () => {
+  const want = setAutostart.checked;
+  const action = want ? enableAutostart() : disableAutostart();
+  action.catch((e) => {
+    settingsMsg.textContent = `Could not change autostart: ${e}`;
+    setAutostart.checked = !want; // revert the toggle to the real state
+  });
+});
 settingsOverlay.addEventListener("click", (e) => {
   if (e.target === settingsOverlay) closeSettings();
 });
@@ -915,8 +936,13 @@ async function boot(): Promise<void> {
 }
 
 // Reveal the window once the shell is built — fast perceived startup, no flash
-// of an empty/unstyled window.
-void getCurrentWindow().show();
+// of an empty/unstyled window. Skip it when autostarted into the tray; the user
+// reveals the window from the tray icon when they want it.
+invoke<boolean>("started_hidden")
+  .then((hidden) => {
+    if (!hidden) void getCurrentWindow().show();
+  })
+  .catch(() => void getCurrentWindow().show());
 void boot();
 
 // Pick up new mail in the current folder automatically (quietly, every 60s).

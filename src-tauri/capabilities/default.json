@@ -10,6 +10,7 @@
     "opener:allow-open-url",
     "dialog:default",
     "updater:default",
-    "process:default"
+    "process:default",
+    "autostart:default"
   ]
 }

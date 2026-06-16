@@ -362,3 +362,10 @@ pub fn set_close_to_tray(state: State<'_, SettingsState>, value: bool) -> Result
 pub fn set_unread(app: tauri::AppHandle, count: u32) {
     crate::update_tray(&app, count);
 }
+
+/// Whether this instance was launched into the tray via autostart (`--hidden`),
+/// so the frontend can skip revealing the window on boot.
+#[tauri::command]
+pub fn started_hidden(flag: State<'_, crate::StartHidden>) -> bool {
+    flag.0
+}
