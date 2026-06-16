@@ -222,6 +222,26 @@ impl MailProvider for GraphClient {
         Ok(())
     }
 
+    async fn move_message(&self, id: &str, destination_folder_id: &str) -> Result<(), MailError> {
+        // POST /me/messages/{id}/move — Graph returns the moved copy (new id in
+        // the destination); we ignore the body and let that folder's next sync
+        // pick it up.
+        let mut url = message_endpoint(id);
+        url.path_segments_mut()
+            .expect("base URL is a proper path")
+            .push("move");
+        let response = self
+            .http
+            .post(url.as_str())
+            .bearer_auth(&self.access_token)
+            .json(&serde_json::json!({ "destinationId": destination_folder_id }))
+            .send()
+            .await
+            .map_err(|e| MailError::Network(e.to_string()))?;
+        check_status(response).await?;
+        Ok(())
+    }
+
     async fn sync(
         &self,
         folder_id: &str,

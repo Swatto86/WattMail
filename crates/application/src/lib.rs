@@ -67,6 +67,18 @@ pub async fn delete_message(
     store.remove_message(id).await
 }
 
+/// Move a message to another folder and drop it from the source folder's cache
+/// (the destination folder picks it up on its next sync).
+pub async fn move_message(
+    provider: &dyn MailProvider,
+    store: &dyn MailStore,
+    id: &str,
+    destination_folder_id: &str,
+) -> Result<(), MailError> {
+    provider.move_message(id, destination_folder_id).await?;
+    store.remove_message(id).await
+}
+
 /// A cached account snapshot.
 #[derive(Debug)]
 pub struct CachedAccount {

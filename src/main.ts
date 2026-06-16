@@ -446,6 +446,20 @@ async function deleteMessage(id: string): Promise<void> {
   }
 }
 
+// Move a message to another folder (it leaves the current folder's list).
+async function moveMessage(id: string, destinationFolderId: string): Promise<void> {
+  rowFor(id)?.remove();
+  if (selectedId === id) resetReader();
+  try {
+    await invoke("move_message", { id, destinationFolderId });
+    await refreshFromCache(true); // update loaded/total count
+    await loadFolders(); // refresh unread badges (source + destination)
+  } catch (e) {
+    statusEl.textContent = `Move failed: ${e}`;
+    await refreshFromCache(true); // restore the row from cache
+  }
+}
+
 // ---- Reading pane ----
 async function openMessage(id: string, allowImages = false): Promise<void> {
   selectedId = id;
@@ -885,8 +899,21 @@ function hideCtxMenu(): void {
   ctxTargetId = null;
 }
 
-function showCtxMenu(x: number, y: number, id: string, unread: boolean): void {
-  ctxTargetId = id;
+let ctxX = 0;
+let ctxY = 0;
+
+// Position the menu at the opening point, clamped inside the viewport. Re-run
+// after any content swap (e.g. drilling into the folder list) so it still fits.
+function placeMenu(): void {
+  ctxMenu.style.left = "0";
+  ctxMenu.style.top = "0";
+  const left = Math.max(4, Math.min(ctxX, window.innerWidth - ctxMenu.offsetWidth - 4));
+  const top = Math.max(4, Math.min(ctxY, window.innerHeight - ctxMenu.offsetHeight - 4));
+  ctxMenu.style.left = `${left}px`;
+  ctxMenu.style.top = `${top}px`;
+}
+
+function renderMainMenu(unread: boolean): void {
   const items: Array<{ act: string; label: string; danger?: boolean } | "sep"> = [
     { act: "open", label: "Open" },
     { act: "reply", label: "Reply" },
@@ -894,6 +921,7 @@ function showCtxMenu(x: number, y: number, id: string, unread: boolean): void {
     { act: "forward", label: "Forward" },
     "sep",
     { act: "toggleRead", label: unread ? "Mark as read" : "Mark as unread" },
+    { act: "moveMenu", label: "Move to folder…" },
     { act: "delete", label: "Delete", danger: true },
   ];
   ctxMenu.innerHTML = items
@@ -903,14 +931,32 @@ function showCtxMenu(x: number, y: number, id: string, unread: boolean): void {
         : `<button class="ctx-item${it.danger ? " ctx-danger" : ""}" data-act="${it.act}">${it.label}</button>`,
     )
     .join("");
-  // Reveal at the origin to measure, then clamp inside the viewport.
-  ctxMenu.style.left = "0";
-  ctxMenu.style.top = "0";
+}
+
+// Second "page" of the menu: pick a destination folder (current folder excluded).
+function renderFolderMenu(): void {
+  const others = folders.filter((f) => f.id !== currentFolderId);
+  const list = others.length
+    ? others
+        .map(
+          (f) =>
+            `<button class="ctx-item" data-fid="${esc(f.id)}" title="${esc(f.name)}" style="padding-left:${10 + f.depth * 12}px">${esc(f.name)}</button>`,
+        )
+        .join("")
+    : `<div class="ctx-empty">No other folders</div>`;
+  ctxMenu.innerHTML =
+    `<button class="ctx-item ctx-back" data-act="back">← Back</button>` +
+    `<div class="ctx-sep"></div>` +
+    `<div class="ctx-folders">${list}</div>`;
+}
+
+function showCtxMenu(x: number, y: number, id: string, unread: boolean): void {
+  ctxTargetId = id;
+  ctxX = x;
+  ctxY = y;
+  renderMainMenu(unread);
   ctxMenu.classList.remove("hidden");
-  const left = Math.max(4, Math.min(x, window.innerWidth - ctxMenu.offsetWidth - 4));
-  const top = Math.max(4, Math.min(y, window.innerHeight - ctxMenu.offsetHeight - 4));
-  ctxMenu.style.left = `${left}px`;
-  ctxMenu.style.top = `${top}px`;
+  placeMenu();
   rowFor(id)?.classList.add("ctx-target");
 }
 
@@ -922,12 +968,33 @@ listEl.addEventListener("contextmenu", (e) => {
 });
 
 ctxMenu.addEventListener("click", (e) => {
-  const act = (e.target as HTMLElement).closest<HTMLElement>(".ctx-item")?.dataset.act;
+  // The menu handles its own clicks; don't let them reach the outside-click
+  // dismiss handler (the clicked node may be detached by a content swap).
+  e.stopPropagation();
+  const item = (e.target as HTMLElement).closest<HTMLElement>(".ctx-item");
   const id = ctxTargetId;
-  const unread = id ? (rowFor(id)?.classList.contains("unread") ?? false) : false;
+  if (!item || !id) return;
+
+  // Drill in / out without closing the menu.
+  if (item.dataset.act === "moveMenu") {
+    renderFolderMenu();
+    placeMenu();
+    return;
+  }
+  if (item.dataset.act === "back") {
+    renderMainMenu(rowFor(id)?.classList.contains("unread") ?? false);
+    placeMenu();
+    return;
+  }
+
+  const unread = rowFor(id)?.classList.contains("unread") ?? false;
+  const destFolderId = item.dataset.fid;
   hideCtxMenu();
-  if (!act || !id) return;
-  switch (act) {
+  if (destFolderId) {
+    void moveMessage(id, destFolderId);
+    return;
+  }
+  switch (item.dataset.act) {
     case "open":
       void openMessage(id);
       break;

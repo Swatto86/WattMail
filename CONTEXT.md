@@ -78,6 +78,22 @@ Entra app registration (public, not secret):
 
 ## Progress log
 
+### 2026-06-16 — Context menu: Move to folder (v0.1.7)
+- Adds **Move to folder…** to the email context menu. Clicking it drills the menu
+  into a scrollable, depth-indented folder list (current folder excluded) with a
+  **← Back** item; picking a folder moves the message. The drill-in swaps the menu's
+  contents in place (no nested flyout); `e.stopPropagation()` on menu clicks stops
+  the in-place content swap from tripping the outside-click dismiss.
+- **Backend:** `MailProvider::move_message(id, destination_folder_id)` → Graph
+  `POST /me/messages/{id}/move` `{destinationId}` (returns the moved copy; ignored —
+  the destination folder's next delta sync picks it up). Application `move_message`
+  use-case = provider.move + `store.remove_message` (drops it from the source cache).
+  Command `move_message` registered in lib.rs. `Mail.ReadWrite` covers it.
+- Frontend `moveMessage()` removes the row optimistically, then refreshes the
+  loaded/total count and unread badges; restores from cache on failure.
+- Verified: `npm run build` (incl. `tsc`), `cargo fmt --check`, `clippy --all-targets
+  -D warnings` clean. Live run pending; not yet released.
+
 ### 2026-06-16 — Right-click context menu on emails (v0.1.6)
 - **Custom webview context menu** on message-list rows (matches the all-custom UI; themed via
   DaisyUI CSS vars; acts on the right-clicked row, not just the open message). Actions: Open, Reply,

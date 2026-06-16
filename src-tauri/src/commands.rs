@@ -7,8 +7,8 @@ use crate::settings::{self, SettingsState};
 use wattmail_application::{
     compose_forward, compose_reply, delete_message as app_delete_message, download_attachment,
     folder_from_cache as app_folder_from_cache, list_attachments, list_folders as app_list_folders,
-    read_message, send_message as app_send_message, set_read as app_set_read,
-    sync_folder as app_sync_folder,
+    move_message as app_move_message, read_message, send_message as app_send_message,
+    set_read as app_set_read, sync_folder as app_sync_folder,
 };
 use wattmail_domain::{Folder, MessageSummary, OutgoingAttachment, OutgoingMessage};
 use wattmail_infrastructure::{AuthService, GraphClient, SqliteStore};
@@ -191,6 +191,21 @@ pub async fn delete_message(
     let token = auth.access_token().await.map_err(|e| e.to_string())?;
     let provider = GraphClient::new(token);
     app_delete_message(&provider, &*store, &id)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Move a message to another folder and drop it from the source folder's cache.
+#[tauri::command]
+pub async fn move_message(
+    auth: State<'_, AuthService>,
+    store: State<'_, SqliteStore>,
+    id: String,
+    destination_folder_id: String,
+) -> Result<(), String> {
+    let token = auth.access_token().await.map_err(|e| e.to_string())?;
+    let provider = GraphClient::new(token);
+    app_move_message(&provider, &*store, &id, &destination_folder_id)
         .await
         .map_err(|e| e.to_string())
 }

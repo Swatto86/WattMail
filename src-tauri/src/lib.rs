@@ -101,6 +101,7 @@ pub fn run() {
             commands::save_attachment,
             commands::set_read,
             commands::delete_message,
+            commands::move_message,
             commands::get_close_to_tray,
             commands::set_close_to_tray,
             commands::set_unread,

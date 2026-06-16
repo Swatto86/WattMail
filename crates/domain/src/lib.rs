@@ -148,6 +148,9 @@ pub trait MailProvider: Send + Sync {
     /// Delete a message (moves it to Deleted Items).
     async fn delete_message(&self, id: &str) -> Result<(), MailError>;
 
+    /// Move a message to another folder.
+    async fn move_message(&self, id: &str, destination_folder_id: &str) -> Result<(), MailError>;
+
     /// The user's mail folders.
     async fn folders(&self) -> Result<Vec<Folder>, MailError>;
 

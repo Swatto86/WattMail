@@ -183,6 +183,18 @@ body,
   margin: 4px 2px;
   background: hsl(var(--b3));
 }
+.ctx-back {
+  font-weight: 600;
+}
+.ctx-folders {
+  max-height: 40vh;
+  overflow-y: auto;
+}
+.ctx-empty {
+  padding: 6px 10px;
+  font-size: 12px;
+  opacity: 0.6;
+}
 .msg.ctx-target {
   background: hsl(var(--b2));
 }
