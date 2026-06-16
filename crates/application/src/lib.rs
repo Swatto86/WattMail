@@ -67,7 +67,10 @@ pub struct CachedAccount {
 #[derive(Debug)]
 pub struct CachedFolder {
     pub account: Option<CachedAccount>,
+    /// The loaded window (most recent `top` messages).
     pub messages: Vec<MessageSummary>,
+    /// Total messages cached for the folder, so the UI can offer "load more".
+    pub total: u32,
 }
 
 /// Pull the latest changes for one folder from the provider into the local store.
@@ -110,6 +113,7 @@ pub async fn folder_from_cache(
     top: u32,
 ) -> Result<CachedFolder, MailError> {
     let messages = store.recent(folder_id, top).await?;
+    let total = store.count(folder_id).await?;
     let name = store.load_state(ACCOUNT_NAME_KEY).await?;
     let email = store.load_state(ACCOUNT_EMAIL_KEY).await?;
     let account = match (name, email) {
@@ -119,7 +123,11 @@ pub async fn folder_from_cache(
         }),
         _ => None,
     };
-    Ok(CachedFolder { account, messages })
+    Ok(CachedFolder {
+        account,
+        messages,
+        total,
+    })
 }
 
 /// Send a message.

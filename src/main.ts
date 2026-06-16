@@ -30,6 +30,7 @@ interface Message {
 interface Inbox {
   account: Account | null;
   messages: Message[];
+  total: number; // total cached in the folder; messages is a window of this
 }
 interface MessageView {
   id: string;
@@ -59,7 +60,11 @@ interface AttachmentInfo {
   size: number;
 }
 
-const INBOX_TOP = 50;
+// The whole folder is cached locally; the list reads a growing window of it.
+// "Load more" grows the window by PAGE_SIZE; switching folders resets it.
+const PAGE_SIZE = 50;
+let loadedCount = PAGE_SIZE;
+let currentTotal = 0;
 
 // ---- Theme (also applied pre-paint in index.html; this keeps it in sync) ----
 type ThemePref = "business" | "corporate" | "system";
@@ -345,6 +350,7 @@ function renderInbox(inbox: Inbox): void {
     accountEl.textContent = "";
   }
   currentIds = new Set(inbox.messages.map((m) => m.id));
+  currentTotal = inbox.total;
 
   if (inbox.messages.length === 0) {
     listEl.innerHTML = `<div class="p-6 text-center opacity-60">No messages.</div>`;
@@ -355,7 +361,7 @@ function renderInbox(inbox: Inbox): void {
   const folder = folders.find((f) => f.id === currentFolderId);
   const showRecipient = !!folder && isOutgoingFolder(folder.name);
 
-  listEl.innerHTML = sortMessages(inbox.messages)
+  const rows = sortMessages(inbox.messages)
     .map((m) => {
       const unread = m.isRead ? "" : "unread";
       const dot = m.isRead ? "" : `<span class="dot"></span>`;
@@ -375,6 +381,13 @@ function renderInbox(inbox: Inbox): void {
         </div>`;
     })
     .join("");
+
+  const remaining = inbox.total - inbox.messages.length;
+  const more =
+    remaining > 0
+      ? `<button class="load-more" data-role="load-more">Load ${Math.min(remaining, PAGE_SIZE)} more (${remaining} older)</button>`
+      : "";
+  listEl.innerHTML = rows + more;
 
   // A refresh may have dropped the open message; clear the reader if so.
   if (selectedId && !currentIds.has(selectedId)) resetReader();
@@ -583,6 +596,7 @@ function renderFolders(): void {
 async function selectFolder(id: string): Promise<void> {
   if (id === currentFolderId) return;
   currentFolderId = id;
+  loadedCount = PAGE_SIZE; // start each folder at the first page
   renderFolders();
   await refreshFromCache().catch(() => {});
   await syncFolder();
@@ -598,7 +612,7 @@ async function refreshFromCache(preserveScroll = false): Promise<void> {
   const scroll = listEl.scrollTop;
   const inbox = await invoke<Inbox>("folder_from_cache", {
     folderId: currentFolderId,
-    top: INBOX_TOP,
+    top: loadedCount,
   });
   showSignedIn();
   renderInbox(inbox);
@@ -619,7 +633,11 @@ async function syncFolder(quiet = false): Promise<void> {
     await refreshFromCache(quiet);
     await loadFolders(); // refresh unread counts
     if (!quiet) {
-      statusEl.textContent = `${currentIds.size} message(s) · synced ${fmtDate(new Date().toISOString())}`;
+      const shown =
+        currentTotal > currentIds.size
+          ? `${currentIds.size} of ${currentTotal} messages`
+          : `${currentIds.size} message(s)`;
+      statusEl.textContent = `${shown} · synced ${fmtDate(new Date().toISOString())}`;
     }
   } catch (e) {
     if (!quiet) statusEl.textContent = `Sync failed: ${e}`;
@@ -810,7 +828,13 @@ foldersEl.addEventListener("click", (e) => {
   if (btn?.dataset.fid) void selectFolder(btn.dataset.fid);
 });
 listEl.addEventListener("click", (e) => {
-  const row = (e.target as HTMLElement).closest<HTMLElement>(".msg");
+  const target = e.target as HTMLElement;
+  if (target.closest(".load-more")) {
+    loadedCount += PAGE_SIZE; // grow the window, then re-read from cache
+    void refreshFromCache(true);
+    return;
+  }
+  const row = target.closest<HTMLElement>(".msg");
   if (row?.dataset.id) void openMessage(row.dataset.id);
 });
 refreshBtn.addEventListener("click", () => void syncFolder());

@@ -195,6 +195,20 @@ impl MailStore for SqliteStore {
         Ok(rows)
     }
 
+    async fn count(&self, folder_id: &str) -> Result<u32, MailError> {
+        let folder_id = folder_id.to_string();
+        let total: i64 = self
+            .run(move |conn| {
+                conn.query_row(
+                    "SELECT COUNT(*) FROM messages WHERE folder_id = ?1",
+                    [folder_id],
+                    |row| row.get(0),
+                )
+            })
+            .await?;
+        Ok(total.max(0) as u32)
+    }
+
     async fn set_read(&self, id: &str, read: bool) -> Result<(), MailError> {
         let id = id.to_string();
         self.run(move |conn| {

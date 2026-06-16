@@ -209,7 +209,11 @@ pub trait MailStore: Send + Sync {
         messages: Vec<MessageSummary>,
     ) -> Result<(), MailError>;
     async fn remove_message(&self, id: &str) -> Result<(), MailError>;
+    /// The most recent `top` messages in a folder, newest first.
     async fn recent(&self, folder_id: &str, top: u32) -> Result<Vec<MessageSummary>, MailError>;
+    /// Total number of cached messages in a folder (the full folder is cached;
+    /// `recent` only returns a window of it).
+    async fn count(&self, folder_id: &str) -> Result<u32, MailError>;
     async fn set_read(&self, id: &str, read: bool) -> Result<(), MailError>;
     async fn load_state(&self, key: &str) -> Result<Option<String>, MailError>;
     async fn save_state(&self, key: &str, value: &str) -> Result<(), MailError>;

@@ -133,6 +133,21 @@ body,
 .msg.unread .msg-subject {
   font-weight: 700;
 }
+.load-more {
+  display: block;
+  width: 100%;
+  padding: 10px;
+  font-size: 12px;
+  font-weight: 600;
+  color: hsl(var(--p));
+  background: transparent;
+  border: none;
+  border-top: 1px solid hsl(var(--b3));
+  cursor: pointer;
+}
+.load-more:hover {
+  background: hsl(var(--b2));
+}
 
 /* Settings modal */
 .overlay {

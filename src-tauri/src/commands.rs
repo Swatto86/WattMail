@@ -37,6 +37,8 @@ pub struct MessageDto {
 pub struct InboxDto {
     pub account: Option<AccountDto>,
     pub messages: Vec<MessageDto>,
+    /// Total messages cached for the folder (window length ≤ this).
+    pub total: u32,
 }
 
 fn message_dto(m: MessageSummary) -> MessageDto {
@@ -111,6 +113,7 @@ pub async fn folder_from_cache(
             email: a.email,
         }),
         messages: cached.messages.into_iter().map(message_dto).collect(),
+        total: cached.total,
     })
 }
 

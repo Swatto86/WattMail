@@ -78,6 +78,21 @@ Entra app registration (public, not secret):
 
 ## Progress log
 
+### 2026-06-16 — Message list paging ("Load more") (v0.1.5)
+- **Clarified:** the cache was never capped — delta sync already pages the **whole** folder into
+  SQLite (follows `@odata.nextLink` to the `deltaLink`; `$top=50` is just the Graph page size). The
+  50-message limit was purely a **read/display** cap (`store.recent(… LIMIT top)` with a fixed
+  `top=50`).
+- **Fix (read side):** the list now reads a **growing window** of the already-cached folder. New
+  `MailStore::count(folder_id)` (COUNT(*), covered by `idx_messages_folder_received`) returns the
+  folder total; `CachedFolder`/`InboxDto` carry it. Frontend: `loadedCount` starts at `PAGE_SIZE`
+  (50), a **"Load more"** control grows it by `PAGE_SIZE`, switching folders resets it, and the
+  status line shows "N of M messages". Window persists across the 60s auto-sync (scroll preserved).
+- Paging beats rendering the whole folder at once: a large Inbox would otherwise rebuild tens of
+  thousands of DOM rows every auto-sync.
+- Verified: `npm run build` (incl. `tsc`), `cargo fmt --check`, `clippy --all-targets -D warnings`
+  clean. Live run pending; not yet released.
+
 ### 2026-06-16 — Cross-platform config dir + CI compile-gate (v0.1.4)
 - **Config-dir abstraction:** new `src-tauri/src/paths.rs` `data_dir()` resolves the per-user
   data dir via `dirs::data_local_dir()` (`%LOCALAPPDATA%\WattMail` / `~/Library/Application
@@ -332,9 +347,11 @@ Entra app registration (public, not secret):
 - **Cache at rest** — content columns + sync-state values are AES-256-GCM encrypted (key in the OS
   keychain). Residual: `id`, `folder_id`, `received`, and `is_read` are plaintext (needed for
   sort/filter); whole-DB encryption would need SQLCipher (heavier Windows/OpenSSL build).
-- **Sort scope** — sort is client-side over the loaded window (most-recent `INBOX_TOP`=50), so e.g.
-  "Oldest" shows the oldest of the recent 50, not the absolute oldest. Encryption blocks SQL-side
-  content sorting; a larger window or server-side date sort could extend it.
+- **Sort scope** — sort is client-side over the loaded window. The window now grows via "Load more"
+  (`PAGE_SIZE`=50 per page) instead of a fixed 50, so the user can extend it across the whole cached
+  folder; but a given sort still only orders the *loaded* rows (e.g. "Oldest" = oldest of what's
+  loaded). Encryption blocks SQL-side content sorting; a server-side date sort would make sort
+  whole-folder without loading everything.
 - **First sync pulls the whole folder** — delta enumerates the entire folder (paged), not just
   recent N. Fine for now; may want a bound/older-mail strategy for very large mailboxes.
 - **Folder polish** — (a) default-Inbox is matched by `displayName == "Inbox"` (English-only,
