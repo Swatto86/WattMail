@@ -139,14 +139,14 @@ body,
   padding: 10px;
   font-size: 12px;
   font-weight: 600;
-  color: hsl(var(--p));
+  color: oklch(var(--p));
   background: transparent;
   border: none;
-  border-top: 1px solid hsl(var(--b3));
+  border-top: 1px solid oklch(var(--b3));
   cursor: pointer;
 }
 .load-more:hover {
-  background: hsl(var(--b2));
+  background: oklch(var(--b2));
 }
 
 /* Email right-click context menu */
@@ -155,8 +155,8 @@ body,
   z-index: 50;
   min-width: 168px;
   padding: 4px;
-  background: hsl(var(--b1));
-  border: 1px solid hsl(var(--b3));
+  background: oklch(var(--b1));
+  border: 1px solid oklch(var(--b3));
   border-radius: 8px;
   box-shadow: 0 8px 24px rgb(0 0 0 / 0.3);
 }
@@ -166,22 +166,22 @@ body,
   padding: 6px 10px;
   text-align: left;
   font-size: 13px;
-  color: hsl(var(--bc));
+  color: oklch(var(--bc));
   background: transparent;
   border: none;
   border-radius: 5px;
   cursor: pointer;
 }
 .ctx-item:hover {
-  background: hsl(var(--b2));
+  background: oklch(var(--b2));
 }
 .ctx-danger {
-  color: hsl(var(--er));
+  color: oklch(var(--er));
 }
 .ctx-sep {
   height: 1px;
   margin: 4px 2px;
-  background: hsl(var(--b3));
+  background: oklch(var(--b3));
 }
 .ctx-back {
   font-weight: 600;
@@ -196,7 +196,7 @@ body,
   opacity: 0.6;
 }
 .msg.ctx-target {
-  background: hsl(var(--b2));
+  background: oklch(var(--b2));
 }
 
 /* Settings modal */

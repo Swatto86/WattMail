@@ -78,6 +78,16 @@ Entra app registration (public, not secret):
 
 ## Progress log
 
+### 2026-06-16 — Fix transparent context menu (v0.1.8)
+- The right-click menu (and `.load-more`) used `hsl(var(--b1))`, but this project's DaisyUI (4.12)
+  exposes theme tokens as **oklch** components — the rest of the app uses `oklch(var(--b1))`
+  (styles.css). `hsl(var(--bX))` is an invalid color → silent fallback to `transparent` (bg) /
+  inherited (text), so the menu rendered see-through with visible text. Swapped all custom
+  `hsl(var(...))` → `oklch(var(...))` in styles.css.
+- Recurring class of bug across our Tauri+DaisyUI apps; added a preventive bullet to the global
+  CLAUDE.md Tauri section ("match the project's color-function wrapper — grep `(var(--b1)`").
+- Verified: `npm run build` clean (no `hsl(var(` left).
+
 ### 2026-06-16 — Context menu: Move to folder (v0.1.7)
 - Adds **Move to folder…** to the email context menu. Clicking it drills the menu
   into a scrollable, depth-indented folder list (current folder excluded) with a
