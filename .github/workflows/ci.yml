@@ -43,6 +43,9 @@ jobs:
         run: cargo clippy --all-targets -- -D warnings
 
       # Full bundle (runs beforeBuildCommand + release build + installer), so a
-      # broken bundle can't ship green.
+      # broken bundle can't ship green. Skipped on release commits (marked
+      # "[release]"), where release.yml does the full build + publish — no point
+      # paying for it twice. fmt/clippy/frontend above still run.
       - name: Tauri build
+        if: ${{ !contains(github.event.head_commit.message, '[release]') }}
         run: npm run tauri build
