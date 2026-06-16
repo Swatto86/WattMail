@@ -46,14 +46,25 @@ pub async fn read_message(
     provider.message(id, allow_images).await
 }
 
-/// Mark a message as read on the server and in the local cache.
-pub async fn mark_read(
+/// Set a message's read state on the server and in the local cache.
+pub async fn set_read(
+    provider: &dyn MailProvider,
+    store: &dyn MailStore,
+    id: &str,
+    read: bool,
+) -> Result<(), MailError> {
+    provider.set_read(id, read).await?;
+    store.set_read(id, read).await
+}
+
+/// Delete a message on the server (→ Deleted Items) and drop it from the cache.
+pub async fn delete_message(
     provider: &dyn MailProvider,
     store: &dyn MailStore,
     id: &str,
 ) -> Result<(), MailError> {
-    provider.mark_read(id).await?;
-    store.set_read(id, true).await
+    provider.delete_message(id).await?;
+    store.remove_message(id).await
 }
 
 /// A cached account snapshot.

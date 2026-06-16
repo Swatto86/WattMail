@@ -5,9 +5,9 @@ use tauri::State;
 
 use crate::settings::{self, SettingsState};
 use wattmail_application::{
-    compose_forward, compose_reply, download_attachment,
+    compose_forward, compose_reply, delete_message as app_delete_message, download_attachment,
     folder_from_cache as app_folder_from_cache, list_attachments, list_folders as app_list_folders,
-    mark_read as app_mark_read, read_message, send_message as app_send_message,
+    read_message, send_message as app_send_message, set_read as app_set_read,
     sync_folder as app_sync_folder,
 };
 use wattmail_domain::{Folder, MessageSummary, OutgoingAttachment, OutgoingMessage};
@@ -166,15 +166,31 @@ pub async fn load_message(
     })
 }
 
+/// Set a message's read state on the server and in the cache.
 #[tauri::command]
-pub async fn mark_read(
+pub async fn set_read(
+    auth: State<'_, AuthService>,
+    store: State<'_, SqliteStore>,
+    id: String,
+    read: bool,
+) -> Result<(), String> {
+    let token = auth.access_token().await.map_err(|e| e.to_string())?;
+    let provider = GraphClient::new(token);
+    app_set_read(&provider, &*store, &id, read)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Delete a message (moves it to Deleted Items) and drop it from the cache.
+#[tauri::command]
+pub async fn delete_message(
     auth: State<'_, AuthService>,
     store: State<'_, SqliteStore>,
     id: String,
 ) -> Result<(), String> {
     let token = auth.access_token().await.map_err(|e| e.to_string())?;
     let provider = GraphClient::new(token);
-    app_mark_read(&provider, &*store, &id)
+    app_delete_message(&provider, &*store, &id)
         .await
         .map_err(|e| e.to_string())
 }

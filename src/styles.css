@@ -149,6 +149,44 @@ body,
   background: hsl(var(--b2));
 }
 
+/* Email right-click context menu */
+.ctx-menu {
+  position: fixed;
+  z-index: 50;
+  min-width: 168px;
+  padding: 4px;
+  background: hsl(var(--b1));
+  border: 1px solid hsl(var(--b3));
+  border-radius: 8px;
+  box-shadow: 0 8px 24px rgb(0 0 0 / 0.3);
+}
+.ctx-item {
+  display: block;
+  width: 100%;
+  padding: 6px 10px;
+  text-align: left;
+  font-size: 13px;
+  color: hsl(var(--bc));
+  background: transparent;
+  border: none;
+  border-radius: 5px;
+  cursor: pointer;
+}
+.ctx-item:hover {
+  background: hsl(var(--b2));
+}
+.ctx-danger {
+  color: hsl(var(--er));
+}
+.ctx-sep {
+  height: 1px;
+  margin: 4px 2px;
+  background: hsl(var(--b3));
+}
+.msg.ctx-target {
+  background: hsl(var(--b2));
+}
+
 /* Settings modal */
 .overlay {
   position: fixed;

@@ -142,8 +142,11 @@ pub trait MailProvider: Send + Sync {
     /// keeps remote images instead of stripping them.
     async fn message(&self, id: &str, allow_images: bool) -> Result<MessageBody, MailError>;
 
-    /// Mark a message as read.
-    async fn mark_read(&self, id: &str) -> Result<(), MailError>;
+    /// Set a message's read state.
+    async fn set_read(&self, id: &str, read: bool) -> Result<(), MailError>;
+
+    /// Delete a message (moves it to Deleted Items).
+    async fn delete_message(&self, id: &str) -> Result<(), MailError>;
 
     /// The user's mail folders.
     async fn folders(&self) -> Result<Vec<Folder>, MailError>;

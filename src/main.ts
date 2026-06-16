@@ -412,7 +412,38 @@ function markRead(id: string): void {
   row.classList.remove("unread");
   const dot = row.querySelector(".msg-dot");
   if (dot) dot.innerHTML = "";
-  void invoke("mark_read", { id }).catch(() => {});
+  void invoke("set_read", { id, read: true }).catch(() => {});
+}
+
+// Set a message's read state (context-menu action), reflecting it optimistically.
+async function setRead(id: string, read: boolean): Promise<void> {
+  const row = rowFor(id);
+  if (row) {
+    row.classList.toggle("unread", !read);
+    const dot = row.querySelector(".msg-dot");
+    if (dot) dot.innerHTML = read ? "" : `<span class="dot"></span>`;
+  }
+  try {
+    await invoke("set_read", { id, read });
+    await loadFolders(); // refresh unread badges
+  } catch (e) {
+    statusEl.textContent = `Could not update message: ${e}`;
+    await refreshFromCache(true);
+  }
+}
+
+// Delete a message (moves it to Deleted Items), updating the list optimistically.
+async function deleteMessage(id: string): Promise<void> {
+  rowFor(id)?.remove();
+  if (selectedId === id) resetReader();
+  try {
+    await invoke("delete_message", { id });
+    await refreshFromCache(true); // update loaded/total count
+    await loadFolders(); // refresh unread badges
+  } catch (e) {
+    statusEl.textContent = `Delete failed: ${e}`;
+    await refreshFromCache(true); // restore the row from cache
+  }
 }
 
 // ---- Reading pane ----
@@ -753,11 +784,12 @@ function composeNew(): void {
   openCompose({ title: "New message", to: [], cc: [], subject: "", quotedHtml: "" });
 }
 
-async function replyTo(replyAll: boolean): Promise<void> {
-  if (!lastMessage) return;
+async function replyTo(replyAll: boolean, id?: string): Promise<void> {
+  const targetId = id ?? lastMessage?.id;
+  if (!targetId) return;
   try {
     const p = await invoke<ComposeData>("prepare_reply", {
-      id: lastMessage.id,
+      id: targetId,
       replyAll,
       selfEmail: accountEmail,
     });
@@ -773,10 +805,11 @@ async function replyTo(replyAll: boolean): Promise<void> {
   }
 }
 
-async function forwardMsg(): Promise<void> {
-  if (!lastMessage) return;
+async function forwardMsg(id?: string): Promise<void> {
+  const targetId = id ?? lastMessage?.id;
+  if (!targetId) return;
   try {
-    const p = await invoke<ComposeData>("prepare_forward", { id: lastMessage.id });
+    const p = await invoke<ComposeData>("prepare_forward", { id: targetId });
     openCompose({
       title: "Forward",
       to: p.to,
@@ -837,6 +870,93 @@ listEl.addEventListener("click", (e) => {
   const row = target.closest<HTMLElement>(".msg");
   if (row?.dataset.id) void openMessage(row.dataset.id);
 });
+
+// ---- Email right-click context menu ----
+const ctxMenu = document.createElement("div");
+ctxMenu.className = "ctx-menu hidden";
+ctxMenu.setAttribute("role", "menu");
+document.body.appendChild(ctxMenu);
+let ctxTargetId: string | null = null;
+
+function hideCtxMenu(): void {
+  if (ctxMenu.classList.contains("hidden")) return;
+  ctxMenu.classList.add("hidden");
+  if (ctxTargetId) rowFor(ctxTargetId)?.classList.remove("ctx-target");
+  ctxTargetId = null;
+}
+
+function showCtxMenu(x: number, y: number, id: string, unread: boolean): void {
+  ctxTargetId = id;
+  const items: Array<{ act: string; label: string; danger?: boolean } | "sep"> = [
+    { act: "open", label: "Open" },
+    { act: "reply", label: "Reply" },
+    { act: "replyAll", label: "Reply all" },
+    { act: "forward", label: "Forward" },
+    "sep",
+    { act: "toggleRead", label: unread ? "Mark as read" : "Mark as unread" },
+    { act: "delete", label: "Delete", danger: true },
+  ];
+  ctxMenu.innerHTML = items
+    .map((it) =>
+      it === "sep"
+        ? `<div class="ctx-sep"></div>`
+        : `<button class="ctx-item${it.danger ? " ctx-danger" : ""}" data-act="${it.act}">${it.label}</button>`,
+    )
+    .join("");
+  // Reveal at the origin to measure, then clamp inside the viewport.
+  ctxMenu.style.left = "0";
+  ctxMenu.style.top = "0";
+  ctxMenu.classList.remove("hidden");
+  const left = Math.max(4, Math.min(x, window.innerWidth - ctxMenu.offsetWidth - 4));
+  const top = Math.max(4, Math.min(y, window.innerHeight - ctxMenu.offsetHeight - 4));
+  ctxMenu.style.left = `${left}px`;
+  ctxMenu.style.top = `${top}px`;
+  rowFor(id)?.classList.add("ctx-target");
+}
+
+listEl.addEventListener("contextmenu", (e) => {
+  const row = (e.target as HTMLElement).closest<HTMLElement>(".msg");
+  if (!row?.dataset.id) return; // off a row: leave the default menu
+  e.preventDefault();
+  showCtxMenu(e.clientX, e.clientY, row.dataset.id, row.classList.contains("unread"));
+});
+
+ctxMenu.addEventListener("click", (e) => {
+  const act = (e.target as HTMLElement).closest<HTMLElement>(".ctx-item")?.dataset.act;
+  const id = ctxTargetId;
+  const unread = id ? (rowFor(id)?.classList.contains("unread") ?? false) : false;
+  hideCtxMenu();
+  if (!act || !id) return;
+  switch (act) {
+    case "open":
+      void openMessage(id);
+      break;
+    case "reply":
+      void replyTo(false, id);
+      break;
+    case "replyAll":
+      void replyTo(true, id);
+      break;
+    case "forward":
+      void forwardMsg(id);
+      break;
+    case "toggleRead":
+      void setRead(id, unread); // unread → mark read; read → mark unread
+      break;
+    case "delete":
+      void deleteMessage(id);
+      break;
+  }
+});
+
+document.addEventListener("click", (e) => {
+  if (!ctxMenu.contains(e.target as Node)) hideCtxMenu();
+});
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape") hideCtxMenu();
+});
+window.addEventListener("blur", hideCtxMenu);
+listEl.addEventListener("scroll", hideCtxMenu);
 refreshBtn.addEventListener("click", () => void syncFolder());
 sortSelect.addEventListener("change", () => {
   sortMode = sortSelect.value as SortMode;

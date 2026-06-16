@@ -196,25 +196,29 @@ impl MailProvider for GraphClient {
         })
     }
 
-    async fn mark_read(&self, id: &str) -> Result<(), MailError> {
+    async fn set_read(&self, id: &str, read: bool) -> Result<(), MailError> {
         let response = self
             .http
             .patch(message_endpoint(id).as_str())
             .bearer_auth(&self.access_token)
-            .json(&serde_json::json!({ "isRead": true }))
+            .json(&serde_json::json!({ "isRead": read }))
             .send()
             .await
             .map_err(|e| MailError::Network(e.to_string()))?;
+        check_status(response).await?;
+        Ok(())
+    }
 
-        if response.status() == reqwest::StatusCode::UNAUTHORIZED {
-            return Err(MailError::NotAuthenticated);
-        }
-        if !response.status().is_success() {
-            return Err(MailError::Api {
-                status: response.status().as_u16(),
-                message: response.text().await.unwrap_or_default(),
-            });
-        }
+    async fn delete_message(&self, id: &str) -> Result<(), MailError> {
+        // Graph DELETE on a message moves it to Deleted Items (soft delete).
+        let response = self
+            .http
+            .delete(message_endpoint(id).as_str())
+            .bearer_auth(&self.access_token)
+            .send()
+            .await
+            .map_err(|e| MailError::Network(e.to_string()))?;
+        check_status(response).await?;
         Ok(())
     }
 
@@ -431,6 +435,21 @@ struct DeltaItem {
     is_read: Option<bool>,
     #[serde(rename = "@removed")]
     removed: Option<serde_json::Value>,
+}
+
+/// Map a Graph response to an error on non-success (401 → `NotAuthenticated`,
+/// other failures → `Api`). Returns the response unchanged on success, for
+/// callers that go on to read the body.
+async fn check_status(response: reqwest::Response) -> Result<reqwest::Response, MailError> {
+    if response.status() == reqwest::StatusCode::UNAUTHORIZED {
+        return Err(MailError::NotAuthenticated);
+    }
+    if !response.status().is_success() {
+        let status = response.status().as_u16();
+        let message = response.text().await.unwrap_or_default();
+        return Err(MailError::Api { status, message });
+    }
+    Ok(response)
 }
 
 /// Build the `/me/messages/{id}` endpoint with the opaque id safely encoded as a

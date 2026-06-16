@@ -78,6 +78,25 @@ Entra app registration (public, not secret):
 
 ## Progress log
 
+### 2026-06-16 — Right-click context menu on emails (v0.1.6)
+- **Custom webview context menu** on message-list rows (matches the all-custom UI; themed via
+  DaisyUI CSS vars; acts on the right-clicked row, not just the open message). Actions: Open, Reply,
+  Reply all, Forward, Mark as read/unread (toggles on the row's state), Delete (→ Deleted Items).
+  Built in `main.ts` (element appended to body, viewport-clamped, dismissed on click-away / Esc /
+  scroll / window blur); off-row right-clicks keep the default menu.
+- **New backend actions:** `MailProvider::mark_read(id)` generalized to `set_read(id, read)` (PATCH
+  `isRead`); added `delete_message(id)` (Graph `DELETE /me/messages/{id}` → soft-delete to Deleted
+  Items). Threaded through application (`set_read`/`delete_message` use-cases: provider + cache) and
+  commands (`set_read`, `delete_message`; old `mark_read` command replaced). Added a `check_status`
+  helper in the Graph client to de-dup response validation. `Mail.ReadWrite` already covers
+  delete/move — no new scope.
+- Frontend: `replyTo`/`forwardMsg` now take an optional `id` (default = open message) so the menu
+  and the reader toolbar share one path; delete/read changes update optimistically then refresh
+  unread badges + loaded/total count.
+- Verified: `npm run build` (incl. `tsc`), `cargo fmt --check`, `clippy --all-targets -D warnings`
+  clean. Live run pending; not yet released. Deferred: Move-to-folder (needs a folder picker);
+  reader-pane right-click.
+
 ### 2026-06-16 — Message list paging ("Load more") (v0.1.5)
 - **Clarified:** the cache was never capped — delta sync already pages the **whole** folder into
   SQLite (follows `@odata.nextLink` to the `deltaLink`; `$top=50` is just the Graph page size). The
