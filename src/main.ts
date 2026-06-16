@@ -295,6 +295,7 @@ function showSignedOut(): void {
   currentFolderId = null;
   folders = [];
   foldersEl.innerHTML = "";
+  void invoke("set_unread", { count: 0 }).catch(() => {});
   resetReader();
   statusEl.textContent = "Not signed in";
 }
@@ -540,6 +541,9 @@ async function loadFolders(): Promise<void> {
     currentFolderId = inbox?.id ?? folders[0]?.id ?? null;
   }
   renderFolders();
+  // Reflect the inbox unread count in the system tray (icon + tooltip).
+  const inboxFolder = folders.find((f) => f.name.toLowerCase() === "inbox");
+  void invoke("set_unread", { count: inboxFolder?.unreadCount ?? 0 }).catch(() => {});
 }
 
 function renderFolders(): void {

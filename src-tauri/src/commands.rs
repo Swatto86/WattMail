@@ -356,3 +356,9 @@ pub fn set_close_to_tray(state: State<'_, SettingsState>, value: bool) -> Result
     };
     settings::save(&updated).map_err(|e| e.to_string())
 }
+
+/// Update the tray icon + tooltip to reflect the inbox unread count.
+#[tauri::command]
+pub fn set_unread(app: tauri::AppHandle, count: u32) {
+    crate::update_tray(&app, count);
+}

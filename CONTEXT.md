@@ -78,6 +78,16 @@ Entra app registration (public, not secret):
 
 ## Progress log
 
+### 2026-06-16 — Tray unread indicator + new-mail sound
+- A red-badged tray icon variant (`src-tauri/icons/tray-unread.png`, embedded via
+  `include_image!`) is shown when the **Inbox** has unread mail; the tray tooltip reads
+  "WattMail — N unread email(s)". `update_tray(app, count)` + a `set_unread` command, driven
+  from the frontend after each folder sync (updates within the 60s auto-sync).
+- **New-mail sound:** `update_tray` tracks the previous count (`static AtomicI64`) and plays the
+  Windows notification sound (`user32!MessageBeep(MB_ICONASTERISK)` via inline FFI — no dep) when
+  the count **increases**, so it only chimes on genuinely new mail, not on every sync.
+- Verified: builds, `npm run build` clean, `clippy --all-targets -D warnings` clean.
+
 ### 2026-06-16 — Rich-text compose + GitHub repo & CI/release
 - **Rich-text compose:** the compose body is a `contenteditable` editor with a formatting toolbar
   (bold/italic/underline/lists/link/clear) via `execCommand`; paste is coerced to plain text; the

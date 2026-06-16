@@ -6,6 +6,7 @@
 mod commands;
 mod settings;
 
+use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::RwLock;
 
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
@@ -80,6 +81,7 @@ pub fn run() {
             commands::mark_read,
             commands::get_close_to_tray,
             commands::set_close_to_tray,
+            commands::set_unread,
         ])
         .run(tauri::generate_context!())
         .expect("error while running WattMail");
@@ -133,6 +135,52 @@ fn cache_db_path() -> std::path::PathBuf {
         .unwrap_or_else(std::env::temp_dir)
         .join("WattMail")
         .join("cache.db")
+}
+
+/// Last reported inbox unread count; `-1` until the first report. Used to play a
+/// sound only when the count *increases* (new mail), not on every sync.
+static LAST_UNREAD: AtomicI64 = AtomicI64::new(-1);
+
+/// Play the system notification sound (respects the user's sound scheme).
+#[cfg(windows)]
+fn play_notify_sound() {
+    // user32!MessageBeep(MB_ICONASTERISK) — plays the "Asterisk" scheme sound,
+    // asynchronously. Declared inline to avoid a windows-sys dependency.
+    #[link(name = "user32")]
+    extern "system" {
+        fn MessageBeep(utype: u32) -> i32;
+    }
+    const MB_ICONASTERISK: u32 = 0x0000_0040;
+    unsafe {
+        MessageBeep(MB_ICONASTERISK);
+    }
+}
+
+#[cfg(not(windows))]
+fn play_notify_sound() {}
+
+/// Update the tray icon + tooltip to reflect the inbox unread count, and chime
+/// when the count increases.
+pub(crate) fn update_tray(app: &AppHandle, unread: u32) {
+    let previous = LAST_UNREAD.swap(i64::from(unread), Ordering::Relaxed);
+    if previous >= 0 && i64::from(unread) > previous {
+        play_notify_sound();
+    }
+
+    let Some(tray) = app.tray_by_id("main") else {
+        return;
+    };
+    let tooltip = match unread {
+        0 => "WattMail".to_string(),
+        1 => "WattMail — 1 unread email".to_string(),
+        n => format!("WattMail — {n} unread emails"),
+    };
+    let _ = tray.set_tooltip(Some(tooltip));
+    if unread > 0 {
+        let _ = tray.set_icon(Some(tauri::include_image!("icons/tray-unread.png")));
+    } else if let Some(icon) = app.default_window_icon().cloned() {
+        let _ = tray.set_icon(Some(icon));
+    }
 }
 
 /// Bring the main window to the foreground.

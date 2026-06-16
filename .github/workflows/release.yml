@@ -31,5 +31,5 @@ jobs:
           tagName: ${{ github.ref_name }}
           releaseName: WattMail ${{ github.ref_name }}
           releaseBody: Automated build of WattMail ${{ github.ref_name }}.
-          releaseDraft: true
+          releaseDraft: false
           prerelease: false
