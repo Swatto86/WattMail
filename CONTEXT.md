@@ -78,6 +78,22 @@ Entra app registration (public, not secret):
 
 ## Progress log
 
+### 2026-06-16 — Cross-platform config dir + CI compile-gate (v0.1.4)
+- **Config-dir abstraction:** new `src-tauri/src/paths.rs` `data_dir()` resolves the per-user
+  data dir via `dirs::data_local_dir()` (`%LOCALAPPDATA%\WattMail` / `~/Library/Application
+  Support/WattMail` / `~/.local/share/WattMail`). On Windows this equals the old hand-rolled
+  `%LOCALAPPDATA%\WattMail` path **exactly**, so existing caches/settings are found in place — no
+  migration. Both `cache_db_path()` (lib.rs) and `settings_path()` (settings.rs) now build on it.
+  Settings persistence previously **silently failed off-Windows** (`LOCALAPPDATA` unset → every
+  save errored, every load reverted to defaults); now infallible everywhere.
+- **CI cross-check job:** `ci.yml` gains a `cross-check` matrix (`macos-latest`, `ubuntu-22.04`)
+  running fmt + `clippy --all-targets -D warnings`, with the Tauri Linux system deps. This is the
+  first time the `cfg(not(windows))` branch (e.g. the no-op `play_notify_sound`) and the
+  `apple-native` / `sync-secret-service` keyring backends are actually **compiled** — previously
+  gated by inspection only, since the existing `verify` job is Windows-only.
+- Verified locally (Windows): `npm run build`, `cargo fmt --check`, `clippy --all-targets -D
+  warnings` all clean. macOS/Linux compile is exercised by the new CI job (not run locally).
+
 ### 2026-06-16 — Start with Windows (hidden in tray) (v0.1.3)
 - **Autostart:** `tauri-plugin-autostart` registers WattMail at login with a `--hidden` arg
   (Windows `HKCU\…\Run`). A login-launched instance detects the flag (`StartHidden` managed state),
@@ -262,7 +278,7 @@ Entra app registration (public, not secret):
 | — | Image proxy (server-side inline), cache encryption (AES-256-GCM), sort | ✅ done |
 | — | Rich-text compose; GitHub repo + CI/release pipeline | ✅ done |
 | — | Auto-update (Tauri updater, signed rolling-release `latest.json`); repo public | ✅ done |
-| — | Cross-platform pass (macOS/Linux config dir + keyring backends) | ⬜ backlog |
+| — | Cross-platform pass — config dir abstraction + CI compile-gate (macOS/Linux) | 🟡 config dir + CI done; live macOS/Linux run pending |
 | — | Second provider (IMAP/SMTP) behind the contract | ⬜ backlog |
 
 ---
@@ -297,10 +313,12 @@ Entra app registration (public, not secret):
     html.rs`), so the SwatBox table/ticks render. Residual: CSS `url(...)` backgrounds are always
     stripped (even with "load images"), and `<style>`-block CSS is still dropped — only inline
     `style` attributes are honoured.
-- **Cross-platform secrets/config** — macOS Keychain & Linux Secret Service have no
-  2560-char limit (chunking unnecessary there). Decide: keep chunking uniform, or
-  store the full blob on non-Windows. Settings path is currently Windows-only
-  (`%LOCALAPPDATA%`) — needs a config-dir abstraction.
+- **Cross-platform secrets/config** — config/cache paths now go through `paths::data_dir()`
+  (`dirs`-backed, cross-platform) and CI compiles the macOS/Linux gates, but **nothing has been
+  run live on macOS/Linux yet** — CI is compile-only (clippy, not a packaged bundle). Residual:
+  token chunking stays uniform across platforms (harmless but unnecessary on macOS Keychain /
+  Linux Secret Service, which have no 2560-char limit); decide later whether to store the full
+  blob off-Windows.
 - **Attachment limits** — outgoing attachments ride inline in `sendMail` (~3 MB total Graph limit);
   larger files need an upload session (deferred). Only `fileAttachment`s are listed — `itemAttachment`
   (embedded messages) and `referenceAttachment` (links) aren't shown. Outgoing MIME type is guessed
@@ -329,9 +347,11 @@ Entra app registration (public, not secret):
   received mail in place.**
 - **npm audit** — `npm install` flags 2 high-severity advisories in dev-only deps
   (transitive under vite/tauri-cli). Not shipped in the binary; review before release.
-- **CI / release** — no CI yet. Per the global Tauri rules, CI must run the full
-  `tauri build` (not `cargo build --lib`), with `actions/setup-node`, and pin the
-  Rust toolchain to match `rust-toolchain.toml`.
+- **CI / release** — done. `ci.yml` `verify` (windows-latest) runs fmt + `clippy --all-targets`
+  + full `npm run tauri build`; `cross-check` (macos-latest, ubuntu-22.04) runs fmt + clippy to
+  compile the non-Windows gates. `release.yml` tags → signed NSIS rolling release. Toolchain
+  pinned (`1.96.0`) to match `rust-toolchain.toml`. Residual: no macOS/Linux *bundle* in CI yet
+  (compile-only) and no live run on those platforms.
 
 ## Constraints / gotchas
 
@@ -343,9 +363,10 @@ Entra app registration (public, not secret):
   sandboxed frame. Email content is otherwise isolated: `sandbox="allow-same-origin"`
   (no `allow-scripts`) disables email JS while letting the parent intercept link clicks
   and open them externally via the opener plugin.
-- **Local cache** is `%LOCALAPPDATA%\WattMail\cache.db` (Windows-only path for now, like
-  settings). `rusqlite` uses the **bundled** SQLite (compiled from source via the MSVC
-  toolchain), so there's no system SQLite dependency to ship.
+- **Local cache** is `cache.db` in `paths::data_dir()` (cross-platform; `%LOCALAPPDATA%\WattMail`
+  on Windows, `dirs`-backed elsewhere), alongside `settings.json`. `rusqlite` uses the **bundled**
+  SQLite (compiled from source via the MSVC toolchain), so there's no system SQLite dependency to
+  ship.
 - **Release profile** lives at the workspace root (`[profile.release]`); member-crate
   profiles are ignored.
 - **`panic = "abort"`** in release — no test relies on unwinding.

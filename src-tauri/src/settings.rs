@@ -1,8 +1,5 @@
-//! User settings, persisted to `%LOCALAPPDATA%\WattMail\settings.json`.
-//!
-//! Windows-only path for now; a cross-platform config-dir abstraction comes with
-//! the macOS/Linux work. On a platform without `LOCALAPPDATA`, settings fall back
-//! to defaults and saves are a no-op error surfaced to the caller.
+//! User settings, persisted to `settings.json` in WattMail's per-user data dir
+//! (see [`crate::paths::data_dir`]).
 
 use std::io;
 use std::path::PathBuf;
@@ -28,20 +25,19 @@ impl Default for Settings {
 /// Tauri-managed settings, shared with the window-close handler.
 pub struct SettingsState(pub RwLock<Settings>);
 
-fn settings_path() -> Option<PathBuf> {
-    let base = std::env::var_os("LOCALAPPDATA")?;
-    Some(PathBuf::from(base).join("WattMail").join("settings.json"))
+fn settings_path() -> PathBuf {
+    crate::paths::data_dir().join("settings.json")
 }
 
 pub fn load() -> Settings {
-    settings_path()
-        .and_then(|p| std::fs::read(p).ok())
+    std::fs::read(settings_path())
+        .ok()
         .and_then(|bytes| serde_json::from_slice(&bytes).ok())
         .unwrap_or_default()
 }
 
 pub fn save(settings: &Settings) -> io::Result<()> {
-    let path = settings_path().ok_or_else(|| io::Error::other("LOCALAPPDATA not set"))?;
+    let path = settings_path();
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
     }

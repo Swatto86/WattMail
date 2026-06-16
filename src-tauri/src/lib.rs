@@ -4,6 +4,7 @@
 //! the window, tray, and settings. No domain logic lives here.
 
 mod commands;
+mod paths;
 mod settings;
 
 use std::sync::atomic::{AtomicI64, Ordering};
@@ -148,14 +149,11 @@ fn build_tray(app: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// Path to the local message cache (`%LOCALAPPDATA%\WattMail\cache.db` on Windows;
-/// a cross-platform config-dir abstraction lands with the macOS/Linux work).
+/// Path to the local message cache, in WattMail's per-user data dir
+/// (`%LOCALAPPDATA%\WattMail` / `~/Library/Application Support/WattMail` /
+/// `~/.local/share/WattMail`). `SqliteStore::open` creates the parent on demand.
 fn cache_db_path() -> std::path::PathBuf {
-    std::env::var_os("LOCALAPPDATA")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(std::env::temp_dir)
-        .join("WattMail")
-        .join("cache.db")
+    paths::data_dir().join("cache.db")
 }
 
 /// Last reported inbox unread count; `-1` until the first report. Used to play a
