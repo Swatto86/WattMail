@@ -783,17 +783,37 @@ function parseReceived(value: string): Hop {
 function renderHeaders(subject: string): void {
   const sections: string[] = [];
 
+  // The To: header is sender-supplied. Corroborate it against a delivery header
+  // (Received … for / Delivered-To); flag it when nothing backs it up, or when
+  // the delivery address disagrees — so To: is never read as proof of the real
+  // recipient. (The true envelope recipient often isn't recorded in headers at
+  // all, in which case only a server-side message trace can confirm it.)
+  const toHeader = headerValue("To");
+  const deliveredAddr = deliveredTo();
+  let toNote: string | undefined;
+  if (toHeader) {
+    if (!deliveredAddr) {
+      toNote =
+        "To: is taken from the message header and is sender-supplied — no delivery header (Received … for / Delivered-To) corroborates it here, so it is not proof of the real recipient. Confirm the actual recipient with a server-side message trace.";
+    } else if (!toHeader.toLowerCase().includes(deliveredAddr.toLowerCase())) {
+      toNote = `Delivered to ${deliveredAddr} — this differs from the To: header, so the To: address is not where the message was actually delivered.`;
+    }
+  }
   sections.push(
-    summaryCard("Overview", [
-      ["Subject", headerValue("Subject") ?? subject],
-      ["Date", headerValue("Date")],
-      ["From", headerValue("From")],
-      ["Return-Path", headerValue("Return-Path")],
-      ["Reply-To", headerValue("Reply-To")],
-      ["To", headerValue("To")],
-      ["Delivered to", deliveredTo()],
-      ["Message-ID", headerValue("Message-ID")],
-    ]),
+    summaryCard(
+      "Overview",
+      [
+        ["Subject", headerValue("Subject") ?? subject],
+        ["Date", headerValue("Date")],
+        ["From", headerValue("From")],
+        ["Return-Path", headerValue("Return-Path")],
+        ["Reply-To", headerValue("Reply-To")],
+        ["To", toHeader],
+        ["Delivered to", deliveredAddr],
+        ["Message-ID", headerValue("Message-ID")],
+      ],
+      toNote,
+    ),
   );
 
   const verdicts = parseAuthResults();
@@ -824,12 +844,13 @@ function renderHeaders(subject: string): void {
   applyHeaderFilter();
 }
 
-function summaryCard(title: string, rows: Array<[string, string | null]>): string {
+function summaryCard(title: string, rows: Array<[string, string | null]>, note?: string): string {
   const body = rows
     .filter(([, v]) => v && v.trim())
     .map(([k, v]) => `<div class="hdr-row"><span class="hdr-key">${esc(k)}</span><span class="hdr-val">${esc(v!)}</span></div>`)
     .join("");
-  return `<div class="hdr-card"><div class="hdr-card-title">${esc(title)}</div>${body}</div>`;
+  const footnote = note ? `<div class="hdr-note">&#9888; ${esc(note)}</div>` : "";
+  return `<div class="hdr-card"><div class="hdr-card-title">${esc(title)}</div>${body}${footnote}</div>`;
 }
 
 function renderSpamCard(): string | null {

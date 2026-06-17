@@ -315,6 +315,18 @@ body,
   font-size: 12.5px;
   padding: 2px 0;
 }
+/* Caution footnote (e.g. an unverifiable To:). Warning *tint* for coding, but
+   --bc text so it stays legible on the light theme. */
+.hdr-note {
+  margin-top: 8px;
+  padding: 6px 8px;
+  border-radius: 6px;
+  background: oklch(var(--wa) / 0.12);
+  border: 1px solid oklch(var(--wa) / 0.35);
+  font-size: 11.5px;
+  line-height: 1.45;
+  color: oklch(var(--bc) / 0.85);
+}
 .hdr-key {
   flex-shrink: 0;
   min-width: 116px;
