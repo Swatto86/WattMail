@@ -7,7 +7,7 @@ use crate::settings::{self, SettingsState};
 use wattmail_application::{
     compose_forward, compose_reply, delete_message as app_delete_message, download_attachment,
     folder_from_cache as app_folder_from_cache, list_attachments, list_folders as app_list_folders,
-    move_message as app_move_message, read_message, send_message as app_send_message,
+    move_message as app_move_message, read_headers, read_message, send_message as app_send_message,
     set_read as app_set_read, sync_folder as app_sync_folder,
 };
 use wattmail_domain::{Folder, MessageSummary, OutgoingAttachment, OutgoingMessage};
@@ -164,6 +164,33 @@ pub async fn load_message(
         html: body.html,
         remote_blocked: body.remote_content_blocked,
     })
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HeaderDto {
+    pub name: String,
+    pub value: String,
+}
+
+/// Fetch a message's raw internet headers (RFC 5322), in transit order.
+#[tauri::command]
+pub async fn message_headers(
+    auth: State<'_, AuthService>,
+    id: String,
+) -> Result<Vec<HeaderDto>, String> {
+    let token = auth.access_token().await.map_err(|e| e.to_string())?;
+    let provider = GraphClient::new(token);
+    let headers = read_headers(&provider, &id)
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(headers
+        .into_iter()
+        .map(|h| HeaderDto {
+            name: h.name,
+            value: h.value,
+        })
+        .collect())
 }
 
 /// Set a message's read state on the server and in the cache.

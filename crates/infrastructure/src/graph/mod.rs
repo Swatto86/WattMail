@@ -7,7 +7,8 @@ use async_trait::async_trait;
 use base64::Engine;
 use wattmail_domain::{
     Attachment, EmailAddress, Folder, MailError, MailProvider, MessageBody, MessageChange,
-    MessageSummary, OutgoingAttachment, OutgoingMessage, SyncBatch, SyncToken, UserProfile,
+    MessageHeader, MessageSummary, OutgoingAttachment, OutgoingMessage, SyncBatch, SyncToken,
+    UserProfile,
 };
 
 const GRAPH_BASE: &str = "https://graph.microsoft.com/v1.0";
@@ -194,6 +195,36 @@ impl MailProvider for GraphClient {
             html,
             remote_content_blocked: sanitized.remote_content_blocked,
         })
+    }
+
+    async fn message_headers(&self, id: &str) -> Result<Vec<MessageHeader>, MailError> {
+        // `internetMessageHeaders` is not returned by default; it must be
+        // explicitly selected. Graph returns the headers in transit order
+        // (newest `Received:` first), which we preserve for tracing.
+        //
+        // Graph does not guarantee the *full* set: on large messages it may
+        // truncate or omit the property, surfacing here as an empty list via
+        // `unwrap_or_default`. So an empty/short result is not proof that the
+        // message genuinely had no (or few) headers.
+        let mut url = message_endpoint(id);
+        url.set_query(Some("$select=internetMessageHeaders"));
+
+        let message: GraphHeaders = self
+            .get(url.as_str())
+            .await?
+            .json()
+            .await
+            .map_err(|e| MailError::Decode(e.to_string()))?;
+
+        Ok(message
+            .internet_message_headers
+            .unwrap_or_default()
+            .into_iter()
+            .map(|h| MessageHeader {
+                name: h.name,
+                value: h.value,
+            })
+            .collect())
     }
 
     async fn set_read(&self, id: &str, read: bool) -> Result<(), MailError> {
@@ -431,6 +462,18 @@ struct GraphFullMessage {
 struct GraphBody {
     content_type: String,
     content: String,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GraphHeaders {
+    internet_message_headers: Option<Vec<GraphHeader>>,
+}
+
+#[derive(serde::Deserialize)]
+struct GraphHeader {
+    name: String,
+    value: String,
 }
 
 #[derive(serde::Deserialize)]

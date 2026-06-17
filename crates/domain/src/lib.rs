@@ -72,6 +72,15 @@ pub struct MessageBody {
     pub remote_content_blocked: bool,
 }
 
+/// A single internet message header (an RFC 5322 `name: value` pair), as
+/// returned by the provider. Order is preserved so the `Received:` chain and
+/// other repeated headers can be read as a trace.
+#[derive(Debug, Clone)]
+pub struct MessageHeader {
+    pub name: String,
+    pub value: String,
+}
+
 /// Metadata for a received message attachment (non-inline files).
 #[derive(Debug, Clone)]
 pub struct Attachment {
@@ -141,6 +150,10 @@ pub trait MailProvider: Send + Sync {
     /// A single message with its sanitized, render-ready body. `allow_images`
     /// keeps remote images instead of stripping them.
     async fn message(&self, id: &str, allow_images: bool) -> Result<MessageBody, MailError>;
+
+    /// The message's raw internet headers (RFC 5322), in provider order — for
+    /// tracing a message's origin and delivery path.
+    async fn message_headers(&self, id: &str) -> Result<Vec<MessageHeader>, MailError>;
 
     /// Set a message's read state.
     async fn set_read(&self, id: &str, read: bool) -> Result<(), MailError>;

@@ -5,7 +5,7 @@
 
 use wattmail_domain::{
     Attachment, Folder, MailError, MailProvider, MailStore, MessageBody, MessageChange,
-    MessageSummary, OutgoingMessage, SyncToken, UserProfile,
+    MessageHeader, MessageSummary, OutgoingMessage, SyncToken, UserProfile,
 };
 
 const ACCOUNT_NAME_KEY: &str = "account.displayName";
@@ -44,6 +44,14 @@ pub async fn read_message(
     allow_images: bool,
 ) -> Result<MessageBody, MailError> {
     provider.message(id, allow_images).await
+}
+
+/// Fetch a message's raw internet headers, for tracing its origin and path.
+pub async fn read_headers(
+    provider: &dyn MailProvider,
+    id: &str,
+) -> Result<Vec<MessageHeader>, MailError> {
+    provider.message_headers(id).await
 }
 
 /// Set a message's read state on the server and in the local cache.

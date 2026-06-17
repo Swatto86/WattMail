@@ -59,6 +59,10 @@ interface AttachmentInfo {
   contentType: string;
   size: number;
 }
+interface HeaderItem {
+  name: string;
+  value: string;
+}
 
 // The whole folder is cached locally; the list reads a growing window of it.
 // "Load more" grows the window by PAGE_SIZE; switching folders resets it.
@@ -263,6 +267,20 @@ appRoot.innerHTML = /* html */ `
       </div>
     </div>
   </div>
+
+  <div id="headers-overlay" class="overlay hidden">
+    <div class="settings-panel headers-panel">
+      <div class="headers-head">
+        <div class="settings-title" id="headers-title">Message headers</div>
+        <div class="headers-tools">
+          <input id="headers-filter" class="input input-bordered input-xs" placeholder="Filter raw headers…" autocomplete="off" />
+          <button id="headers-copy" class="btn btn-xs" title="Copy all headers to the clipboard">Copy all</button>
+          <button id="headers-close" class="btn btn-xs">Close</button>
+        </div>
+      </div>
+      <div id="headers-body" class="headers-body"></div>
+    </div>
+  </div>
 `;
 
 const accountEl = document.querySelector<HTMLDivElement>("#account")!;
@@ -304,6 +322,12 @@ const composeCancel = document.querySelector<HTMLButtonElement>("#compose-cancel
 const composeSendBtn = document.querySelector<HTMLButtonElement>("#compose-send")!;
 const cAttachBtn = document.querySelector<HTMLButtonElement>("#c-attach")!;
 const cAttachments = document.querySelector<HTMLDivElement>("#c-attachments")!;
+const headersOverlay = document.querySelector<HTMLDivElement>("#headers-overlay")!;
+const headersTitle = document.querySelector<HTMLDivElement>("#headers-title")!;
+const headersBody = document.querySelector<HTMLDivElement>("#headers-body")!;
+const headersFilter = document.querySelector<HTMLInputElement>("#headers-filter")!;
+const headersCopyBtn = document.querySelector<HTMLButtonElement>("#headers-copy")!;
+const headersCloseBtn = document.querySelector<HTMLButtonElement>("#headers-close")!;
 
 // ---- View state ----
 let selectedId: string | null = null;
@@ -491,6 +515,7 @@ function renderReader(msg: MessageView): void {
         <button id="reply-btn" class="btn btn-xs">Reply</button>
         <button id="reply-all-btn" class="btn btn-xs">Reply all</button>
         <button id="forward-btn" class="btn btn-xs">Forward</button>
+        <button id="headers-btn" class="btn btn-xs btn-ghost" title="View raw message headers and trace its origin">Headers</button>
       </div>
     </div>
     <div id="reader-attachments" class="reader-attachments"></div>
@@ -509,6 +534,9 @@ function renderReader(msg: MessageView): void {
   readerEl
     .querySelector<HTMLButtonElement>("#forward-btn")
     ?.addEventListener("click", () => void forwardMsg());
+  readerEl
+    .querySelector<HTMLButtonElement>("#headers-btn")
+    ?.addEventListener("click", () => void openHeaders(msg.id, msg.subject));
 
   const frame = readerEl.querySelector<HTMLIFrameElement>(".reader-frame")!;
   frame.addEventListener("load", () => wireFrameLinks(frame));
@@ -581,6 +609,318 @@ function wrapEmailHtml(inner: string): string {
   pre { white-space: pre-wrap; }
   blockquote { margin: 0 0 0 12px; padding-left: 12px; border-left: 3px solid #cbd5e1; color: #475569; }
 </style></head><body>${inner}</body></html>`;
+}
+
+// ---- Message headers viewer ----
+// Fetch a message's raw internet headers and present a trace-oriented view: a
+// parsed summary of the fields that reveal where a message came from and why it
+// was filtered, plus the full raw header list with the key fields highlighted.
+
+// Header names worth highlighting in the raw list when tracing a message.
+const KEY_HEADERS = new Set([
+  "received",
+  "authentication-results",
+  "received-spf",
+  "return-path",
+  "from",
+  "sender",
+  "reply-to",
+  "to",
+  "delivered-to",
+  "dkim-signature",
+  "message-id",
+  "date",
+  "x-forefront-antispam-report",
+  "x-microsoft-antispam",
+]);
+
+// Microsoft spam-filter verdict categories (the CAT field), expanded to plain
+// English. Unknown codes are shown as-is.
+const CAT_MEANINGS: Record<string, string> = {
+  SPM: "spam",
+  HSPM: "high-confidence spam",
+  PHSH: "phishing",
+  MALW: "malware",
+  SPOOF: "spoofing",
+  BULK: "bulk mail",
+  DIMP: "domain impersonation",
+  UIMP: "user impersonation",
+  GIMP: "intra-org impersonation",
+  AMP: "anti-malware policy",
+};
+
+let currentHeaders: HeaderItem[] = [];
+
+async function openHeaders(id: string, subject: string): Promise<void> {
+  // textContent (not innerHTML) — the subject is shown verbatim, never parsed.
+  headersTitle.textContent = subject ? `Message headers — ${subject}` : "Message headers";
+  headersFilter.value = "";
+  headersBody.innerHTML = `<div class="headers-loading">Loading headers…</div>`;
+  headersOverlay.classList.remove("hidden");
+  try {
+    currentHeaders = await invoke<HeaderItem[]>("message_headers", { id });
+  } catch (e) {
+    headersBody.innerHTML = `<div class="headers-loading">Could not load headers: ${esc(String(e))}</div>`;
+    return;
+  }
+  if (currentHeaders.length === 0) {
+    headersBody.innerHTML = `<div class="headers-loading">No internet headers are available for this message.</div>`;
+    return;
+  }
+  renderHeaders(subject);
+}
+
+function closeHeaders(): void {
+  headersOverlay.classList.add("hidden");
+}
+
+// First / all values for a header name (case-insensitive). Repeated headers
+// (notably Received) keep their provider order.
+function headerValue(name: string): string | null {
+  const lower = name.toLowerCase();
+  return currentHeaders.find((h) => h.name.toLowerCase() === lower)?.value ?? null;
+}
+function headerValues(name: string): string[] {
+  const lower = name.toLowerCase();
+  return currentHeaders.filter((h) => h.name.toLowerCase() === lower).map((h) => h.value);
+}
+
+// The address the message was actually delivered to — an explicit envelope
+// header if present, else the `for <addr>` clause of the Received chain. This
+// is what explains a message arriving at an address that isn't your own.
+function deliveredTo(): string | null {
+  const explicit =
+    headerValue("Delivered-To") ?? headerValue("X-Envelope-To") ?? headerValue("X-Original-To");
+  if (explicit) return explicit;
+  for (const received of headerValues("Received")) {
+    const m = received.match(/for\s+<?([^\s;>]+@[^\s;>]+)>?/i);
+    if (m) return m[1];
+  }
+  return null;
+}
+
+// Pull the spf / dkim / dmarc / compauth verdicts out of Authentication-Results.
+interface Verdict {
+  method: string;
+  result: string;
+}
+// Collect spf/dkim/dmarc/compauth verdicts across *every* Authentication-Results
+// header (Exchange Online can stamp several — ARC, connectors, forwarding) and
+// every token within each (a header may carry one `dkim=` per signature). Each
+// distinct method+result is surfaced once, so a passing and a failing signature
+// both show instead of the first silently winning.
+function parseAuthResults(): Verdict[] {
+  const raw = headerValues("Authentication-Results").join("; ");
+  if (!raw) return [];
+  const out: Verdict[] = [];
+  const seen = new Set<string>();
+  for (const method of ["spf", "dkim", "dmarc", "compauth"]) {
+    for (const m of raw.matchAll(new RegExp(`\\b${method}=([a-z]+)`, "gi"))) {
+      const result = m[1].toLowerCase();
+      const key = `${method}:${result}`;
+      if (!seen.has(key)) {
+        seen.add(key);
+        out.push({ method: method.toUpperCase(), result });
+      }
+    }
+  }
+  return out;
+}
+function verdictClass(result: string): string {
+  if (result === "pass") return "pass";
+  if (result === "fail" || result === "hardfail" || result === "permerror") return "fail";
+  if (result === "none" || result === "neutral") return "neutral";
+  return "warn"; // softfail, temperror, bestguesspass, …
+}
+
+// Split a `key:value;key:value` header (e.g. X-Forefront-Antispam-Report) into a
+// keyed map. Keys are upper-cased; values keep their case.
+function parseSegments(raw: string): Map<string, string> {
+  const map = new Map<string, string>();
+  for (const part of raw.split(";")) {
+    const idx = part.indexOf(":");
+    if (idx > 0) map.set(part.slice(0, idx).trim().toUpperCase(), part.slice(idx + 1).trim());
+  }
+  return map;
+}
+function sclMeaning(scl: string): string {
+  const n = Number.parseInt(scl, 10);
+  if (!Number.isFinite(n)) return "";
+  if (n < 0) return "trusted / safe-listed";
+  if (n <= 1) return "not spam";
+  if (n >= 9) return "high-confidence spam";
+  if (n >= 5) return "spam";
+  return "borderline";
+}
+function bclMeaning(bcl: string): string {
+  const n = Number.parseInt(bcl, 10);
+  if (!Number.isFinite(n)) return "";
+  if (n === 0) return "not from a bulk sender";
+  if (n <= 3) return "low-volume bulk";
+  if (n <= 7) return "moderate bulk";
+  return "high-volume bulk";
+}
+
+interface Hop {
+  from?: string;
+  by?: string;
+  forAddr?: string;
+  date?: string;
+}
+function parseReceived(value: string): Hop {
+  const semi = value.lastIndexOf(";");
+  // Stop the host token at whitespace, ';', ',' or '(' and trim a trailing
+  // FQDN root dot / stray punctuation so the displayed host is clean.
+  const host = (re: RegExp): string | undefined => value.match(re)?.[1]?.replace(/[.,;]+$/, "");
+  return {
+    from: host(/\bfrom\s+([^\s;,()]+)/i),
+    by: host(/\bby\s+([^\s;,()]+)/i),
+    forAddr: value.match(/\bfor\s+<?([^\s;>]+@[^\s;>]+)>?/i)?.[1],
+    date: semi >= 0 ? value.slice(semi + 1).trim() : undefined,
+  };
+}
+
+function renderHeaders(subject: string): void {
+  const sections: string[] = [];
+
+  sections.push(
+    summaryCard("Overview", [
+      ["Subject", headerValue("Subject") ?? subject],
+      ["Date", headerValue("Date")],
+      ["From", headerValue("From")],
+      ["Return-Path", headerValue("Return-Path")],
+      ["Reply-To", headerValue("Reply-To")],
+      ["To", headerValue("To")],
+      ["Delivered to", deliveredTo()],
+      ["Message-ID", headerValue("Message-ID")],
+    ]),
+  );
+
+  const verdicts = parseAuthResults();
+  if (verdicts.length) {
+    const badges = verdicts
+      .map((v) => `<span class="hdr-badge ${verdictClass(v.result)}">${esc(v.method)}: ${esc(v.result)}</span>`)
+      .join("");
+    const rawLines = headerValues("Authentication-Results")
+      .map((v) => `<div class="hdr-rawline">${esc(v)}</div>`)
+      .join("");
+    sections.push(
+      `<div class="hdr-card"><div class="hdr-card-title">Authentication</div>` +
+        `<div class="hdr-badges">${badges}</div>` +
+        rawLines +
+        `</div>`,
+    );
+  }
+
+  const spam = renderSpamCard();
+  if (spam) sections.push(spam);
+
+  const path = renderReceivedCard();
+  if (path) sections.push(path);
+
+  sections.push(renderRawCard());
+
+  headersBody.innerHTML = sections.join("");
+  applyHeaderFilter();
+}
+
+function summaryCard(title: string, rows: Array<[string, string | null]>): string {
+  const body = rows
+    .filter(([, v]) => v && v.trim())
+    .map(([k, v]) => `<div class="hdr-row"><span class="hdr-key">${esc(k)}</span><span class="hdr-val">${esc(v!)}</span></div>`)
+    .join("");
+  return `<div class="hdr-card"><div class="hdr-card-title">${esc(title)}</div>${body}</div>`;
+}
+
+function renderSpamCard(): string | null {
+  const seg = new Map<string, string>();
+  for (const raw of [headerValue("X-Forefront-Antispam-Report"), headerValue("X-Microsoft-Antispam")]) {
+    if (raw) for (const [k, v] of parseSegments(raw)) seg.set(k, v);
+  }
+  const rows: Array<[string, string | null]> = [];
+  const scl = seg.get("SCL");
+  if (scl != null) rows.push(["Spam level (SCL)", `${scl}${sclMeaning(scl) ? ` — ${sclMeaning(scl)}` : ""}`]);
+  const cat = seg.get("CAT");
+  if (cat) rows.push(["Filter verdict (CAT)", `${cat}${CAT_MEANINGS[cat] ? ` — ${CAT_MEANINGS[cat]}` : ""}`]);
+  const bcl = seg.get("BCL");
+  if (bcl != null) rows.push(["Bulk level (BCL)", `${bcl}${bclMeaning(bcl) ? ` — ${bclMeaning(bcl)}` : ""}`]);
+  const cip = seg.get("CIP");
+  if (cip) rows.push(["Connecting IP (CIP)", cip]);
+  const ctry = seg.get("CTRY");
+  if (ctry) rows.push(["Origin country (CTRY)", ctry]);
+  const helo = seg.get("H");
+  if (helo) rows.push(["Sending host (HELO)", helo]);
+  return rows.length ? summaryCard("Spam filtering (Microsoft)", rows) : null;
+}
+
+function renderReceivedCard(): string | null {
+  const chain = headerValues("Received");
+  if (chain.length === 0) return null;
+  // Graph returns the newest hop (closest to the mailbox) first; reverse so the
+  // trace reads origin → mailbox, top to bottom.
+  const hops = chain.slice().reverse();
+  const items = hops
+    .map((value, i) => {
+      const p = parseReceived(value);
+      const label = i === 0 ? "Origin" : i === hops.length - 1 ? "Mailbox" : `Hop ${i}`;
+      const parts: string[] = [];
+      if (p.from) parts.push(`<span class="hdr-key">from</span> ${esc(p.from)}`);
+      if (p.by) parts.push(`<span class="hdr-key">by</span> ${esc(p.by)}`);
+      if (p.forAddr) parts.push(`<span class="hdr-key">for</span> ${esc(p.forAddr)}`);
+      const detail = parts.length ? parts.join(" ") : esc(value);
+      return `<div class="hdr-hop"><div class="hdr-hop-label">${label}${p.date ? ` · ${esc(p.date)}` : ""}</div><div class="hdr-hop-body">${detail}</div></div>`;
+    })
+    .join("");
+  return `<div class="hdr-card"><div class="hdr-card-title">Delivery path (${hops.length} hop${hops.length === 1 ? "" : "s"})</div>${items}</div>`;
+}
+
+function renderRawCard(): string {
+  const rows = currentHeaders
+    .map((h) => {
+      const important = KEY_HEADERS.has(h.name.toLowerCase());
+      const key = esc(`${h.name} ${h.value}`.toLowerCase());
+      return `<div class="hdr-raw${important ? " important" : ""}" data-h="${key}"><span class="hdr-raw-name">${esc(h.name)}:</span> <span class="hdr-raw-value">${esc(h.value)}</span></div>`;
+    })
+    .join("");
+  return `<div class="hdr-card"><div class="hdr-card-title">All headers (${currentHeaders.length})</div><div class="hdr-raw-list">${rows}</div></div>`;
+}
+
+// Filter the raw list as the user types; the parsed summary cards stay put.
+function applyHeaderFilter(): void {
+  const q = headersFilter.value.trim().toLowerCase();
+  headersBody.querySelectorAll<HTMLElement>(".hdr-raw").forEach((el) => {
+    el.style.display = !q || (el.dataset.h ?? "").includes(q) ? "" : "none";
+  });
+}
+
+async function copyHeaders(): Promise<void> {
+  const text = currentHeaders.map((h) => `${h.name}: ${h.value}`).join("\n");
+  const ok = await copyText(text);
+  headersCopyBtn.textContent = ok ? "Copied" : "Copy failed";
+  setTimeout(() => (headersCopyBtn.textContent = "Copy all"), 1500);
+}
+
+// Clipboard via the async API, falling back to a hidden textarea for webviews
+// that don't grant clipboard-write.
+async function copyText(text: string): Promise<boolean> {
+  try {
+    await navigator.clipboard.writeText(text);
+    return true;
+  } catch {
+    try {
+      const ta = document.createElement("textarea");
+      ta.value = text;
+      ta.style.position = "fixed";
+      ta.style.opacity = "0";
+      document.body.appendChild(ta);
+      ta.select();
+      const ok = document.execCommand("copy");
+      ta.remove();
+      return ok;
+    } catch {
+      return false;
+    }
+  }
 }
 
 // ---- Resizable splitter ----
@@ -1061,6 +1401,12 @@ cBodyInput.addEventListener("paste", (e) => {
 composeOverlay.addEventListener("click", (e) => {
   if (e.target === composeOverlay) closeCompose();
 });
+headersCloseBtn.addEventListener("click", closeHeaders);
+headersFilter.addEventListener("input", applyHeaderFilter);
+headersCopyBtn.addEventListener("click", () => void copyHeaders());
+headersOverlay.addEventListener("click", (e) => {
+  if (e.target === headersOverlay) closeHeaders();
+});
 setTheme.addEventListener("change", () => setThemePref(setTheme.value as ThemePref));
 setTray.addEventListener("change", () => {
   invoke("set_close_to_tray", { value: setTray.checked }).catch(
@@ -1080,7 +1426,8 @@ settingsOverlay.addEventListener("click", (e) => {
 });
 document.addEventListener("keydown", (e) => {
   if (e.key !== "Escape") return;
-  if (!settingsOverlay.classList.contains("hidden")) closeSettings();
+  if (!headersOverlay.classList.contains("hidden")) closeHeaders();
+  else if (!settingsOverlay.classList.contains("hidden")) closeSettings();
   else if (!composeOverlay.classList.contains("hidden")) closeCompose();
 });
 

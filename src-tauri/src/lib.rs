@@ -94,6 +94,7 @@ pub fn run() {
             commands::folder_from_cache,
             commands::sync_folder,
             commands::load_message,
+            commands::message_headers,
             commands::prepare_reply,
             commands::prepare_forward,
             commands::send_message,
