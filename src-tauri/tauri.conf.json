@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "WattMail",
-  "version": "0.1.11",
+  "version": "0.1.12",
   "identifier": "co.swatto.wattmail",
   "build": {
     "beforeDevCommand": "npm run dev",
@@ -21,7 +21,8 @@
         "resizable": true,
         "fullscreen": false,
         "visible": false,
-        "backgroundColor": "#1d232a"
+        "backgroundColor": "#1d232a",
+        "dragDropEnabled": false
       }
     ],
     "security": {

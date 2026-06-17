@@ -78,6 +78,38 @@ Entra app registration (public, not secret):
 
 ## Progress log
 
+### 2026-06-17 — Compose: resizable/maximizable + rich input (v0.1.12)
+Built as a multi-agent batch (sequential backend→frontend implement → full build verify →
+3 adversarial reviewers (security/correctness/integrity) → remediation). `cargo fmt`,
+`clippy --all-targets -D warnings`, and `npm run build` all clean. Live run pending.
+
+- **Resizable + maximizable compose** — the compose/reply/forward panel has a bottom-right
+  drag grip (same pointer-capture idiom as the list splitter) that resizes width+height
+  (clamped to min 420×360 and ≤96vw/92vh) and persists to localStorage (`wattmail.composeW`/
+  `composeH`/`composeMax`); a Maximize/Restore toggle in the header. Default size 720×560; the
+  panel is now a flex column so the body grows to fill and scrolls (header/inputs/toolbar/
+  actions pinned).
+- **Rich paste** — replaced the plain-text-only paste handler. Pasted (and dropped) `text/html`
+  is now **sanitized** and inserted with formatting preserved; plain-text fallback otherwise.
+  The sanitizer (TS, security-critical — pasted content can come from a hostile page) parses via
+  `DOMParser` into a detached doc then rebuilds an **allow-listed** tree with `createElement`/
+  `setAttribute` (never dirty `innerHTML`): drops script/style/iframe/object/embed/link/meta/
+  base/form/input/button/svg subtrees, strips `on*` + `javascript:`/`vbscript:`, allow-lists a
+  style attribute (rejecting `url()`/`expression()`/`@import`/`position:fixed`/behavio(u)r),
+  limits `a@href` to http/https/mailto and `img@src` to https or base64-raster `data:`.
+- **Inline images** — paste/drop an image into the body → embedded as a `data:` URL (CSP
+  `img-src 'self' data:` allows it). On **send**, each `data:image/…;base64,` `<img>` is rewritten
+  to `cid:<id>` and shipped as an **inline `fileAttachment`** (Graph `isInline`+`contentId`).
+  `OutgoingAttachment` gained `content_id: Option<String>` + `is_inline: bool`; the `send_message`
+  command gained an `inlineImages` param (base64 → bytes). Per-image + cumulative ~3 MB caps are
+  enforced at send time (not just on insert). svg+xml and non-base64 `data:` images are excluded
+  (one shared `INLINE_IMAGE_SRC` regex across sanitizer/insert/extract). **Drafts:** sending a
+  draft that contains inline `data:` images is blocked with a warning (draft attachments are still
+  deferred), so no unrenderable `data:` URI is shipped.
+- **`dragDropEnabled: false`** added to the main window in `tauri.conf.json` so the webview
+  receives DOM drag/drop events (Tauri's native OS drag-drop would otherwise swallow them); paired
+  with `dragenter`/`dragover` listeners on the editor.
+
 ### 2026-06-17 — Quick-wins batch: search, drafts, flags, folder cache, shortcuts (v0.1.11)
 Built as one coordinated batch (multi-agent: sequential implement → full build verify →
 adversarial review → remediation). All four features landed across the proper layers;
@@ -395,6 +427,7 @@ pending (needs a signed-in window).
 | — | Cross-platform pass — config dir abstraction + CI compile-gate (macOS/Linux) | 🟡 config dir + CI done; live macOS/Linux run pending |
 | — | Headers viewer — view & trace internet headers, auth (SPF/DKIM/DMARC) badges, forged-`To:` caution | ✅ done (v0.1.9–0.1.10) |
 | — | Quick wins — search, drafts, follow-up flags, cached folder sidebar, keyboard shortcuts | ✅ built (v0.1.11); live run pending |
+| — | Compose polish — resizable/maximizable window, sanitized rich-HTML paste, inline images (cid) | ✅ built (v0.1.12); live run pending |
 | — | Calendar tab (read agenda + accept/decline; `Calendars.ReadWrite`) | ⬜ backlog (roadmap big-bet, v0.3.0) |
 | — | Contacts / recipient autocomplete (`People.Read`/`Contacts.Read`) | ⬜ backlog (roadmap v0.2.0) |
 | — | Second provider (IMAP/SMTP) behind the contract | ⬜ backlog |
@@ -420,6 +453,8 @@ pending (needs a signed-in window).
 | 06-16 | **Auto-update via Tauri updater against the rolling release; repo made public** | An unauthenticated updater can't pull assets from a private repo; minisign-signed `latest.json` keeps trust without an auth token. Verified no secrets in WattMail or any public repo first. | Active |
 | 06-17 | **Search = Graph server-side `$search` (live), not local FTS** | The encrypted cache uses a per-value random nonce, so content columns can't be queried/sorted in SQL — local FTS is impossible without weakening encryption. Graph `$search` needs no new scope and reuses the existing message decoder. Trade-off: search is online-only and returns by relevance (sorted client-side). | Active |
 | 06-17 | **Drafts via the dedicated `/me/messages` draft flow, not `sendMail`** | A resumed draft must update + `POST /{id}/send` so it isn't duplicated/orphaned, and must load the **raw** (unsanitized) body for editing — the display-sanitization path is read-only. | Active |
+| 06-17 | **Compose paste is sanitized client-side (TS), not via the Rust display sanitizer** | Paste needs an *editing*-oriented allow-list (keep formatting) and must run synchronously at the caret — a Rust round-trip per paste is wrong-shaped. Pasted content is untrusted (hostile-page origin), so it's rebuilt via DOM APIs, never dirty `innerHTML`. | Active |
+| 06-17 | **Inline images = `data:` while editing, rewritten to `cid:` inline attachments at send** | Keeps the editor simple (data URLs render under `img-src data:`); only the send path converts to Graph `isInline`/`contentId` attachments. Drafts keep `data:` in-body but are blocked from sending (draft attachments deferred). `dragDropEnabled:false` lets the webview get DOM drop events. | Active |
 
 ---
 
@@ -440,14 +475,16 @@ pending (needs a signed-in window).
   Linux Secret Service, which have no 2560-char limit); decide later whether to store the full
   blob off-Windows.
 - **Attachment limits** — outgoing attachments ride inline in `sendMail` (~3 MB total Graph limit);
-  larger files need an upload session (deferred). Only `fileAttachment`s are listed — `itemAttachment`
-  (embedded messages) and `referenceAttachment` (links) aren't shown. Outgoing MIME type is guessed
-  from the file extension.
+  larger files need an upload session (deferred). Inline images (v0.1.12) also ship as inline
+  `fileAttachment`s (`cid:`/`isInline`) under the same ~3 MB cap (enforced client-side at send).
+  Only `fileAttachment`s are listed — `itemAttachment` (embedded messages) and `referenceAttachment`
+  (links) aren't shown. Outgoing MIME type is guessed from the file extension.
 - **Reply threading** — replies go via `sendMail`, so they don't set `In-Reply-To`/`References`
   and won't thread into the conversation in the recipient's client (the `Re:` subject groups
-  loosely). Still deferred. (Rich-text compose, attachments, an editable quoted original, and
-  **drafts** are now all done — drafts shipped in v0.1.11. Drafts deferral: attachments on a draft
-  aren't saved yet; compose warns rather than dropping them silently.)
+  loosely). Still deferred. (Rich-text compose, attachments, an editable quoted original,
+  **drafts**, a **resizable/maximizable** window, **sanitized rich-HTML paste** and **inline
+  images** are all done — v0.1.11–0.1.12. Drafts deferral: file *and* inline-image attachments
+  aren't saved on a draft yet; compose warns/blocks rather than dropping them silently.)
 - **Multi-account model** — domain currently assumes a single account; the SQLite cache is
   single-account (one `cache.db`, no account column).
 - **Cache at rest** — content columns + sync-state values are AES-256-GCM encrypted (key in the OS

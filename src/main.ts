@@ -261,8 +261,11 @@ appRoot.innerHTML = /* html */ `
   </div>
 
   <div id="compose-overlay" class="overlay hidden">
-    <div class="settings-panel compose-panel">
-      <div class="settings-title" id="compose-title">New message</div>
+    <div class="settings-panel compose-panel" id="compose-panel">
+      <div class="compose-head">
+        <div class="settings-title" id="compose-title">New message</div>
+        <button id="compose-maximize" class="compose-maximize" type="button" title="Maximize" aria-label="Maximize">&#9974;</button>
+      </div>
       <input id="c-to" class="input input-bordered input-sm compose-input" placeholder="To (comma-separated)" autocomplete="off" />
       <input id="c-cc" class="input input-bordered input-sm compose-input" placeholder="Cc" autocomplete="off" />
       <input id="c-subject" class="input input-bordered input-sm compose-input" placeholder="Subject" autocomplete="off" />
@@ -286,6 +289,7 @@ appRoot.innerHTML = /* html */ `
         <button id="compose-savedraft" class="btn btn-sm">Save draft</button>
         <button id="compose-send" class="btn btn-sm btn-primary">Send</button>
       </div>
+      <div id="compose-resize" class="compose-resize" title="Drag to resize" aria-hidden="true"></div>
     </div>
   </div>
 
@@ -334,6 +338,9 @@ const settingsMsg = document.querySelector<HTMLDivElement>("#settings-msg")!;
 const settingsClose = document.querySelector<HTMLButtonElement>("#settings-close")!;
 const composeBtn = document.querySelector<HTMLButtonElement>("#compose")!;
 const composeOverlay = document.querySelector<HTMLDivElement>("#compose-overlay")!;
+const composePanel = document.querySelector<HTMLDivElement>("#compose-panel")!;
+const composeMaximizeBtn = document.querySelector<HTMLButtonElement>("#compose-maximize")!;
+const composeResizeGrip = document.querySelector<HTMLDivElement>("#compose-resize")!;
 const composeTitle = document.querySelector<HTMLDivElement>("#compose-title")!;
 const cToInput = document.querySelector<HTMLInputElement>("#c-to")!;
 const cCcInput = document.querySelector<HTMLInputElement>("#c-cc")!;
@@ -1143,6 +1150,86 @@ splitter.addEventListener("pointerdown", (e) => {
   splitter.addEventListener("pointerup", up);
 });
 
+// ---- Resizable / maximizable compose panel ----
+// The panel size persists across opens; Maximize is a separate sticky state that
+// expands to fill the viewport and snaps back to the persisted size on Restore.
+const COMPOSE_W_KEY = "wattmail.composeW";
+const COMPOSE_H_KEY = "wattmail.composeH";
+const COMPOSE_MAX_KEY = "wattmail.composeMax";
+const COMPOSE_MIN_W = 420;
+const COMPOSE_MIN_H = 360;
+const COMPOSE_DEFAULT_W = 720;
+const COMPOSE_DEFAULT_H = 560;
+// Maximized footprint, and the ceiling a free resize is clamped to.
+const composeMaxW = (): number => Math.round(window.innerWidth * 0.96);
+const composeMaxH = (): number => Math.round(window.innerHeight * 0.92);
+const clampComposeW = (w: number): number => Math.max(COMPOSE_MIN_W, Math.min(composeMaxW(), w));
+const clampComposeH = (h: number): number => Math.max(COMPOSE_MIN_H, Math.min(composeMaxH(), h));
+
+let composeMaximized = localStorage.getItem(COMPOSE_MAX_KEY) === "1";
+
+function loadComposeSize(): { w: number; h: number } {
+  const w = Number.parseInt(localStorage.getItem(COMPOSE_W_KEY) ?? "", 10);
+  const h = Number.parseInt(localStorage.getItem(COMPOSE_H_KEY) ?? "", 10);
+  return {
+    w: clampComposeW(Number.isFinite(w) ? w : COMPOSE_DEFAULT_W),
+    h: clampComposeH(Number.isFinite(h) ? h : COMPOSE_DEFAULT_H),
+  };
+}
+// Apply either the maximized footprint or the persisted free size to the panel.
+function applyComposeSize(): void {
+  if (composeMaximized) {
+    composePanel.style.width = `${composeMaxW()}px`;
+    composePanel.style.height = `${composeMaxH()}px`;
+  } else {
+    const { w, h } = loadComposeSize();
+    composePanel.style.width = `${w}px`;
+    composePanel.style.height = `${h}px`;
+  }
+  composeMaximizeBtn.classList.toggle("is-max", composeMaximized);
+  composeMaximizeBtn.title = composeMaximized ? "Restore" : "Maximize";
+  composeMaximizeBtn.setAttribute("aria-label", composeMaximized ? "Restore" : "Maximize");
+}
+function toggleComposeMaximize(): void {
+  composeMaximized = !composeMaximized;
+  localStorage.setItem(COMPOSE_MAX_KEY, composeMaximized ? "1" : "0");
+  applyComposeSize();
+}
+composeMaximizeBtn.addEventListener("click", toggleComposeMaximize);
+
+// Bottom-right corner grip: same pointer-capture idiom as the list splitter.
+// Dragging exits the maximized state so the new size is the one that persists.
+composeResizeGrip.addEventListener("pointerdown", (e) => {
+  e.preventDefault();
+  if (composeMaximized) {
+    composeMaximized = false;
+    localStorage.setItem(COMPOSE_MAX_KEY, "0");
+    composeMaximizeBtn.classList.remove("is-max");
+    composeMaximizeBtn.title = "Maximize";
+    composeMaximizeBtn.setAttribute("aria-label", "Maximize");
+  }
+  const startX = e.clientX;
+  const startY = e.clientY;
+  const rect = composePanel.getBoundingClientRect();
+  const startW = rect.width;
+  const startH = rect.height;
+  composeResizeGrip.setPointerCapture(e.pointerId);
+  const move = (ev: PointerEvent): void => {
+    composePanel.style.width = `${clampComposeW(startW + (ev.clientX - startX))}px`;
+    composePanel.style.height = `${clampComposeH(startH + (ev.clientY - startY))}px`;
+  };
+  const up = (ev: PointerEvent): void => {
+    composeResizeGrip.releasePointerCapture(ev.pointerId);
+    composeResizeGrip.removeEventListener("pointermove", move);
+    composeResizeGrip.removeEventListener("pointerup", up);
+    const final = composePanel.getBoundingClientRect();
+    localStorage.setItem(COMPOSE_W_KEY, String(Math.round(final.width)));
+    localStorage.setItem(COMPOSE_H_KEY, String(Math.round(final.height)));
+  };
+  composeResizeGrip.addEventListener("pointermove", move);
+  composeResizeGrip.addEventListener("pointerup", up);
+});
+
 // ---- Folders ----
 async function loadFolders(): Promise<void> {
   try {
@@ -1300,6 +1387,277 @@ function closeSettings(): void {
   settingsOverlay.classList.add("hidden");
 }
 
+// ---- Paste sanitizer (SECURITY-CRITICAL) ----
+// Pasted/dropped content can originate from a hostile web page, so it is parsed
+// into a detached document and rebuilt against an allow-list — never inserted
+// raw. Trusted editor content (the quoted reply/forward inserted by openCompose)
+// is NOT routed through here; only the clipboard/drag payload is.
+const ALLOWED_TAGS = new Set([
+  "p", "br", "div", "span", "b", "strong", "i", "em", "u", "s", "strike", "sub", "sup",
+  "a", "ul", "ol", "li", "blockquote", "pre", "code", "h1", "h2", "h3", "h4", "h5", "h6",
+  "table", "thead", "tbody", "tr", "td", "th", "hr", "img", "font",
+]);
+// Tags dropped wholesale — their subtree never reaches the editor.
+const DROP_SUBTREE_TAGS = new Set([
+  "script", "style", "iframe", "object", "embed", "link", "meta", "base", "form",
+  "input", "button", "svg",
+]);
+const TABLE_ATTRS = new Set(["colspan", "rowspan", "align", "valign"]);
+// The only data: img src shape accepted into the editor and converted to a cid:
+// inline attachment on send: base64-encoded raster image data. svg+xml and
+// non-base64 (e.g. URL-encoded) forms are excluded so the sanitizer, the
+// byte-counter, and extractInlineImages all agree on exactly what is "inline".
+const INLINE_IMAGE_SRC = /^data:image\/(png|jpeg|jpg|gif|webp|bmp);base64,/i;
+// CSS properties permitted inside a sanitized `style` attribute.
+const ALLOWED_STYLE_PROPS = new Set([
+  "color", "background-color", "font-weight", "font-style", "font-size", "font-family",
+  "text-align", "text-decoration", "margin", "margin-top", "margin-right",
+  "margin-bottom", "margin-left", "padding", "padding-top", "padding-right",
+  "padding-bottom", "padding-left", "border", "width", "height",
+]);
+
+// Reject any style value carrying an active/escape vector (url(), expression(),
+// @import, javascript:, position:fixed, behavio[u]r). Case-insensitive.
+function styleValueIsSafe(value: string): boolean {
+  const v = value.toLowerCase();
+  return !(
+    v.includes("url(") ||
+    v.includes("expression(") ||
+    v.includes("@import") ||
+    v.includes("javascript:") ||
+    v.includes("position:fixed") ||
+    v.includes("position: fixed") ||
+    v.includes("behavior") ||
+    v.includes("behaviour")
+  );
+}
+
+// Rebuild a `style` attribute keeping only allow-listed, vector-free properties.
+function sanitizeStyle(style: string): string {
+  return style
+    .split(";")
+    .map((decl) => decl.trim())
+    .filter(Boolean)
+    .map((decl) => {
+      const idx = decl.indexOf(":");
+      if (idx < 0) return "";
+      const prop = decl.slice(0, idx).trim().toLowerCase();
+      const value = decl.slice(idx + 1).trim();
+      if (!ALLOWED_STYLE_PROPS.has(prop) || !styleValueIsSafe(value)) return "";
+      return `${prop}: ${value}`;
+    })
+    .filter(Boolean)
+    .join("; ");
+}
+
+const URL_PROTOCOL = /^([a-z][a-z0-9+.-]*):/i;
+function protocolOf(url: string): string | null {
+  const m = URL_PROTOCOL.exec(url.trim());
+  return m ? m[1].toLowerCase() : null;
+}
+
+// Copy only the allow-listed attributes for `tag` from `src` onto `dst`,
+// applying per-attribute value rules. Anything not explicitly allowed is dropped.
+function copyAllowedAttributes(tag: string, src: Element, dst: Element): void {
+  for (const attr of Array.from(src.attributes)) {
+    const name = attr.name.toLowerCase();
+    const value = attr.value;
+    // Defence in depth: never carry event handlers or javascript:/vbscript: values.
+    if (name.startsWith("on")) continue;
+    const lowered = value.toLowerCase();
+    if (lowered.includes("javascript:") || lowered.includes("vbscript:")) continue;
+
+    if (name === "style") {
+      const safe = sanitizeStyle(value);
+      if (safe) dst.setAttribute("style", safe);
+      continue;
+    }
+    if (tag === "a" && name === "href") {
+      const proto = protocolOf(value);
+      if (proto === "http" || proto === "https" || proto === "mailto") dst.setAttribute("href", value);
+      continue;
+    }
+    if (tag === "img" && name === "src") {
+      const proto = protocolOf(value);
+      // Inline images must be base64 raster data: URLs. We exclude svg+xml (which
+      // mail clients render inconsistently and enlarges the recipient surface) and
+      // non-base64 forms (e.g. URL-encoded SVG) — the latter would survive here but
+      // not be picked up by extractInlineImages, shipping an unrenderable data: URI.
+      // Keeping this in lockstep with extractInlineImages avoids that divergence.
+      const isInlineImage = proto === "data" && INLINE_IMAGE_SRC.test(value.trim());
+      if (proto === "https" || isInlineImage) dst.setAttribute("src", value);
+      continue;
+    }
+    if (tag === "img" && (name === "alt" || name === "width" || name === "height")) {
+      dst.setAttribute(name, value);
+      continue;
+    }
+    if ((tag === "td" || tag === "th") && TABLE_ATTRS.has(name)) {
+      dst.setAttribute(name, value);
+      continue;
+    }
+    if (tag === "font" && name === "color") {
+      dst.setAttribute("color", value);
+      continue;
+    }
+  }
+}
+
+// Recursively rebuild `node`'s children into `out` (a node in the live document),
+// keeping only allow-listed elements and text. Disallowed elements are unwrapped
+// (children kept) unless they are in DROP_SUBTREE_TAGS, where the subtree is cut.
+function rebuildInto(node: Node, out: Node, doc: Document): void {
+  for (const child of Array.from(node.childNodes)) {
+    if (child.nodeType === Node.TEXT_NODE) {
+      out.appendChild(doc.createTextNode(child.textContent ?? ""));
+      continue;
+    }
+    if (child.nodeType !== Node.ELEMENT_NODE) continue; // drop comments, etc.
+    const el = child as Element;
+    const tag = el.tagName.toLowerCase();
+    if (DROP_SUBTREE_TAGS.has(tag)) continue;
+    if (!ALLOWED_TAGS.has(tag)) {
+      // Unknown but otherwise-harmless wrapper: keep its contents, drop the tag.
+      rebuildInto(el, out, doc);
+      continue;
+    }
+    const clean = doc.createElement(tag);
+    copyAllowedAttributes(tag, el, clean);
+    rebuildInto(el, clean, doc);
+    out.appendChild(clean);
+  }
+}
+
+// Sanitize an untrusted HTML string into an allow-listed fragment string safe to
+// hand to execCommand("insertHTML").
+function sanitizeHtml(dirty: string): string {
+  const parsed = new DOMParser().parseFromString(dirty, "text/html");
+  const container = document.createElement("div");
+  rebuildInto(parsed.body, container, document);
+  return container.innerHTML;
+}
+
+// ---- Inline images ----
+// Single-image and total-payload caps. Graph's sendMail inline limit is ~3 MB
+// per image; we cap raw bytes so a base64-inflated body still fits, and warn
+// once the cumulative inline payload approaches the same ceiling.
+const INLINE_IMAGE_MAX_BYTES = 3 * 1024 * 1024;
+const INLINE_TOTAL_WARN_BYTES = 3 * 1024 * 1024;
+const oneMb = (bytes: number): string => (bytes / (1024 * 1024)).toFixed(1);
+// data: image URLs are base64; raw bytes ≈ payload length * 3 / 4.
+function dataUrlByteLength(dataUrl: string): number {
+  const comma = dataUrl.indexOf(",");
+  if (comma < 0) return 0;
+  const b64 = dataUrl.slice(comma + 1);
+  return Math.floor((b64.length * 3) / 4);
+}
+// Sum of raw bytes across every data:image/ embedded in the editor right now.
+function inlineImagesTotalBytes(): number {
+  let total = 0;
+  for (const img of Array.from(cBodyInput.querySelectorAll("img"))) {
+    const src = img.getAttribute("src") ?? "";
+    if (/^data:image\//i.test(src)) total += dataUrlByteLength(src);
+  }
+  return total;
+}
+function readFileAsDataUrl(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result));
+    reader.onerror = () => reject(reader.error ?? new Error("read failed"));
+    reader.readAsDataURL(file);
+  });
+}
+// Insert one image file at the caret as a data: URL, enforcing the per-image cap
+// and surfacing a running total. Returns false (with a message) when skipped.
+async function insertImageFile(file: File): Promise<boolean> {
+  if (file.size > INLINE_IMAGE_MAX_BYTES) {
+    composeMsg.textContent = `Image "${file.name || "pasted image"}" skipped — ${oneMb(
+      file.size,
+    )} MB exceeds the ${Math.round(
+      INLINE_IMAGE_MAX_BYTES / (1024 * 1024),
+    )} MB per-image inline limit. Attach it as a file instead.`;
+    return false;
+  }
+  const dataUrl = await readFileAsDataUrl(file);
+  // Embed only the supported base64-raster types (matches INLINE_IMAGE_SRC and the
+  // send-time extractor); reject anything else with guidance instead of inserting
+  // an image that would be silently dropped on send.
+  if (!INLINE_IMAGE_SRC.test(dataUrl)) {
+    composeMsg.textContent = `Image "${file.name || "pasted image"}" skipped — only PNG, JPEG, GIF, WebP and BMP can be embedded. Attach it as a file instead.`;
+    return false;
+  }
+  document.execCommand("insertImage", false, dataUrl);
+  const total = inlineImagesTotalBytes();
+  composeMsg.textContent =
+    total > INLINE_TOTAL_WARN_BYTES
+      ? `Inline images now total ${oneMb(total)} MB — large messages may be rejected; consider attaching files instead.`
+      : "";
+  return true;
+}
+// Extract image files from a clipboard/drag payload (handles both files and the
+// synthetic image item the OS produces for a copied screenshot).
+function imageFilesFrom(data: DataTransfer | null): File[] {
+  if (!data) return [];
+  return Array.from(data.files).filter((f) => f.type.startsWith("image/"));
+}
+
+// The inline-image payload the backend expects (camelCase keys; serde renames to
+// snake_case). Body must reference each image as src="cid:<contentId>".
+interface InlineImage {
+  contentId: string;
+  contentType: string;
+  dataBase64: string;
+}
+
+// On SEND only: rewrite every embedded data:image/ <img> in the body to a
+// cid:-referenced inline attachment. Returns the rewritten HTML plus the list of
+// inline images to send alongside. Pure aside from generating ids — never mutates
+// the live editor (it operates on a detached parse of the body).
+function extractInlineImages(bodyHtml: string): { html: string; images: InlineImage[] } {
+  const doc = new DOMParser().parseFromString(bodyHtml, "text/html");
+  const images: InlineImage[] = [];
+  let counter = 0;
+  for (const img of Array.from(doc.querySelectorAll("img"))) {
+    const src = img.getAttribute("src") ?? "";
+    // Defence in depth: only ever build an inline attachment from the exact
+    // base64-raster shape the sanitizer permits, regardless of upstream paths.
+    if (!INLINE_IMAGE_SRC.test(src.trim())) continue;
+    const m = /^data:([^;,]+);base64,(.*)$/is.exec(src.trim());
+    if (!m) continue;
+    const contentType = m[1].trim();
+    const dataBase64 = m[2].trim();
+    const contentId = `img${++counter}-${crypto.randomUUID()}`;
+    img.setAttribute("src", `cid:${contentId}`);
+    images.push({ contentId, contentType, dataBase64 });
+  }
+  return { html: doc.body.innerHTML, images };
+}
+
+// Authoritative send-time cap on inline images. The per-image insert path warns
+// early, but data:image/ images also enter the body via HTML paste/drop and via
+// resumed drafts, which never hit insertImageFile — so this is the guard that
+// actually enforces the cap before we hand the payload to Graph. Returns a
+// user-facing message when over the limit, or null when the payload is fine.
+function inlineImagesSizeProblem(images: InlineImage[]): string | null {
+  let total = 0;
+  for (const img of images) {
+    const bytes = Math.floor((img.dataBase64.length * 3) / 4);
+    if (bytes > INLINE_IMAGE_MAX_BYTES) {
+      return `An inline image is ${oneMb(bytes)} MB, over the ${Math.round(
+        INLINE_IMAGE_MAX_BYTES / (1024 * 1024),
+      )} MB per-image limit. Remove it or attach it as a file instead.`;
+    }
+    total += bytes;
+  }
+  if (total > INLINE_IMAGE_MAX_BYTES) {
+    return `Inline images total ${oneMb(total)} MB, over the ${Math.round(
+      INLINE_IMAGE_MAX_BYTES / (1024 * 1024),
+    )} MB limit. Remove some or attach them as files instead.`;
+  }
+  return null;
+}
+
 // ---- Compose ----
 let composeAttachPaths: string[] = [];
 // The draft currently open in the compose modal, if any. Set when resuming a
@@ -1356,6 +1714,7 @@ function openCompose(opts: {
   composeAttachPaths = [];
   renderComposeAttachments();
   composeMsg.textContent = "";
+  applyComposeSize();
   composeOverlay.classList.remove("hidden");
   focusComposeBody();
 }
@@ -1500,6 +1859,16 @@ async function sendCompose(): Promise<void> {
     composeSendBtn.disabled = false;
     return;
   }
+  // The draft /send path carries the saved body verbatim (draft_body_json omits
+  // attachments), so inline data:image/ images aren't converted to cid: and most
+  // mail clients drop data: URIs — the recipient sees broken images. Warn rather
+  // than silently ship them, mirroring the file-attachment deferral above.
+  if (draftId && cBodyInput.querySelector('img[src^="data:image/"]')) {
+    composeMsg.textContent =
+      "Inline images aren't supported on drafts yet — remove them or start a fresh message to embed images.";
+    composeSendBtn.disabled = false;
+    return;
+  }
   try {
     if (draftId) {
       // Resuming a draft: flush edits, then send via /send so the draft is
@@ -1508,12 +1877,25 @@ async function sendCompose(): Promise<void> {
       await invoke("send_draft", { id: draftId });
       currentDraftId = null;
     } else {
+      // Embedded data:image/ images become cid:-referenced inline attachments at
+      // send time; file attachments continue via attachmentPaths.
+      const { html, images } = extractInlineImages(bodyHtml);
+      // Hard cap regardless of how the image entered the body (insert, HTML
+      // paste/drop, or a resumed draft) — Graph rejects oversized sends, so
+      // catch it here with actionable guidance instead of a raw API error.
+      const sizeProblem = inlineImagesSizeProblem(images);
+      if (sizeProblem) {
+        composeMsg.textContent = sizeProblem;
+        composeSendBtn.disabled = false;
+        return;
+      }
       await invoke("send_message", {
         to,
         cc,
         subject,
-        bodyHtml,
+        bodyHtml: html,
         attachmentPaths: composeAttachPaths,
+        inlineImages: images,
       });
     }
     closeCompose();
@@ -1763,11 +2145,59 @@ composeToolbar.addEventListener("mousedown", (e) => {
     document.execCommand(cmd, false);
   }
 });
-// Paste as plain text so pasted markup can't carry hostile HTML into the message.
+// Paste: prefer pasted image(s); else sanitized rich HTML; else plain text.
+// All HTML is allow-list sanitized before insertion (the clipboard can carry
+// hostile markup from any web page).
 cBodyInput.addEventListener("paste", (e) => {
+  const data = e.clipboardData;
+  const images = imageFilesFrom(data);
+  if (images.length > 0) {
+    e.preventDefault();
+    void (async () => {
+      for (const file of images) await insertImageFile(file);
+    })();
+    return;
+  }
+  const html = data?.getData("text/html") ?? "";
+  if (html) {
+    e.preventDefault();
+    document.execCommand("insertHTML", false, sanitizeHtml(html));
+    return;
+  }
   e.preventDefault();
-  const text = e.clipboardData?.getData("text/plain") ?? "";
+  const text = data?.getData("text/plain") ?? "";
   document.execCommand("insertText", false, text);
+});
+// Make the editor a live, deterministic drop target: the HTML5 DnD contract
+// requires preventDefault on dragenter/dragover, and without it the native
+// contenteditable drop (which inserts UNSANITIZED markup) would run instead.
+// Requires app.windows[].dragDropEnabled=false in tauri.conf.json so the
+// webview delivers DOM drag/drop rather than swallowing it as a Tauri event.
+const allowDrop = (e: DragEvent): void => {
+  e.preventDefault();
+  if (e.dataTransfer) e.dataTransfer.dropEffect = "copy";
+};
+cBodyInput.addEventListener("dragenter", allowDrop);
+cBodyInput.addEventListener("dragover", allowDrop);
+// Drop: mirror the paste handler exactly — always preventDefault (so the native
+// unsanitized contenteditable drop never fires), then prefer dropped image
+// file(s); else sanitized rich HTML; else plain text.
+cBodyInput.addEventListener("drop", (e) => {
+  e.preventDefault();
+  const data = e.dataTransfer;
+  const images = imageFilesFrom(data);
+  if (images.length > 0) {
+    void (async () => {
+      for (const file of images) await insertImageFile(file);
+    })();
+    return;
+  }
+  const html = data?.getData("text/html") ?? "";
+  if (html) {
+    document.execCommand("insertHTML", false, sanitizeHtml(html));
+    return;
+  }
+  document.execCommand("insertText", false, data?.getData("text/plain") ?? "");
 });
 composeOverlay.addEventListener("click", (e) => {
   if (e.target === composeOverlay) closeCompose();

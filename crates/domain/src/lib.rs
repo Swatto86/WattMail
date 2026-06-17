@@ -98,6 +98,12 @@ pub struct OutgoingAttachment {
     pub name: String,
     pub content_type: String,
     pub bytes: Vec<u8>,
+    /// The `cid` for an inline image, referenced from the body as `cid:<id>`.
+    /// `None` for a normal file attachment.
+    pub content_id: Option<String>,
+    /// `true` for an inline image embedded in the body (via `cid:`); `false` for
+    /// a normal file attachment shown in the attachment list.
+    pub is_inline: bool,
 }
 
 /// A message to send (compose / reply / forward).

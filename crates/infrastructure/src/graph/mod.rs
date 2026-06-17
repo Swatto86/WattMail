@@ -732,16 +732,31 @@ fn draft_body_json(message: &OutgoingMessage) -> serde_json::Value {
 }
 
 /// Build the Graph attachment array for an outgoing message (base64 file content).
+/// Inline images (`is_inline`) additionally carry `isInline` and, when present, a
+/// `contentId` so the body's `cid:` references resolve.
 fn attachments_json(attachments: &[OutgoingAttachment]) -> Vec<serde_json::Value> {
     attachments
         .iter()
         .map(|a| {
-            serde_json::json!({
+            let mut attachment = serde_json::json!({
                 "@odata.type": "#microsoft.graph.fileAttachment",
                 "name": a.name,
                 "contentType": a.content_type,
                 "contentBytes": base64::engine::general_purpose::STANDARD.encode(&a.bytes),
-            })
+            });
+            if a.is_inline {
+                let object = attachment
+                    .as_object_mut()
+                    .expect("json! built an object above");
+                object.insert("isInline".to_string(), serde_json::Value::Bool(true));
+                if let Some(content_id) = &a.content_id {
+                    object.insert(
+                        "contentId".to_string(),
+                        serde_json::Value::String(content_id.clone()),
+                    );
+                }
+            }
+            attachment
         })
         .collect()
 }

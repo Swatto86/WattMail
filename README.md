@@ -19,7 +19,8 @@ encrypted at rest.
 - **Search** — cross-folder mail search via Microsoft Graph server-side `$search`.
 - **Reading pane** with hostile-HTML sanitization in a sandboxed iframe; links open
   in your real browser.
-- **Compose / reply / reply-all / forward** with a rich-text editor and attachments.
+- **Compose / reply / reply-all / forward** in a resizable, maximizable window with a
+  rich-text editor, sanitized rich-HTML paste, inline images (paste/drag-drop), and attachments.
 - **Drafts** — save, resume and send drafts (stored server-side in your mailbox).
 - **Follow-up flags** — flag / clear messages from the list or the context menu.
 - **Keyboard shortcuts** — `j`/`k` navigation and single-key actions (reply, flag,

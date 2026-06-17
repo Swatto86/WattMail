@@ -1,6 +1,7 @@
 //! Tauri commands bridging the frontend to the application/infrastructure layers.
 
-use serde::Serialize;
+use base64::Engine;
+use serde::{Deserialize, Serialize};
 use tauri::State;
 
 use crate::settings::{self, SettingsState};
@@ -338,6 +339,16 @@ pub async fn prepare_forward(
     })
 }
 
+/// An inline image embedded in the compose editor, arriving as base64 data
+/// (not a file path). The body references it as `cid:<content_id>`.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InlineImageDto {
+    pub content_id: String,
+    pub content_type: String,
+    pub data_base64: String,
+}
+
 /// Send a message (compose / reply / forward), saved to Sent Items.
 #[tauri::command]
 pub async fn send_message(
@@ -347,6 +358,7 @@ pub async fn send_message(
     subject: String,
     body_html: String,
     attachment_paths: Vec<String>,
+    inline_images: Vec<InlineImageDto>,
 ) -> Result<(), String> {
     let token = auth.access_token().await.map_err(|e| e.to_string())?;
     let provider = GraphClient::new(token);
@@ -364,6 +376,22 @@ pub async fn send_message(
             name,
             content_type,
             bytes,
+            content_id: None,
+            is_inline: false,
+        });
+    }
+
+    for image in inline_images {
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(image.data_base64.as_bytes())
+            .map_err(|e| format!("could not decode inline image {}: {e}", image.content_id))?;
+        let name = format!("{}{}", image.content_id, extension_for(&image.content_type));
+        attachments.push(OutgoingAttachment {
+            name,
+            content_type: image.content_type,
+            bytes,
+            content_id: Some(image.content_id),
+            is_inline: true,
         });
     }
 
@@ -401,6 +429,21 @@ fn guess_content_type(name: &str) -> String {
         _ => "application/octet-stream",
     };
     mime.to_string()
+}
+
+/// A file extension (including the leading dot) for an inline image's content
+/// type, so the synthesized attachment name carries a sensible suffix. Falls
+/// back to `.bin` for unrecognized types.
+fn extension_for(content_type: &str) -> &'static str {
+    match content_type.to_ascii_lowercase().as_str() {
+        "image/png" => ".png",
+        "image/jpeg" => ".jpg",
+        "image/gif" => ".gif",
+        "image/webp" => ".webp",
+        "image/svg+xml" => ".svg",
+        "image/bmp" => ".bmp",
+        _ => ".bin",
+    }
 }
 
 /// Save a draft (subject/body/recipients only — attachments on drafts are out of
