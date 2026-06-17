@@ -26,6 +26,7 @@ interface Message {
   received: string; // ISO-8601
   preview: string;
   isRead: boolean;
+  isFlagged: boolean;
 }
 interface Inbox {
   account: Account | null;
@@ -52,6 +53,12 @@ interface ComposeData {
   cc: string[];
   subject: string;
   quotedHtml: string;
+}
+interface DraftPrefill {
+  to: string[];
+  cc: string[];
+  subject: string;
+  bodyHtml: string; // raw, unsanitized body for the editor
 }
 interface AttachmentInfo {
   id: string;
@@ -139,6 +146,15 @@ function isOutgoingFolder(name: string): boolean {
   const n = name.toLowerCase();
   return n === "sent items" || n === "sent" || n === "drafts" || n === "outbox";
 }
+// The Drafts folder: clicking a row resumes editing in compose, not the reader.
+// (Matched by displayName, consistent with the app's other folder special-casing.)
+function isDraftsFolder(name: string): boolean {
+  return name.toLowerCase() === "drafts";
+}
+function currentFolderIsDrafts(): boolean {
+  const folder = folders.find((f) => f.id === currentFolderId);
+  return !!folder && isDraftsFolder(folder.name);
+}
 
 // ---- Sort (client-side, over the loaded window) ----
 type SortMode = "dateDesc" | "dateAsc" | "sender" | "subject" | "unread";
@@ -184,6 +200,10 @@ appRoot.innerHTML = /* html */ `
         <span id="brand-version" class="brand-version"></span>
       </div>
       <div id="account" class="text-xs opacity-70 truncate flex-1"></div>
+      <div class="toolbar-search">
+        <input id="search" class="input input-bordered input-xs" type="search" placeholder="Search mail…" autocomplete="off" />
+        <button id="search-clear" class="search-clear hidden" type="button" title="Clear search">&times;</button>
+      </div>
       <select id="sort" class="select select-bordered select-xs" title="Sort by">
         <option value="dateDesc">Newest</option>
         <option value="dateAsc">Oldest</option>
@@ -263,6 +283,7 @@ appRoot.innerHTML = /* html */ `
       <div id="compose-msg" class="settings-msg"></div>
       <div class="settings-actions" style="gap: 8px">
         <button id="compose-cancel" class="btn btn-sm">Cancel</button>
+        <button id="compose-savedraft" class="btn btn-sm">Save draft</button>
         <button id="compose-send" class="btn btn-sm btn-primary">Send</button>
       </div>
     </div>
@@ -288,6 +309,8 @@ const brandVersion = document.querySelector<HTMLSpanElement>("#brand-version")!;
 const refreshBtn = document.querySelector<HTMLButtonElement>("#refresh")!;
 const gear = document.querySelector<HTMLButtonElement>("#gear")!;
 const sortSelect = document.querySelector<HTMLSelectElement>("#sort")!;
+const searchInput = document.querySelector<HTMLInputElement>("#search")!;
+const searchClearBtn = document.querySelector<HTMLButtonElement>("#search-clear")!;
 const updateBanner = document.querySelector<HTMLDivElement>("#update-banner")!;
 const updateText = document.querySelector<HTMLSpanElement>("#update-text")!;
 const updateInstall = document.querySelector<HTMLButtonElement>("#update-install")!;
@@ -319,6 +342,7 @@ const cBodyInput = document.querySelector<HTMLDivElement>("#c-body")!;
 const composeToolbar = document.querySelector<HTMLDivElement>("#c-toolbar")!;
 const composeMsg = document.querySelector<HTMLDivElement>("#compose-msg")!;
 const composeCancel = document.querySelector<HTMLButtonElement>("#compose-cancel")!;
+const composeSaveDraftBtn = document.querySelector<HTMLButtonElement>("#compose-savedraft")!;
 const composeSendBtn = document.querySelector<HTMLButtonElement>("#compose-send")!;
 const cAttachBtn = document.querySelector<HTMLButtonElement>("#c-attach")!;
 const cAttachments = document.querySelector<HTMLDivElement>("#c-attachments")!;
@@ -336,6 +360,10 @@ let currentIds = new Set<string>();
 let currentFolderId: string | null = null;
 let folders: FolderInfo[] = [];
 let accountEmail = "";
+// Keyboard-navigation cursor: the id of the row the cursor is on, kept distinct
+// from `selectedId` (the opened/read message) so j/k can move without opening.
+// Reconciled against the rendered rows on every list re-render (see syncCursor).
+let cursorId: string | null = null;
 
 function showSignedOut(): void {
   signinView.classList.remove("hidden");
@@ -347,6 +375,10 @@ function showSignedOut(): void {
   currentFolderId = null;
   folders = [];
   foldersEl.innerHTML = "";
+  searchActive = false;
+  searchSeq++;
+  searchInput.value = "";
+  setSearchClearVisible(false);
   void invoke("set_unread", { count: 0 }).catch(() => {});
   resetReader();
   statusEl.textContent = "Not signed in";
@@ -365,6 +397,29 @@ function resetReader(): void {
 }
 
 // ---- Message list ----
+// Render one list row. `showRecipient` shows "To: …" instead of the sender (used
+// by outgoing folders). Search results use the sender form.
+function messageRowHtml(m: Message, showRecipient: boolean): string {
+  const unread = m.isRead ? "" : "unread";
+  const flagged = m.isFlagged ? " flagged" : "";
+  const dot = m.isRead ? "" : `<span class="dot"></span>`;
+  const flag = m.isFlagged ? `<span class="msg-flag" title="Flagged for follow-up">&#9873;</span>` : "";
+  const who = showRecipient ? `To: ${esc(m.to)}` : esc(senderName(m.from));
+  const whoTitle = showRecipient ? esc(m.to) : esc(m.from);
+  return `
+        <div class="msg ${unread}${flagged}" data-id="${esc(m.id)}">
+          <div class="msg-dot">${dot}</div>
+          <div class="msg-main">
+            <div class="msg-top">
+              <span class="msg-from" title="${whoTitle}">${who}</span>
+              <span class="msg-date">${flag}${esc(fmtDate(m.received))}</span>
+            </div>
+            <div class="msg-subject" title="${esc(m.subject)}">${esc(m.subject)}</div>
+            <div class="msg-preview">${esc(m.preview)}</div>
+          </div>
+        </div>`;
+}
+
 function renderInbox(inbox: Inbox): void {
   if (inbox.account) {
     accountEmail = inbox.account.email;
@@ -379,6 +434,7 @@ function renderInbox(inbox: Inbox): void {
   if (inbox.messages.length === 0) {
     listEl.innerHTML = `<div class="p-6 text-center opacity-60">No messages.</div>`;
     resetReader();
+    syncCursor();
     return;
   }
 
@@ -386,24 +442,7 @@ function renderInbox(inbox: Inbox): void {
   const showRecipient = !!folder && isOutgoingFolder(folder.name);
 
   const rows = sortMessages(inbox.messages)
-    .map((m) => {
-      const unread = m.isRead ? "" : "unread";
-      const dot = m.isRead ? "" : `<span class="dot"></span>`;
-      const who = showRecipient ? `To: ${esc(m.to)}` : esc(senderName(m.from));
-      const whoTitle = showRecipient ? esc(m.to) : esc(m.from);
-      return `
-        <div class="msg ${unread}" data-id="${esc(m.id)}">
-          <div class="msg-dot">${dot}</div>
-          <div class="msg-main">
-            <div class="msg-top">
-              <span class="msg-from" title="${whoTitle}">${who}</span>
-              <span class="msg-date">${esc(fmtDate(m.received))}</span>
-            </div>
-            <div class="msg-subject" title="${esc(m.subject)}">${esc(m.subject)}</div>
-            <div class="msg-preview">${esc(m.preview)}</div>
-          </div>
-        </div>`;
-    })
+    .map((m) => messageRowHtml(m, showRecipient))
     .join("");
 
   const remaining = inbox.total - inbox.messages.length;
@@ -416,6 +455,7 @@ function renderInbox(inbox: Inbox): void {
   // A refresh may have dropped the open message; clear the reader if so.
   if (selectedId && !currentIds.has(selectedId)) resetReader();
   highlightSelected();
+  syncCursor();
 }
 
 function rowFor(id: string): HTMLElement | null {
@@ -428,6 +468,44 @@ function highlightSelected(): void {
   listEl.querySelectorAll<HTMLElement>(".msg").forEach((el) => {
     el.classList.toggle("selected", el.dataset.id === selectedId);
   });
+}
+
+// ---- Keyboard-navigation cursor ----
+// The rendered rows in display order — the basis for cursor movement, so j/k
+// follow the same order the user sees (sort/search aware).
+function rowEls(): HTMLElement[] {
+  return Array.from(listEl.querySelectorAll<HTMLElement>(".msg"));
+}
+function highlightCursor(): void {
+  rowEls().forEach((el) => el.classList.toggle("cursor", el.dataset.id === cursorId));
+}
+// Re-anchor the cursor after a list re-render: keep it on the same message if it
+// survived, else fall back to the first row (or clear it when the list is empty).
+function syncCursor(): void {
+  const rows = rowEls();
+  if (rows.length === 0) {
+    cursorId = null;
+  } else if (!cursorId || !rows.some((el) => el.dataset.id === cursorId)) {
+    cursorId = rows[0].dataset.id ?? null;
+  }
+  highlightCursor();
+}
+// Move the cursor by a signed step, clamped to the list bounds, scrolling the
+// new row into view. No-op when the list is empty.
+function moveCursor(step: number): void {
+  const rows = rowEls();
+  if (rows.length === 0) return;
+  const current = rows.findIndex((el) => el.dataset.id === cursorId);
+  const next = current < 0 ? 0 : Math.min(rows.length - 1, Math.max(0, current + step));
+  cursorId = rows[next].dataset.id ?? null;
+  highlightCursor();
+  rows[next].scrollIntoView({ block: "nearest" });
+}
+// Open the row under the cursor, mirroring a click: drafts resume editing.
+function activateCursor(): void {
+  if (!cursorId) return;
+  if (!searchActive && currentFolderIsDrafts()) void resumeDraft(cursorId);
+  else void openMessage(cursorId);
 }
 // Optimistically mark a row read in the UI, then tell the server.
 function markRead(id: string): void {
@@ -452,7 +530,32 @@ async function setRead(id: string, read: boolean): Promise<void> {
     await loadFolders(); // refresh unread badges
   } catch (e) {
     statusEl.textContent = `Could not update message: ${e}`;
-    await refreshFromCache(true);
+    await revertOptimisticAction();
+  }
+}
+
+// Toggle a message's follow-up flag (context-menu action), reflecting it
+// optimistically on the row and reconciling from the cache on failure.
+async function setFlag(id: string, flagged: boolean): Promise<void> {
+  const row = rowFor(id);
+  if (row) {
+    row.classList.toggle("flagged", flagged);
+    const dateEl = row.querySelector(".msg-date");
+    if (dateEl) {
+      dateEl.querySelector(".msg-flag")?.remove();
+      if (flagged) {
+        dateEl.insertAdjacentHTML(
+          "afterbegin",
+          `<span class="msg-flag" title="Flagged for follow-up">&#9873;</span>`,
+        );
+      }
+    }
+  }
+  try {
+    await invoke("set_flag", { id, flagged });
+  } catch (e) {
+    statusEl.textContent = `Could not update flag: ${e}`;
+    await revertOptimisticAction();
   }
 }
 
@@ -462,11 +565,10 @@ async function deleteMessage(id: string): Promise<void> {
   if (selectedId === id) resetReader();
   try {
     await invoke("delete_message", { id });
-    await refreshFromCache(true); // update loaded/total count
-    await loadFolders(); // refresh unread badges
+    await reconcileAfterAction(); // update loaded/total count and unread badges
   } catch (e) {
     statusEl.textContent = `Delete failed: ${e}`;
-    await refreshFromCache(true); // restore the row from cache
+    await revertOptimisticAction(); // restore the removed row
   }
 }
 
@@ -476,12 +578,83 @@ async function moveMessage(id: string, destinationFolderId: string): Promise<voi
   if (selectedId === id) resetReader();
   try {
     await invoke("move_message", { id, destinationFolderId });
-    await refreshFromCache(true); // update loaded/total count
-    await loadFolders(); // refresh unread badges (source + destination)
+    await reconcileAfterAction(); // update loaded/total count and unread badges
   } catch (e) {
     statusEl.textContent = `Move failed: ${e}`;
-    await refreshFromCache(true); // restore the row from cache
+    await revertOptimisticAction(); // restore the removed row
   }
+}
+
+// ---- Search ----
+// Cross-folder search via live Graph $search. Results bypass the local cache and
+// render into the list area; while a search is active the folder auto-sync must
+// not clobber them. Clicking a result opens it by id (works across folders).
+const SEARCH_TOP = 50;
+const SEARCH_DEBOUNCE_MS = 300;
+let searchActive = false;
+let searchTimer: ReturnType<typeof setTimeout> | null = null;
+let searchSeq = 0; // discards stale responses when the query changes mid-flight
+
+function setSearchClearVisible(visible: boolean): void {
+  searchClearBtn.classList.toggle("hidden", !visible);
+}
+
+// Render search results into the list area, reusing the folder list-row markup.
+function renderSearchResults(query: string, results: Message[]): void {
+  currentIds = new Set(results.map((m) => m.id));
+  const header = `<div class="search-header">Search results for: ${esc(query)} (${results.length})</div>`;
+  if (results.length === 0) {
+    listEl.innerHTML = header + `<div class="p-6 text-center opacity-60">No matching messages.</div>`;
+    if (selectedId && !currentIds.has(selectedId)) resetReader();
+    syncCursor();
+    return;
+  }
+  const rows = sortMessages(results)
+    .map((m) => messageRowHtml(m, false))
+    .join("");
+  listEl.innerHTML = header + rows;
+  if (selectedId && !currentIds.has(selectedId)) resetReader();
+  highlightSelected();
+  syncCursor();
+}
+
+async function runSearch(query: string): Promise<void> {
+  const trimmed = query.trim();
+  if (!trimmed) {
+    exitSearch();
+    return;
+  }
+  searchActive = true;
+  const seq = ++searchSeq;
+  listEl.innerHTML =
+    `<div class="search-header">Search results for: ${esc(trimmed)}</div>` +
+    `<div class="p-6 text-center opacity-60">Searching…</div>`;
+  try {
+    const results = await invoke<Message[]>("search_messages", { query: trimmed, top: SEARCH_TOP });
+    if (seq !== searchSeq || !searchActive) return; // superseded or cleared
+    renderSearchResults(trimmed, results);
+    statusEl.textContent = `${results.length} search result(s) for "${trimmed}"`;
+  } catch (e) {
+    if (seq !== searchSeq || !searchActive) return;
+    listEl.innerHTML =
+      `<div class="search-header">Search results for: ${esc(trimmed)}</div>` +
+      `<div class="p-6 text-center opacity-60">Search failed: ${esc(String(e))}</div>`;
+    statusEl.textContent = `Search failed: ${e}`;
+  }
+}
+
+// Leave search mode and restore the current folder's cached view.
+function exitSearch(): void {
+  if (searchTimer) {
+    clearTimeout(searchTimer);
+    searchTimer = null;
+  }
+  searchSeq++; // invalidate any in-flight response
+  const wasActive = searchActive;
+  searchActive = false;
+  searchInput.value = "";
+  setSearchClearVisible(false);
+  if (wasActive) void refreshFromCache().catch(() => {});
 }
 
 // ---- Reading pane ----
@@ -1000,7 +1173,17 @@ function renderFolders(): void {
 }
 
 async function selectFolder(id: string): Promise<void> {
-  if (id === currentFolderId) return;
+  // Clicking a folder always leaves search mode, even the current folder.
+  if (id === currentFolderId) {
+    if (searchActive) exitSearch();
+    return;
+  }
+  if (searchActive) {
+    searchSeq++;
+    searchActive = false;
+    searchInput.value = "";
+    setSearchClearVisible(false);
+  }
   currentFolderId = id;
   loadedCount = PAGE_SIZE; // start each folder at the first page
   renderFolders();
@@ -1023,6 +1206,27 @@ async function refreshFromCache(preserveScroll = false): Promise<void> {
   showSignedIn();
   renderInbox(inbox);
   if (preserveScroll) listEl.scrollTop = scroll;
+}
+
+// Reconcile the visible list after a row action (read/flag/delete/move). While a
+// search is active the optimistic row update already mutated the displayed search
+// results, so re-rendering the cached folder would clobber them; only the folder
+// unread badges need refreshing. Outside search, re-read the folder from cache.
+async function reconcileAfterAction(): Promise<void> {
+  if (searchActive) {
+    await loadFolders();
+  } else {
+    await refreshFromCache(true);
+    await loadFolders();
+  }
+}
+
+// Undo an optimistic row change after the server call failed. While searching,
+// re-run the query so the list reflects true server state without clobbering it
+// with the cached folder; otherwise restore the row from the cache.
+async function revertOptimisticAction(): Promise<void> {
+  if (searchActive) await runSearch(searchInput.value);
+  else await refreshFromCache(true);
 }
 
 // Pull changes for the current folder into the cache, then re-render from it.
@@ -1098,6 +1302,9 @@ function closeSettings(): void {
 
 // ---- Compose ----
 let composeAttachPaths: string[] = [];
+// The draft currently open in the compose modal, if any. Set when resuming a
+// draft or after the first "Save draft"; null for a fresh compose/reply/forward.
+let currentDraftId: string | null = null;
 
 function renderComposeAttachments(): void {
   cAttachments.innerHTML = composeAttachPaths
@@ -1126,14 +1333,26 @@ function openCompose(opts: {
   to: string[];
   cc: string[];
   subject: string;
-  quotedHtml: string;
+  // The quoted original (reply/forward) — prefixed with a blank line in the editor.
+  quotedHtml?: string;
+  // A resumed draft's raw body — placed in the editor verbatim.
+  bodyHtml?: string;
+  // The draft being edited, if any; null/omitted for a fresh compose.
+  draftId?: string | null;
 }): void {
+  currentDraftId = opts.draftId ?? null;
   composeTitle.textContent = opts.title;
   cToInput.value = opts.to.join(", ");
   cCcInput.value = opts.cc.join(", ");
   cSubjectInput.value = opts.subject;
-  // The quoted original (if any) goes into the editor so it's visible and editable.
-  cBodyInput.innerHTML = opts.quotedHtml ? `<p><br></p>${opts.quotedHtml}` : "";
+  // A resumed draft's body is restored verbatim; a quoted reply/forward goes in
+  // below a blank line so it's visible and editable. Never repopulate the editor
+  // from display-sanitized HTML — drafts carry their own raw body.
+  if (opts.bodyHtml !== undefined) {
+    cBodyInput.innerHTML = opts.bodyHtml;
+  } else {
+    cBodyInput.innerHTML = opts.quotedHtml ? `<p><br></p>${opts.quotedHtml}` : "";
+  }
   composeAttachPaths = [];
   renderComposeAttachments();
   composeMsg.textContent = "";
@@ -1197,11 +1416,67 @@ async function forwardMsg(id?: string): Promise<void> {
   }
 }
 
+// Resume editing a saved draft: load its RAW body (never the display-sanitized
+// reader HTML) and open compose in edit mode, tracking the draft id.
+async function resumeDraft(id: string): Promise<void> {
+  try {
+    const d = await invoke<DraftPrefill>("load_draft", { id });
+    openCompose({
+      title: "Edit draft",
+      to: d.to,
+      cc: d.cc,
+      subject: d.subject,
+      bodyHtml: d.bodyHtml,
+      draftId: id,
+    });
+  } catch (e) {
+    statusEl.textContent = `Could not open draft: ${e}`;
+  }
+}
+
 function parseAddresses(value: string): string[] {
   return value
     .split(/[,;]/)
     .map((a) => a.trim())
     .filter(Boolean);
+}
+
+// Pull the Drafts folder's cache up to date so the list reflects a just
+// saved/sent draft. No-op if Drafts isn't loaded; never throws.
+async function syncDraftsFolder(): Promise<void> {
+  const drafts = folders.find((f) => isDraftsFolder(f.name));
+  if (!drafts) return;
+  try {
+    await invoke("sync_folder", { folderId: drafts.id });
+  } catch {
+    /* best-effort — the next auto-sync will reconcile */
+  }
+  // If Drafts is the folder on screen, re-render it; always refresh badges.
+  if (currentFolderId === drafts.id && !searchActive) await refreshFromCache(true).catch(() => {});
+  await loadFolders();
+}
+
+// Save the compose modal as a draft: create on first save, update thereafter.
+// Tracks the new draft id so subsequent saves (and a later Send) reuse it.
+async function saveDraft(): Promise<void> {
+  composeSaveDraftBtn.disabled = true;
+  composeMsg.textContent = "Saving draft…";
+  try {
+    const id = await invoke<string>("save_draft", {
+      id: currentDraftId,
+      to: parseAddresses(cToInput.value),
+      cc: parseAddresses(cCcInput.value),
+      subject: cSubjectInput.value,
+      bodyHtml: cBodyInput.innerHTML,
+    });
+    currentDraftId = id;
+    composeMsg.textContent = "Draft saved.";
+    await syncDraftsFolder();
+  } catch (e) {
+    composeMsg.textContent = `Could not save draft: ${e}`;
+  } finally {
+    composeSaveDraftBtn.disabled = false;
+  }
 }
 
 async function sendCompose(): Promise<void> {
@@ -1212,17 +1487,38 @@ async function sendCompose(): Promise<void> {
   }
   composeSendBtn.disabled = true;
   composeMsg.textContent = "Sending…";
+  const cc = parseAddresses(cCcInput.value);
+  const subject = cSubjectInput.value;
   const bodyHtml = cBodyInput.innerHTML;
+  const draftId = currentDraftId;
+  // Drafts are sent via the Graph /send path, which carries only the saved draft
+  // body — attachments added in the compose modal aren't persisted to the draft,
+  // so warn rather than silently drop them.
+  if (draftId && composeAttachPaths.length > 0) {
+    composeMsg.textContent =
+      "Attachments aren't supported on drafts yet — remove them or start a fresh message to attach files.";
+    composeSendBtn.disabled = false;
+    return;
+  }
   try {
-    await invoke("send_message", {
-      to,
-      cc: parseAddresses(cCcInput.value),
-      subject: cSubjectInput.value,
-      bodyHtml,
-      attachmentPaths: composeAttachPaths,
-    });
+    if (draftId) {
+      // Resuming a draft: flush edits, then send via /send so the draft is
+      // consumed (moved to Sent) rather than duplicated by a separate sendMail.
+      await invoke("save_draft", { id: draftId, to, cc, subject, bodyHtml });
+      await invoke("send_draft", { id: draftId });
+      currentDraftId = null;
+    } else {
+      await invoke("send_message", {
+        to,
+        cc,
+        subject,
+        bodyHtml,
+        attachmentPaths: composeAttachPaths,
+      });
+    }
     closeCompose();
     statusEl.textContent = "Message sent.";
+    if (draftId) await syncDraftsFolder(); // the sent draft has left Drafts
   } catch (e) {
     composeMsg.textContent = `Send failed: ${e}`;
   } finally {
@@ -1243,7 +1539,13 @@ listEl.addEventListener("click", (e) => {
     return;
   }
   const row = target.closest<HTMLElement>(".msg");
-  if (row?.dataset.id) void openMessage(row.dataset.id);
+  if (!row?.dataset.id) return;
+  cursorId = row.dataset.id; // keep the keyboard cursor on the clicked row
+  highlightCursor();
+  // In Drafts, a click resumes editing in compose rather than opening the reader.
+  // (Search results are never drafts here — they render with the sender form.)
+  if (!searchActive && currentFolderIsDrafts()) void resumeDraft(row.dataset.id);
+  else void openMessage(row.dataset.id);
 });
 
 // ---- Email right-click context menu ----
@@ -1274,7 +1576,7 @@ function placeMenu(): void {
   ctxMenu.style.top = `${top}px`;
 }
 
-function renderMainMenu(unread: boolean): void {
+function renderMainMenu(unread: boolean, flagged: boolean): void {
   const items: Array<{ act: string; label: string; danger?: boolean } | "sep"> = [
     { act: "open", label: "Open" },
     { act: "reply", label: "Reply" },
@@ -1282,6 +1584,7 @@ function renderMainMenu(unread: boolean): void {
     { act: "forward", label: "Forward" },
     "sep",
     { act: "toggleRead", label: unread ? "Mark as read" : "Mark as unread" },
+    { act: "toggleFlag", label: flagged ? "Clear flag" : "Flag" },
     { act: "moveMenu", label: "Move to folder…" },
     { act: "delete", label: "Delete", danger: true },
   ];
@@ -1311,11 +1614,11 @@ function renderFolderMenu(): void {
     `<div class="ctx-folders">${list}</div>`;
 }
 
-function showCtxMenu(x: number, y: number, id: string, unread: boolean): void {
+function showCtxMenu(x: number, y: number, id: string, unread: boolean, flagged: boolean): void {
   ctxTargetId = id;
   ctxX = x;
   ctxY = y;
-  renderMainMenu(unread);
+  renderMainMenu(unread, flagged);
   ctxMenu.classList.remove("hidden");
   placeMenu();
   rowFor(id)?.classList.add("ctx-target");
@@ -1325,7 +1628,13 @@ listEl.addEventListener("contextmenu", (e) => {
   const row = (e.target as HTMLElement).closest<HTMLElement>(".msg");
   if (!row?.dataset.id) return; // off a row: leave the default menu
   e.preventDefault();
-  showCtxMenu(e.clientX, e.clientY, row.dataset.id, row.classList.contains("unread"));
+  showCtxMenu(
+    e.clientX,
+    e.clientY,
+    row.dataset.id,
+    row.classList.contains("unread"),
+    row.classList.contains("flagged"),
+  );
 });
 
 ctxMenu.addEventListener("click", (e) => {
@@ -1343,12 +1652,16 @@ ctxMenu.addEventListener("click", (e) => {
     return;
   }
   if (item.dataset.act === "back") {
-    renderMainMenu(rowFor(id)?.classList.contains("unread") ?? false);
+    renderMainMenu(
+      rowFor(id)?.classList.contains("unread") ?? false,
+      rowFor(id)?.classList.contains("flagged") ?? false,
+    );
     placeMenu();
     return;
   }
 
   const unread = rowFor(id)?.classList.contains("unread") ?? false;
+  const flagged = rowFor(id)?.classList.contains("flagged") ?? false;
   const destFolderId = item.dataset.fid;
   hideCtxMenu();
   if (destFolderId) {
@@ -1357,7 +1670,8 @@ ctxMenu.addEventListener("click", (e) => {
   }
   switch (item.dataset.act) {
     case "open":
-      void openMessage(id);
+      if (!searchActive && currentFolderIsDrafts()) void resumeDraft(id);
+      else void openMessage(id);
       break;
     case "reply":
       void replyTo(false, id);
@@ -1370,6 +1684,9 @@ ctxMenu.addEventListener("click", (e) => {
       break;
     case "toggleRead":
       void setRead(id, unread); // unread → mark read; read → mark unread
+      break;
+    case "toggleFlag":
+      void setFlag(id, !flagged); // flagged → clear; unflagged → flag
       break;
     case "delete":
       void deleteMessage(id);
@@ -1385,11 +1702,43 @@ document.addEventListener("keydown", (e) => {
 });
 window.addEventListener("blur", hideCtxMenu);
 listEl.addEventListener("scroll", hideCtxMenu);
-refreshBtn.addEventListener("click", () => void syncFolder());
+refreshBtn.addEventListener("click", () => {
+  if (searchActive) exitSearch(); // Refresh leaves search and reloads the folder
+  void syncFolder();
+});
 sortSelect.addEventListener("change", () => {
   sortMode = sortSelect.value as SortMode;
   localStorage.setItem(SORT_KEY, sortMode);
-  void refreshFromCache(true);
+  // The sort applies to whatever is shown: search results or the cached folder.
+  if (searchActive) void runSearch(searchInput.value);
+  else void refreshFromCache(true);
+});
+
+// Search: debounce typing, submit immediately on Enter, clear on Escape.
+searchInput.addEventListener("input", () => {
+  const value = searchInput.value;
+  setSearchClearVisible(value.trim().length > 0);
+  if (searchTimer) clearTimeout(searchTimer);
+  if (!value.trim()) {
+    exitSearch();
+    return;
+  }
+  searchTimer = setTimeout(() => void runSearch(value), SEARCH_DEBOUNCE_MS);
+});
+searchInput.addEventListener("keydown", (e) => {
+  if (e.key === "Enter") {
+    e.preventDefault();
+    if (searchTimer) clearTimeout(searchTimer);
+    void runSearch(searchInput.value);
+  } else if (e.key === "Escape" && searchInput.value) {
+    e.preventDefault();
+    e.stopPropagation();
+    exitSearch();
+  }
+});
+searchClearBtn.addEventListener("click", () => {
+  exitSearch();
+  searchInput.focus();
 });
 gear.addEventListener("click", openSettings);
 signinBtn.addEventListener("click", () => void signIn());
@@ -1397,6 +1746,7 @@ settingsClose.addEventListener("click", closeSettings);
 signoutBtn.addEventListener("click", () => void signOut());
 composeBtn.addEventListener("click", composeNew);
 composeCancel.addEventListener("click", closeCompose);
+composeSaveDraftBtn.addEventListener("click", () => void saveDraft());
 composeSendBtn.addEventListener("click", () => void sendCompose());
 cAttachBtn.addEventListener("click", () => void pickAttachments());
 // Rich-text editing via execCommand (deprecated but universally supported in the
@@ -1450,6 +1800,110 @@ document.addEventListener("keydown", (e) => {
   if (!headersOverlay.classList.contains("hidden")) closeHeaders();
   else if (!settingsOverlay.classList.contains("hidden")) closeSettings();
   else if (!composeOverlay.classList.contains("hidden")) closeCompose();
+});
+
+// ---- Global keyboard shortcuts (message-list navigation + actions) ----
+// A single keydown layer over the message list. It MUST stay inert while the
+// user is typing or a modal is open — otherwise plain letters (r, f, c, …) would
+// fire actions mid-compose or mid-search. Escape is intentionally left to the
+// existing handlers (search input, context menu, modal stack) so this layer
+// never competes with them.
+
+// True when focus is in a text-entry surface (search box, compose fields/body,
+// any input/textarea/select or contenteditable), so letter keys must pass
+// through as text rather than trigger shortcuts.
+function isTypingTarget(): boolean {
+  const el = document.activeElement as HTMLElement | null;
+  if (!el) return false;
+  if (el.isContentEditable) return true;
+  const tag = el.tagName;
+  return tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT";
+}
+// Any modal open means shortcuts are suspended (the modal owns the keyboard).
+function aModalIsOpen(): boolean {
+  return (
+    !composeOverlay.classList.contains("hidden") ||
+    !settingsOverlay.classList.contains("hidden") ||
+    !headersOverlay.classList.contains("hidden")
+  );
+}
+
+function cursorRowState(): { unread: boolean; flagged: boolean } | null {
+  if (!cursorId) return null;
+  const row = rowFor(cursorId);
+  if (!row) return null;
+  return { unread: row.classList.contains("unread"), flagged: row.classList.contains("flagged") };
+}
+
+document.addEventListener("keydown", (e) => {
+  // Never intercept while signed out, typing, holding a modifier, or in a modal.
+  if (mainView.classList.contains("hidden")) return;
+  if (e.ctrlKey || e.metaKey || e.altKey) return;
+  if (isTypingTarget() || aModalIsOpen()) return;
+  // The context menu owns the keyboard while open (its own Escape closes it);
+  // don't fire list actions behind it.
+  if (!ctxMenu.classList.contains("hidden")) return;
+
+  // "/" focuses search regardless of the cursor; it's the one binding that
+  // deliberately moves focus into a text field.
+  if (e.key === "/") {
+    e.preventDefault();
+    searchInput.focus();
+    searchInput.select();
+    return;
+  }
+
+  switch (e.key) {
+    case "j":
+    case "ArrowDown":
+      e.preventDefault();
+      moveCursor(1);
+      return;
+    case "k":
+    case "ArrowUp":
+      e.preventDefault();
+      moveCursor(-1);
+      return;
+    case "Enter":
+      e.preventDefault();
+      activateCursor();
+      return;
+    case "c":
+      e.preventDefault();
+      composeNew();
+      return;
+  }
+
+  // The remaining bindings all act on the row under the cursor.
+  if (!cursorId) return;
+  const id = cursorId;
+  const state = cursorRowState();
+  switch (e.key) {
+    case "r":
+      e.preventDefault();
+      void replyTo(false, id);
+      break;
+    case "a":
+      e.preventDefault();
+      void replyTo(true, id);
+      break;
+    case "f":
+      e.preventDefault();
+      void forwardMsg(id);
+      break;
+    case "u":
+      e.preventDefault();
+      if (state) void setRead(id, state.unread); // unread → read; read → unread
+      break;
+    case "g":
+      e.preventDefault();
+      if (state) void setFlag(id, !state.flagged); // toggle follow-up flag
+      break;
+    case "#":
+      e.preventDefault();
+      void deleteMessage(id);
+      break;
+  }
 });
 
 updateInstall.addEventListener("click", () => void installUpdate());
@@ -1527,5 +1981,6 @@ void boot();
 // Pick up new mail in the current folder automatically (quietly, every 60s).
 const AUTO_SYNC_MS = 60_000;
 setInterval(() => {
-  if (currentFolderId) void syncFolder(true);
+  // Don't clobber displayed search results with a background folder refresh.
+  if (currentFolderId && !searchActive) void syncFolder(true);
 }, AUTO_SYNC_MS);

@@ -6,9 +6,9 @@ use std::sync::LazyLock;
 use async_trait::async_trait;
 use base64::Engine;
 use wattmail_domain::{
-    Attachment, EmailAddress, Folder, MailError, MailProvider, MessageBody, MessageChange,
-    MessageHeader, MessageSummary, OutgoingAttachment, OutgoingMessage, SyncBatch, SyncToken,
-    UserProfile,
+    Attachment, DraftPrefill, EmailAddress, Folder, MailError, MailProvider, MessageBody,
+    MessageChange, MessageHeader, MessageSummary, OutgoingAttachment, OutgoingMessage, SyncBatch,
+    SyncToken, UserProfile,
 };
 
 const GRAPH_BASE: &str = "https://graph.microsoft.com/v1.0";
@@ -127,7 +127,7 @@ impl MailProvider for GraphClient {
         let url = format!(
             "{GRAPH_BASE}/me/messages\
              ?$top={top}\
-             &$select=id,subject,from,toRecipients,receivedDateTime,bodyPreview,isRead\
+             &$select=id,subject,from,toRecipients,receivedDateTime,bodyPreview,isRead,flag\
              &$orderby=receivedDateTime desc"
         );
         let body: GraphMessages = self
@@ -138,6 +138,47 @@ impl MailProvider for GraphClient {
             .map_err(|e| MailError::Decode(e.to_string()))?;
 
         Ok(body.value.into_iter().map(MessageSummary::from).collect())
+    }
+
+    async fn search(&self, query: &str, top: u32) -> Result<Vec<MessageSummary>, MailError> {
+        // `$search` matches across folders by relevance. It cannot be combined
+        // with `$orderby` and requires the `ConsistencyLevel: eventual` header;
+        // we sort the results newest-first ourselves below.
+        //
+        // The query is wrapped in KQL double-quotes for a phrase match, so any
+        // double-quotes the user typed would break the quoting and produce a
+        // malformed phrase (HTTP 400). Replace them with spaces to keep the
+        // phrase well-formed.
+        let search_value = format!("\"{}\"", query.replace('"', " "));
+        let response = self
+            .http
+            .get(format!("{GRAPH_BASE}/me/messages"))
+            .bearer_auth(&self.access_token)
+            .header("ConsistencyLevel", "eventual")
+            .query(&[
+                ("$search", search_value.as_str()),
+                (
+                    "$select",
+                    "id,subject,from,toRecipients,receivedDateTime,bodyPreview,isRead,flag",
+                ),
+                ("$top", &top.to_string()),
+            ])
+            .send()
+            .await
+            .map_err(|e| MailError::Network(e.to_string()))?;
+
+        let body: GraphMessages = check_status(response)
+            .await?
+            .json()
+            .await
+            .map_err(|e| MailError::Decode(e.to_string()))?;
+
+        let mut messages: Vec<MessageSummary> =
+            body.value.into_iter().map(MessageSummary::from).collect();
+        // Relevance order isn't chronological; present newest first to match the
+        // folder list views.
+        messages.sort_by(|a, b| b.received.cmp(&a.received));
+        Ok(messages)
     }
 
     async fn message(&self, id: &str, allow_images: bool) -> Result<MessageBody, MailError> {
@@ -240,6 +281,20 @@ impl MailProvider for GraphClient {
         Ok(())
     }
 
+    async fn set_flag(&self, id: &str, flagged: bool) -> Result<(), MailError> {
+        let flag_status = if flagged { "flagged" } else { "notFlagged" };
+        let response = self
+            .http
+            .patch(message_endpoint(id).as_str())
+            .bearer_auth(&self.access_token)
+            .json(&serde_json::json!({ "flag": { "flagStatus": flag_status } }))
+            .send()
+            .await
+            .map_err(|e| MailError::Network(e.to_string()))?;
+        check_status(response).await?;
+        Ok(())
+    }
+
     async fn delete_message(&self, id: &str) -> Result<(), MailError> {
         // Graph DELETE on a message moves it to Deleted Items (soft delete).
         let response = self
@@ -307,6 +362,7 @@ impl MailProvider for GraphClient {
                         received: item.received_date_time.unwrap_or_default(),
                         preview: item.body_preview.unwrap_or_default(),
                         is_read: item.is_read.unwrap_or(false),
+                        is_flagged: flag_is_flagged(item.flag.as_ref()),
                     }));
                 }
             }
@@ -355,6 +411,80 @@ impl MailProvider for GraphClient {
             });
         }
         Ok(())
+    }
+
+    async fn create_draft(&self, message: &OutgoingMessage) -> Result<String, MailError> {
+        // POST /me/messages creates a draft (subject/body/recipients only;
+        // attachments on drafts are out of scope) and returns it with its new id.
+        let response = self
+            .http
+            .post(format!("{GRAPH_BASE}/me/messages"))
+            .bearer_auth(&self.access_token)
+            .json(&draft_body_json(message))
+            .send()
+            .await
+            .map_err(|e| MailError::Network(e.to_string()))?;
+
+        let created: GraphCreatedDraft = check_status(response)
+            .await?
+            .json()
+            .await
+            .map_err(|e| MailError::Decode(e.to_string()))?;
+        Ok(created.id)
+    }
+
+    async fn update_draft(&self, id: &str, message: &OutgoingMessage) -> Result<(), MailError> {
+        // PATCH /me/messages/{id} replaces the editable fields in place.
+        let response = self
+            .http
+            .patch(message_endpoint(id).as_str())
+            .bearer_auth(&self.access_token)
+            .json(&draft_body_json(message))
+            .send()
+            .await
+            .map_err(|e| MailError::Network(e.to_string()))?;
+        check_status(response).await?;
+        Ok(())
+    }
+
+    async fn send_draft(&self, id: &str) -> Result<(), MailError> {
+        // POST /me/messages/{id}/send sends the existing draft (no body); Graph
+        // moves it to Sent Items. We must NOT also call sendMail — that would
+        // duplicate-send and orphan the draft.
+        let mut url = message_endpoint(id);
+        url.path_segments_mut()
+            .expect("base URL is a proper path")
+            .push("send");
+        let response = self
+            .http
+            .post(url.as_str())
+            .bearer_auth(&self.access_token)
+            .send()
+            .await
+            .map_err(|e| MailError::Network(e.to_string()))?;
+        check_status(response).await?;
+        Ok(())
+    }
+
+    async fn load_draft(&self, id: &str) -> Result<DraftPrefill, MailError> {
+        // Fetch the RAW editable body (not the display-sanitized html from
+        // `message`) so the editor round-trips the draft faithfully.
+        let mut url = message_endpoint(id);
+        url.set_query(Some("$select=subject,toRecipients,ccRecipients,body"));
+
+        let message: GraphDraftMessage = self
+            .get(url.as_str())
+            .await?
+            .json()
+            .await
+            .map_err(|e| MailError::Decode(e.to_string()))?;
+
+        Ok(DraftPrefill {
+            to: recipient_addresses(&message.to_recipients.unwrap_or_default()),
+            cc: recipient_addresses(&message.cc_recipients.unwrap_or_default()),
+            subject: message.subject.unwrap_or_default(),
+            body_html: message.body.map(|b| b.content).unwrap_or_default(),
+        })
     }
 
     async fn attachments(&self, message_id: &str) -> Result<Vec<Attachment>, MailError> {
@@ -437,6 +567,23 @@ struct GraphMessage {
     received_date_time: Option<String>,
     body_preview: Option<String>,
     is_read: bool,
+    flag: Option<GraphFlag>,
+}
+
+/// The `flag` property of a message; `flagStatus` is one of `notFlagged`,
+/// `flagged`, or `complete`.
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GraphFlag {
+    flag_status: Option<String>,
+}
+
+/// True only when the message currently carries an active follow-up flag
+/// (`flagged`); `notFlagged`, `complete`, and an absent flag are all false.
+fn flag_is_flagged(flag: Option<&GraphFlag>) -> bool {
+    flag.and_then(|f| f.flag_status.as_deref())
+        .map(|s| s.eq_ignore_ascii_case("flagged"))
+        .unwrap_or(false)
 }
 
 #[derive(serde::Deserialize)]
@@ -462,6 +609,23 @@ struct GraphFullMessage {
 struct GraphBody {
     content_type: String,
     content: String,
+}
+
+/// The created-draft response from `POST /me/messages` — we only need its id.
+#[derive(serde::Deserialize)]
+struct GraphCreatedDraft {
+    id: String,
+}
+
+/// A draft fetched for editing: its raw editable fields. The body is *not*
+/// sanitized here — it is fed back into the compose editor verbatim.
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GraphDraftMessage {
+    subject: Option<String>,
+    to_recipients: Option<Vec<GraphRecipient>>,
+    cc_recipients: Option<Vec<GraphRecipient>>,
+    body: Option<GraphBody>,
 }
 
 #[derive(serde::Deserialize)]
@@ -496,6 +660,7 @@ struct DeltaItem {
     received_date_time: Option<String>,
     body_preview: Option<String>,
     is_read: Option<bool>,
+    flag: Option<GraphFlag>,
     #[serde(rename = "@removed")]
     removed: Option<serde_json::Value>,
 }
@@ -536,7 +701,7 @@ fn folder_delta_url(folder_id: &str) -> String {
         segments.push("delta");
     }
     url.set_query(Some(
-        "$select=id,subject,from,toRecipients,receivedDateTime,bodyPreview,isRead&$top=50",
+        "$select=id,subject,from,toRecipients,receivedDateTime,bodyPreview,isRead,flag&$top=50",
     ));
     url.into()
 }
@@ -553,6 +718,17 @@ struct GraphFolder {
     display_name: Option<String>,
     unread_item_count: Option<u32>,
     child_folder_count: Option<u32>,
+}
+
+/// Build the Graph message body for a draft create/update: subject, HTML body,
+/// and recipients only. Attachments are out of MVP scope for drafts.
+fn draft_body_json(message: &OutgoingMessage) -> serde_json::Value {
+    serde_json::json!({
+        "subject": message.subject,
+        "body": { "contentType": "HTML", "content": message.body_html },
+        "toRecipients": recipients_json(&message.to),
+        "ccRecipients": recipients_json(&message.cc),
+    })
 }
 
 /// Build the Graph attachment array for an outgoing message (base64 file content).
@@ -721,6 +897,7 @@ impl From<GraphMessage> for MessageSummary {
             received: m.received_date_time.unwrap_or_default(),
             preview: m.body_preview.unwrap_or_default(),
             is_read: m.is_read,
+            is_flagged: flag_is_flagged(m.flag.as_ref()),
         }
     }
 }

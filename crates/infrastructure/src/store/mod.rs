@@ -12,14 +12,14 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use rusqlite::{Connection, OptionalExtension};
-use wattmail_domain::{MailError, MailStore, MessageSummary};
+use wattmail_domain::{Folder, MailError, MailStore, MessageSummary};
 
 use crate::crypto::FieldCipher;
 
 /// Bumped whenever the schema or on-disk format changes. The cache is disposable
 /// (re-derivable from the server), so a mismatch drops and rebuilds — which also
 /// re-encrypts everything under the current key.
-const SCHEMA_VERSION: i64 = 4;
+const SCHEMA_VERSION: i64 = 5;
 
 const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS messages (
@@ -30,12 +30,20 @@ CREATE TABLE IF NOT EXISTS messages (
     recipients TEXT NOT NULL,
     received   TEXT NOT NULL,
     preview    TEXT NOT NULL,
-    is_read    INTEGER NOT NULL
+    is_read    INTEGER NOT NULL,
+    is_flagged INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_messages_folder_received ON messages(folder_id, received DESC);
 CREATE TABLE IF NOT EXISTS sync_state (
     key   TEXT PRIMARY KEY,
     value TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS folders (
+    id           TEXT PRIMARY KEY,
+    name         TEXT NOT NULL,
+    unread_count INTEGER NOT NULL,
+    depth        INTEGER NOT NULL,
+    position     INTEGER NOT NULL
 );
 ";
 
@@ -55,6 +63,16 @@ struct EncryptedRow {
     received: String,
     preview: String,
     is_read: i64,
+    is_flagged: i64,
+}
+
+/// An encrypted folder row, ready to insert (built off the blocking thread).
+struct EncryptedFolderRow {
+    id: String,
+    name: String,
+    unread_count: i64,
+    depth: i64,
+    position: i64,
 }
 
 impl SqliteStore {
@@ -93,7 +111,9 @@ impl SqliteStore {
 fn migrate(conn: &Connection) -> rusqlite::Result<()> {
     let version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
     if version != SCHEMA_VERSION {
-        conn.execute_batch("DROP TABLE IF EXISTS messages; DROP TABLE IF EXISTS sync_state;")?;
+        conn.execute_batch(
+            "DROP TABLE IF EXISTS messages; DROP TABLE IF EXISTS sync_state; DROP TABLE IF EXISTS folders;",
+        )?;
         conn.execute_batch(SCHEMA)?;
         conn.execute_batch(&format!("PRAGMA user_version = {SCHEMA_VERSION};"))?;
     } else {
@@ -121,13 +141,14 @@ impl MailStore for SqliteStore {
                 received: m.received.clone(),
                 preview: self.cipher.encrypt(&m.preview),
                 is_read: i64::from(m.is_read),
+                is_flagged: i64::from(m.is_flagged),
             })
             .collect();
 
         self.run(move |conn| {
             let mut stmt = conn.prepare(
-                "INSERT INTO messages (id, folder_id, subject, sender, recipients, received, preview, is_read)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+                "INSERT INTO messages (id, folder_id, subject, sender, recipients, received, preview, is_read, is_flagged)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
                  ON CONFLICT(id) DO UPDATE SET
                      folder_id  = excluded.folder_id,
                      subject    = excluded.subject,
@@ -135,7 +156,8 @@ impl MailStore for SqliteStore {
                      recipients = excluded.recipients,
                      received   = excluded.received,
                      preview    = excluded.preview,
-                     is_read    = excluded.is_read",
+                     is_read    = excluded.is_read,
+                     is_flagged = excluded.is_flagged",
             )?;
             for r in &rows {
                 stmt.execute(rusqlite::params![
@@ -147,6 +169,7 @@ impl MailStore for SqliteStore {
                     r.received,
                     r.preview,
                     r.is_read,
+                    r.is_flagged,
                 ])?;
             }
             Ok(())
@@ -168,7 +191,7 @@ impl MailStore for SqliteStore {
         let mut rows = self
             .run(move |conn| {
                 let mut stmt = conn.prepare(
-                    "SELECT id, subject, sender, recipients, received, preview, is_read
+                    "SELECT id, subject, sender, recipients, received, preview, is_read, is_flagged
                      FROM messages WHERE folder_id = ?1 ORDER BY received DESC LIMIT ?2",
                 )?;
                 let rows = stmt.query_map(rusqlite::params![folder_id, top], |row| {
@@ -180,6 +203,7 @@ impl MailStore for SqliteStore {
                         received: row.get(4)?,
                         preview: row.get(5)?, // encrypted
                         is_read: row.get::<_, i64>(6)? != 0,
+                        is_flagged: row.get::<_, i64>(7)? != 0,
                     })
                 })?;
                 rows.collect::<rusqlite::Result<Vec<_>>>()
@@ -219,6 +243,80 @@ impl MailStore for SqliteStore {
             Ok(())
         })
         .await
+    }
+
+    async fn set_flag(&self, id: &str, flagged: bool) -> Result<(), MailError> {
+        let id = id.to_string();
+        self.run(move |conn| {
+            conn.execute(
+                "UPDATE messages SET is_flagged = ?1 WHERE id = ?2",
+                rusqlite::params![i64::from(flagged), id],
+            )?;
+            Ok(())
+        })
+        .await
+    }
+
+    async fn save_folders(&self, folders: Vec<Folder>) -> Result<(), MailError> {
+        // Encrypt folder names (content) before the blocking thread; ids, counts,
+        // depth, and position stay plaintext for ordering and display.
+        let rows: Vec<EncryptedFolderRow> = folders
+            .iter()
+            .enumerate()
+            .map(|(position, f)| EncryptedFolderRow {
+                id: f.id.clone(),
+                name: self.cipher.encrypt(&f.name),
+                unread_count: i64::from(f.unread_count),
+                depth: i64::from(f.depth),
+                position: position as i64,
+            })
+            .collect();
+
+        self.run(move |conn| {
+            // Replace-all: the live list is authoritative, so wipe then re-insert
+            // in order. position preserves the sidebar's tree order on read-back.
+            conn.execute("DELETE FROM folders", [])?;
+            let mut stmt = conn.prepare(
+                "INSERT INTO folders (id, name, unread_count, depth, position)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+            )?;
+            for r in &rows {
+                stmt.execute(rusqlite::params![
+                    r.id,
+                    r.name,
+                    r.unread_count,
+                    r.depth,
+                    r.position,
+                ])?;
+            }
+            Ok(())
+        })
+        .await
+    }
+
+    async fn cached_folders(&self) -> Result<Vec<Folder>, MailError> {
+        let mut folders = self
+            .run(move |conn| {
+                let mut stmt = conn.prepare(
+                    "SELECT id, name, unread_count, depth
+                     FROM folders ORDER BY position ASC",
+                )?;
+                let rows = stmt.query_map([], |row| {
+                    Ok(Folder {
+                        id: row.get(0)?,
+                        name: row.get(1)?, // encrypted
+                        unread_count: row.get::<_, i64>(2)?.max(0) as u32,
+                        depth: row.get::<_, i64>(3)?.max(0) as u32,
+                    })
+                })?;
+                rows.collect::<rusqlite::Result<Vec<_>>>()
+            })
+            .await?;
+
+        for f in &mut folders {
+            f.name = self.cipher.decrypt(&f.name);
+        }
+        Ok(folders)
     }
 
     async fn load_state(&self, key: &str) -> Result<Option<String>, MailError> {

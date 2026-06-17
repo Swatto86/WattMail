@@ -4,8 +4,8 @@
 //! composition root.
 
 use wattmail_domain::{
-    Attachment, Folder, MailError, MailProvider, MailStore, MessageBody, MessageChange,
-    MessageHeader, MessageSummary, OutgoingMessage, SyncToken, UserProfile,
+    Attachment, DraftPrefill, Folder, MailError, MailProvider, MailStore, MessageBody,
+    MessageChange, MessageHeader, MessageSummary, OutgoingMessage, SyncToken, UserProfile,
 };
 
 const ACCOUNT_NAME_KEY: &str = "account.displayName";
@@ -32,9 +32,32 @@ pub async fn inbox_preview(
     Ok(InboxPreview { user, messages })
 }
 
-/// List the user's mail folders.
-pub async fn list_folders(provider: &dyn MailProvider) -> Result<Vec<Folder>, MailError> {
-    provider.folders().await
+/// Search the mailbox across folders, live from the provider (the local cache
+/// can't be searched — its content columns are encrypted per-value).
+pub async fn search_messages(
+    provider: &dyn MailProvider,
+    query: &str,
+    top: u32,
+) -> Result<Vec<MessageSummary>, MailError> {
+    provider.search(query, top).await
+}
+
+/// List the user's mail folders live from the provider, persisting them to the
+/// local store (write-through) so a later cold/offline start can still render the
+/// sidebar.
+pub async fn list_folders(
+    provider: &dyn MailProvider,
+    store: &dyn MailStore,
+) -> Result<Vec<Folder>, MailError> {
+    let folders = provider.folders().await?;
+    store.save_folders(folders.clone()).await?;
+    Ok(folders)
+}
+
+/// Read the cached folder list (sidebar order) — the offline fallback for
+/// [`list_folders`].
+pub async fn cached_folders(store: &dyn MailStore) -> Result<Vec<Folder>, MailError> {
+    store.cached_folders().await
 }
 
 /// Fetch a single message with its sanitized body.
@@ -63,6 +86,17 @@ pub async fn set_read(
 ) -> Result<(), MailError> {
     provider.set_read(id, read).await?;
     store.set_read(id, read).await
+}
+
+/// Set a message's follow-up flag on the server and in the local cache.
+pub async fn set_flag(
+    provider: &dyn MailProvider,
+    store: &dyn MailStore,
+    id: &str,
+    flagged: bool,
+) -> Result<(), MailError> {
+    provider.set_flag(id, flagged).await?;
+    store.set_flag(id, flagged).await
 }
 
 /// Delete a message on the server (→ Deleted Items) and drop it from the cache.
@@ -167,6 +201,33 @@ pub async fn send_message(
     message: &OutgoingMessage,
 ) -> Result<(), MailError> {
     provider.send_message(message).await
+}
+
+/// Save a draft: create a new one when `id` is `None`, otherwise update the
+/// existing draft in place. Returns the draft's id so the caller can track it
+/// for subsequent saves and sends.
+pub async fn save_draft(
+    provider: &dyn MailProvider,
+    id: Option<&str>,
+    message: &OutgoingMessage,
+) -> Result<String, MailError> {
+    match id {
+        Some(id) => {
+            provider.update_draft(id, message).await?;
+            Ok(id.to_string())
+        }
+        None => provider.create_draft(message).await,
+    }
+}
+
+/// Send an existing draft (moves it to Sent Items, consuming the draft).
+pub async fn send_draft(provider: &dyn MailProvider, id: &str) -> Result<(), MailError> {
+    provider.send_draft(id).await
+}
+
+/// Load a draft for editing, with its raw (unsanitized) body.
+pub async fn load_draft(provider: &dyn MailProvider, id: &str) -> Result<DraftPrefill, MailError> {
+    provider.load_draft(id).await
 }
 
 /// List a message's attachments.

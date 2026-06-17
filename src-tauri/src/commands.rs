@@ -5,9 +5,12 @@ use tauri::State;
 
 use crate::settings::{self, SettingsState};
 use wattmail_application::{
-    compose_forward, compose_reply, delete_message as app_delete_message, download_attachment,
+    cached_folders as app_cached_folders, compose_forward, compose_reply,
+    delete_message as app_delete_message, download_attachment,
     folder_from_cache as app_folder_from_cache, list_attachments, list_folders as app_list_folders,
-    move_message as app_move_message, read_headers, read_message, send_message as app_send_message,
+    load_draft as app_load_draft, move_message as app_move_message, read_headers, read_message,
+    save_draft as app_save_draft, search_messages as app_search_messages,
+    send_draft as app_send_draft, send_message as app_send_message, set_flag as app_set_flag,
     set_read as app_set_read, sync_folder as app_sync_folder,
 };
 use wattmail_domain::{Folder, MessageSummary, OutgoingAttachment, OutgoingMessage};
@@ -30,6 +33,7 @@ pub struct MessageDto {
     pub received: String,
     pub preview: String,
     pub is_read: bool,
+    pub is_flagged: bool,
 }
 
 #[derive(Serialize)]
@@ -50,6 +54,7 @@ fn message_dto(m: MessageSummary) -> MessageDto {
         received: m.received,
         preview: m.preview,
         is_read: m.is_read,
+        is_flagged: m.is_flagged,
     }
 }
 
@@ -86,14 +91,28 @@ pub fn sign_out(auth: State<'_, AuthService>) -> Result<(), String> {
     auth.sign_out().map_err(|e| e.to_string())
 }
 
-/// List the user's mail folders (live).
+/// List the user's mail folders. Tries the live Graph list (persisting it to the
+/// cache write-through); on a provider/network failure, falls back to the cached
+/// list so the sidebar still renders offline.
 #[tauri::command]
-pub async fn list_folders(auth: State<'_, AuthService>) -> Result<Vec<FolderDto>, String> {
-    let token = auth.access_token().await.map_err(|e| e.to_string())?;
-    let provider = GraphClient::new(token);
-    let folders = app_list_folders(&provider)
-        .await
-        .map_err(|e| e.to_string())?;
+pub async fn list_folders(
+    auth: State<'_, AuthService>,
+    store: State<'_, SqliteStore>,
+) -> Result<Vec<FolderDto>, String> {
+    let live = match auth.access_token().await {
+        Ok(token) => {
+            let provider = GraphClient::new(token);
+            app_list_folders(&provider, &*store).await
+        }
+        Err(e) => Err(wattmail_domain::MailError::Network(e.to_string())),
+    };
+
+    let folders = match live {
+        Ok(folders) => folders,
+        Err(_) => app_cached_folders(&*store)
+            .await
+            .map_err(|e| e.to_string())?,
+    };
     Ok(folders.into_iter().map(folder_dto).collect())
 }
 
@@ -129,6 +148,22 @@ pub async fn sync_folder(
     app_sync_folder(&provider, &*store, &folder_id)
         .await
         .map_err(|e| e.to_string())
+}
+
+/// Search the mailbox across folders (live Graph `$search`). Results are not
+/// cached; an empty/whitespace query yields no results.
+#[tauri::command]
+pub async fn search_messages(
+    auth: State<'_, AuthService>,
+    query: String,
+    top: u32,
+) -> Result<Vec<MessageDto>, String> {
+    let token = auth.access_token().await.map_err(|e| e.to_string())?;
+    let provider = GraphClient::new(token);
+    let results = app_search_messages(&provider, &query, top)
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(results.into_iter().map(message_dto).collect())
 }
 
 #[derive(Serialize)]
@@ -204,6 +239,21 @@ pub async fn set_read(
     let token = auth.access_token().await.map_err(|e| e.to_string())?;
     let provider = GraphClient::new(token);
     app_set_read(&provider, &*store, &id, read)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Set a message's follow-up flag on the server and in the cache.
+#[tauri::command]
+pub async fn set_flag(
+    auth: State<'_, AuthService>,
+    store: State<'_, SqliteStore>,
+    id: String,
+    flagged: bool,
+) -> Result<(), String> {
+    let token = auth.access_token().await.map_err(|e| e.to_string())?;
+    let provider = GraphClient::new(token);
+    app_set_flag(&provider, &*store, &id, flagged)
         .await
         .map_err(|e| e.to_string())
 }
@@ -351,6 +401,70 @@ fn guess_content_type(name: &str) -> String {
         _ => "application/octet-stream",
     };
     mime.to_string()
+}
+
+/// Save a draft (subject/body/recipients only — attachments on drafts are out of
+/// scope). With no `id`, creates a new draft; with one, updates it in place.
+/// Returns the draft's id so the frontend can track it for later saves/sends.
+#[tauri::command]
+pub async fn save_draft(
+    auth: State<'_, AuthService>,
+    id: Option<String>,
+    to: Vec<String>,
+    cc: Vec<String>,
+    subject: String,
+    body_html: String,
+) -> Result<String, String> {
+    let token = auth.access_token().await.map_err(|e| e.to_string())?;
+    let provider = GraphClient::new(token);
+    let message = OutgoingMessage {
+        to,
+        cc,
+        subject,
+        body_html,
+        attachments: Vec::new(),
+    };
+    app_save_draft(&provider, id.as_deref(), &message)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Send an existing draft (moves it to Sent Items, consuming the draft).
+#[tauri::command]
+pub async fn send_draft(auth: State<'_, AuthService>, id: String) -> Result<(), String> {
+    let token = auth.access_token().await.map_err(|e| e.to_string())?;
+    let provider = GraphClient::new(token);
+    app_send_draft(&provider, &id)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DraftPrefillDto {
+    pub to: Vec<String>,
+    pub cc: Vec<String>,
+    pub subject: String,
+    pub body_html: String,
+}
+
+/// Load a draft for editing, with its raw (unsanitized) body.
+#[tauri::command]
+pub async fn load_draft(
+    auth: State<'_, AuthService>,
+    id: String,
+) -> Result<DraftPrefillDto, String> {
+    let token = auth.access_token().await.map_err(|e| e.to_string())?;
+    let provider = GraphClient::new(token);
+    let draft = app_load_draft(&provider, &id)
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(DraftPrefillDto {
+        to: draft.to,
+        cc: draft.cc,
+        subject: draft.subject,
+        body_html: draft.body_html,
+    })
 }
 
 #[derive(Serialize)]

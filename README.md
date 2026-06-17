@@ -13,11 +13,17 @@ encrypted at rest.
 ## Features
 
 - **Office 365 over Microsoft Graph** with OAuth 2.0 (public client + PKCE, no secret).
-- **Folder navigation** (nested folders, unread counts) with per-folder delta sync.
+- **Folder navigation** (nested folders, unread counts) with per-folder delta sync;
+  the folder sidebar is cached, so it still renders on a cold offline start.
 - **Local SQLite cache** — instant, offline-capable; auto-syncs every 60s.
+- **Search** — cross-folder mail search via Microsoft Graph server-side `$search`.
 - **Reading pane** with hostile-HTML sanitization in a sandboxed iframe; links open
   in your real browser.
 - **Compose / reply / reply-all / forward** with a rich-text editor and attachments.
+- **Drafts** — save, resume and send drafts (stored server-side in your mailbox).
+- **Follow-up flags** — flag / clear messages from the list or the context menu.
+- **Keyboard shortcuts** — `j`/`k` navigation and single-key actions (reply, flag,
+  delete, search, compose) with a typing-safe guard.
 - **Privacy**: "load images" proxies images server-side (no remote requests from the
   webview); the cache is AES-256-GCM encrypted at rest.
 - **Auto-update** — checks the latest GitHub release on launch and installs signed

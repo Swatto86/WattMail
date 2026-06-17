@@ -51,6 +51,8 @@ pub struct MessageSummary {
     pub received: String,
     pub preview: String,
     pub is_read: bool,
+    /// True if the message carries an Outlook follow-up flag.
+    pub is_flagged: bool,
 }
 
 /// A single message with its full, render-ready body.
@@ -108,6 +110,17 @@ pub struct OutgoingMessage {
     pub attachments: Vec<OutgoingAttachment>,
 }
 
+/// A saved draft, loaded for editing. Carries the *raw* (unsanitized) body
+/// exactly as stored on the server, so the compose editor round-trips it
+/// faithfully — never the display-sanitized HTML from [`MessageBody`].
+#[derive(Debug, Clone)]
+pub struct DraftPrefill {
+    pub to: Vec<String>,
+    pub cc: Vec<String>,
+    pub subject: String,
+    pub body_html: String,
+}
+
 /// Errors surfaced across the [`MailProvider`] contract.
 #[derive(Debug, thiserror::Error)]
 pub enum MailError {
@@ -147,6 +160,10 @@ pub trait MailProvider: Send + Sync {
     /// The most recent `top` messages from the inbox, newest first.
     async fn list_recent(&self, top: u32) -> Result<Vec<MessageSummary>, MailError>;
 
+    /// Search the mailbox (across folders) for up to `top` messages matching
+    /// `query`, newest first.
+    async fn search(&self, query: &str, top: u32) -> Result<Vec<MessageSummary>, MailError>;
+
     /// A single message with its sanitized, render-ready body. `allow_images`
     /// keeps remote images instead of stripping them.
     async fn message(&self, id: &str, allow_images: bool) -> Result<MessageBody, MailError>;
@@ -157,6 +174,9 @@ pub trait MailProvider: Send + Sync {
 
     /// Set a message's read state.
     async fn set_read(&self, id: &str, read: bool) -> Result<(), MailError>;
+
+    /// Set a message's follow-up flag state.
+    async fn set_flag(&self, id: &str, flagged: bool) -> Result<(), MailError>;
 
     /// Delete a message (moves it to Deleted Items).
     async fn delete_message(&self, id: &str) -> Result<(), MailError>;
@@ -177,6 +197,19 @@ pub trait MailProvider: Send + Sync {
 
     /// Send a message (saved to Sent Items).
     async fn send_message(&self, message: &OutgoingMessage) -> Result<(), MailError>;
+
+    /// Create a draft from `message` (subject/body/recipients only — attachments
+    /// are not persisted on the draft), returning the new draft's id.
+    async fn create_draft(&self, message: &OutgoingMessage) -> Result<String, MailError>;
+
+    /// Update an existing draft's subject/body/recipients in place.
+    async fn update_draft(&self, id: &str, message: &OutgoingMessage) -> Result<(), MailError>;
+
+    /// Send an existing draft (moves it to Sent Items, consuming the draft).
+    async fn send_draft(&self, id: &str) -> Result<(), MailError>;
+
+    /// Load a draft for editing, with its raw (unsanitized) body.
+    async fn load_draft(&self, id: &str) -> Result<DraftPrefill, MailError>;
 
     /// List a message's non-inline file attachments.
     async fn attachments(&self, message_id: &str) -> Result<Vec<Attachment>, MailError>;
@@ -234,6 +267,11 @@ pub trait MailStore: Send + Sync {
     /// `recent` only returns a window of it).
     async fn count(&self, folder_id: &str) -> Result<u32, MailError>;
     async fn set_read(&self, id: &str, read: bool) -> Result<(), MailError>;
+    async fn set_flag(&self, id: &str, flagged: bool) -> Result<(), MailError>;
+    /// Replace the cached folder list (in sidebar order) so it survives offline.
+    async fn save_folders(&self, folders: Vec<Folder>) -> Result<(), MailError>;
+    /// The cached folder list, in saved sidebar order.
+    async fn cached_folders(&self) -> Result<Vec<Folder>, MailError>;
     async fn load_state(&self, key: &str) -> Result<Option<String>, MailError>;
     async fn save_state(&self, key: &str, value: &str) -> Result<(), MailError>;
 }

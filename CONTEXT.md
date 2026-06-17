@@ -5,7 +5,7 @@
 > new milestone state, a decision made/reversed, or an open question resolved.
 > Keep newest progress entries at the top of the log.
 >
-> **Last updated:** 2026-06-16
+> **Last updated:** 2026-06-17
 
 ---
 
@@ -77,6 +77,60 @@ Entra app registration (public, not secret):
 ---
 
 ## Progress log
+
+### 2026-06-17 — Quick-wins batch: search, drafts, flags, folder cache, shortcuts (v0.1.11)
+Built as one coordinated batch (multi-agent: sequential implement → full build verify →
+adversarial review → remediation). All four features landed across the proper layers;
+`cargo fmt`, `clippy --all-targets -D warnings`, and `npm run build` all clean. Live run
+pending (needs a signed-in window).
+
+- **Search** — cross-folder mail search via Graph server-side `$search`. New
+  `MailProvider::search(query, top)`; Graph `GET /me/messages?$search="…"` with the
+  `ConsistencyLevel: eventual` header, **no** `$orderby` (illegal with `$search`) — results
+  sorted newest-first in Rust; query percent-encoded via `reqwest .query()` and embedded
+  double-quotes stripped to keep the KQL phrase well-formed. No new scope (covered by
+  `Mail.ReadWrite`), no cache change (local FTS is impossible — content columns use a
+  per-value random nonce). Command `search_messages`; debounced toolbar input rendering into
+  the existing `#list`; a `searchActive`/`searchSeq` guard stops the 60s auto-sync and stale
+  responses from clobbering results.
+- **Drafts** — save / resume / send drafts. New `MailProvider::create_draft`/`update_draft`/
+  `send_draft`/`load_draft` (+ `DraftPrefill` domain type) over Graph `POST/PATCH /me/messages`
+  and `POST /me/messages/{id}/send`. Resume loads the **raw** body (not the display-sanitized
+  HTML); sending a resumed draft goes `save_draft → send_draft` (never `sendMail`), so it can't
+  double-send or orphan. Clicking a row in the Drafts folder opens compose in edit mode.
+  Commands `save_draft`/`send_draft`/`load_draft`. **Deferred:** attachments on drafts (compose
+  warns rather than silently dropping them).
+- **Follow-up flags** — `is_flagged` added to `MessageSummary`/`MessageDto` (+ all construction
+  sites). `MailProvider::set_flag` (PATCH `/me/messages/{id}` `{flag:{flagStatus}}`) and
+  `MailStore::set_flag`; command `set_flag`. Flag glyph on flagged rows + a Flag/Clear-flag
+  context-menu toggle (optimistic). `flag,flagStatus` added to the list/delta `$select`.
+- **Cached folder sidebar** — new `folders` cache table (name **encrypted**; id/unread/depth/
+  position plaintext for ordering); `MailStore::save_folders`/`cached_folders`. `list_folders`
+  is now write-through (live → persist → return; falls back to cache on network failure), so a
+  cold offline start shows folders.
+- **Schema bump 4 → 5** (single migration covering both flags + folders): added `is_flagged`
+  column + `folders` table to `SCHEMA`, and `DROP TABLE IF EXISTS folders` to `migrate()`. The
+  disposable cache drops-and-rebuilds once on first launch after upgrade (documented pattern).
+- **Keyboard shortcuts (MVP, frontend-only)** — `j`/`k` (+ arrows) cursor, Enter to open,
+  `r`/`a`/`f` reply/reply-all/forward, `u` toggle read, `#` delete, flag toggle, `/` focus
+  search, `c` compose, Escape integrated with the modal stack. A typing/modal/context-menu guard
+  keeps keys inert while composing or searching. Highlight CSS uses `oklch(var(--…))` (DaisyUI
+  4.12) — not `hsl()`. Command palette + signatures/templates deferred to a later phase.
+
+### 2026-06-16 — Headers viewer: flag unverifiable To: (v0.1.10)
+- The `To:` header is sender-supplied and forgeable. The Overview now corroborates it against a
+  delivery header (`Received … for` / `Delivered-To`): shows a caution when nothing backs it up
+  (confirm via server-side message trace), and flags a disagreement when a delivery address
+  exists but differs from `To:`. Caution callout uses a warning tint with `--bc` text for
+  light-theme legibility. (main.ts + styles.css only.)
+
+### 2026-06-16 — View & trace email headers (v0.1.9)
+- New **Headers** action in the reading pane: fetches a message's internet headers (Graph
+  `internetMessageHeaders`) and opens a trace view — parsed Overview, SPF/DKIM/DMARC verdict
+  badges, Microsoft spam-filter summary (SCL/BCL/CAT/CIP/CTRY), the `Received` delivery path
+  (origin → mailbox), and the full raw header list with key headers highlighted, plus a filter
+  box and copy-all. New command `message_headers` wired domain → application → infrastructure →
+  presentation; `MessageHeader` domain type; badge text uses `--bc` for both themes.
 
 ### 2026-06-16 — Fix transparent context menu (v0.1.8)
 - The right-click menu (and `.load-more`) used `hsl(var(--b1))`, but this project's DaisyUI (4.12)
@@ -339,6 +393,10 @@ Entra app registration (public, not secret):
 | — | Rich-text compose; GitHub repo + CI/release pipeline | ✅ done |
 | — | Auto-update (Tauri updater, signed rolling-release `latest.json`); repo public | ✅ done |
 | — | Cross-platform pass — config dir abstraction + CI compile-gate (macOS/Linux) | 🟡 config dir + CI done; live macOS/Linux run pending |
+| — | Headers viewer — view & trace internet headers, auth (SPF/DKIM/DMARC) badges, forged-`To:` caution | ✅ done (v0.1.9–0.1.10) |
+| — | Quick wins — search, drafts, follow-up flags, cached folder sidebar, keyboard shortcuts | ✅ built (v0.1.11); live run pending |
+| — | Calendar tab (read agenda + accept/decline; `Calendars.ReadWrite`) | ⬜ backlog (roadmap big-bet, v0.3.0) |
+| — | Contacts / recipient autocomplete (`People.Read`/`Contacts.Read`) | ⬜ backlog (roadmap v0.2.0) |
 | — | Second provider (IMAP/SMTP) behind the contract | ⬜ backlog |
 
 ---
@@ -360,6 +418,8 @@ Entra app registration (public, not secret):
 | 06-16 | **Send via `/me/sendMail` with a client-composed reply** (not Graph `/reply`) | One send path + full edit control over recipients/subject/body. Trade-off: no `In-Reply-To`/`References` headers, so replies don't thread server-side — deferred. | Active |
 | 06-16 | **Email body always rendered on white** (app chrome stays themed); **auto-sync every 60s** | Email HTML assumes a light background — authors' dark/grey text is unreadable on a dark body, and per-email inversion is unreliable. Auto-sync keeps the list current without manual Refresh. | Active |
 | 06-16 | **Auto-update via Tauri updater against the rolling release; repo made public** | An unauthenticated updater can't pull assets from a private repo; minisign-signed `latest.json` keeps trust without an auth token. Verified no secrets in WattMail or any public repo first. | Active |
+| 06-17 | **Search = Graph server-side `$search` (live), not local FTS** | The encrypted cache uses a per-value random nonce, so content columns can't be queried/sorted in SQL — local FTS is impossible without weakening encryption. Graph `$search` needs no new scope and reuses the existing message decoder. Trade-off: search is online-only and returns by relevance (sorted client-side). | Active |
+| 06-17 | **Drafts via the dedicated `/me/messages` draft flow, not `sendMail`** | A resumed draft must update + `POST /{id}/send` so it isn't duplicated/orphaned, and must load the **raw** (unsanitized) body for editing — the display-sanitization path is read-only. | Active |
 
 ---
 
@@ -383,10 +443,11 @@ Entra app registration (public, not secret):
   larger files need an upload session (deferred). Only `fileAttachment`s are listed — `itemAttachment`
   (embedded messages) and `referenceAttachment` (links) aren't shown. Outgoing MIME type is guessed
   from the file extension.
-- **Reply threading & compose polish** — replies go via `sendMail`, so they don't set
-  `In-Reply-To`/`References` and won't thread into the conversation in the recipient's client (the
-  `Re:` subject groups loosely). Also: plain-text compose only (no rich editor), no attachments,
-  no drafts, and the quoted original isn't shown/editable in the compose box. All deferred.
+- **Reply threading** — replies go via `sendMail`, so they don't set `In-Reply-To`/`References`
+  and won't thread into the conversation in the recipient's client (the `Re:` subject groups
+  loosely). Still deferred. (Rich-text compose, attachments, an editable quoted original, and
+  **drafts** are now all done — drafts shipped in v0.1.11. Drafts deferral: attachments on a draft
+  aren't saved yet; compose warns rather than dropping them silently.)
 - **Multi-account model** — domain currently assumes a single account; the SQLite cache is
   single-account (one `cache.db`, no account column).
 - **Cache at rest** — content columns + sync-state values are AES-256-GCM encrypted (key in the OS
@@ -399,10 +460,11 @@ Entra app registration (public, not secret):
   whole-folder without loading everything.
 - **First sync pulls the whole folder** — delta enumerates the entire folder (paged), not just
   recent N. Fine for now; may want a bound/older-mail strategy for very large mailboxes.
-- **Folder polish** — (a) default-Inbox is matched by `displayName == "Inbox"` (English-only,
-  locale-fragile; use the well-known folder id later); (b) folders are fetched live (not cached),
-  so a cold offline start shows no sidebar. (Nested folders and Sent/Drafts recipient display are
-  done.)
+- **Folder polish** — (a) default-Inbox (and the Drafts folder, for draft-resume) is matched by
+  English `displayName` (locale-fragile; use the well-known folder id later); (b) ✓ resolved
+  (v0.1.11): the folder sidebar is now cached (encrypted `folders` table) and `list_folders` is
+  write-through with an offline fallback, so a cold offline start shows folders. (Nested folders
+  and Sent/Drafts recipient display were already done.)
 - **`Mail-Advanced.ReadWrite` (effective Dec 31 2026)** — editing subject/body/
   recipients of *already-delivered* messages will need elevated scope. Normal
   compose/read/send/move/flag is unaffected — **don't build a feature that rewrites
