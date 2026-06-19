@@ -12,12 +12,15 @@ use serde::{Deserialize, Serialize};
 pub struct Settings {
     /// Closing the window hides it to the tray instead of quitting.
     pub close_to_tray: bool,
+    /// Show a native OS notification when new unread mail arrives.
+    pub notifications_enabled: bool,
 }
 
 impl Default for Settings {
     fn default() -> Self {
         Self {
             close_to_tray: true,
+            notifications_enabled: true,
         }
     }
 }

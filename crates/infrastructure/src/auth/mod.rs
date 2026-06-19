@@ -28,10 +28,16 @@ impl OAuthConfig {
         Self {
             tenant_id: tenant_id.into(),
             client_id: client_id.into(),
-            scopes: ["offline_access", "User.Read", "Mail.ReadWrite", "Mail.Send"]
-                .iter()
-                .map(|s| (*s).to_string())
-                .collect(),
+            scopes: [
+                "offline_access",
+                "User.Read",
+                "Mail.ReadWrite",
+                "Mail.Send",
+                "MailboxSettings.ReadWrite",
+            ]
+            .iter()
+            .map(|s| (*s).to_string())
+            .collect(),
         }
     }
 

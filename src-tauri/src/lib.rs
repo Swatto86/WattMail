@@ -29,6 +29,17 @@ const HIDDEN_FLAG: &str = "--hidden";
 /// `started_hidden` command so the frontend skips revealing the window.
 pub(crate) struct StartHidden(pub bool);
 
+/// In-memory state for desktop new-mail notifications: the most recent
+/// `receivedDateTime` we have already notified about, so we only fire on
+/// genuinely new messages rather than re-notifying on every sync.
+#[derive(Default)]
+pub(crate) struct NotificationState {
+    /// The ISO-8601 `receivedDateTime` of the newest message we've notified
+    /// about. Messages with a timestamp strictly newer than this trigger a
+    /// notification (then this is updated).
+    last_notified_at: RwLock<Option<String>>,
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let auth = AuthService::new(OAuthConfig::office365(TENANT_ID, CLIENT_ID))
@@ -53,10 +64,12 @@ pub fn run() {
             tauri_plugin_autostart::MacosLauncher::LaunchAgent,
             Some(vec![HIDDEN_FLAG]),
         ))
+        .plugin(tauri_plugin_notification::init())
         .manage(auth)
         .manage(store)
         .manage(SettingsState(RwLock::new(loaded)))
         .manage(StartHidden(start_hidden))
+        .manage(NotificationState::default())
         .setup(move |app| {
             build_tray(app.handle())?;
             // Safety net: if the frontend never reveals the window (e.g. a script
@@ -112,6 +125,13 @@ pub fn run() {
             commands::set_close_to_tray,
             commands::set_unread,
             commands::started_hidden,
+            commands::get_notification_setting,
+            commands::set_notification_setting,
+            commands::check_new_mail,
+            commands::list_message_rules,
+            commands::create_message_rule,
+            commands::update_message_rule,
+            commands::delete_message_rule,
         ])
         .run(tauri::generate_context!())
         .expect("error while running WattMail");
@@ -187,7 +207,8 @@ fn play_notify_sound() {
 fn play_notify_sound() {}
 
 /// Update the tray icon + tooltip to reflect the inbox unread count, and chime
-/// when the count increases.
+/// when the count increases. The tooltip includes the signed-in account email
+/// when available (read from the cached account state).
 pub(crate) fn update_tray(app: &AppHandle, unread: u32) {
     let previous = LAST_UNREAD.swap(i64::from(unread), Ordering::Relaxed);
     if previous >= 0 && i64::from(unread) > previous {
@@ -197,10 +218,17 @@ pub(crate) fn update_tray(app: &AppHandle, unread: u32) {
     let Some(tray) = app.tray_by_id("main") else {
         return;
     };
-    let tooltip = match unread {
-        0 => "WattMail".to_string(),
-        1 => "WattMail — 1 unread email".to_string(),
-        n => format!("WattMail — {n} unread emails"),
+
+    // Try to read the cached account email for a richer tooltip. This is
+    // best-effort — if the store isn't available the tooltip falls back to the
+    // count-only form.
+    let account_email = cached_account_email(app);
+    let tooltip = match (unread, &account_email) {
+        (0, _) => "WattMail".to_string(),
+        (1, Some(email)) => format!("WattMail — {email} — 1 unread email"),
+        (1, None) => "WattMail — 1 unread email".to_string(),
+        (n, Some(email)) => format!("WattMail — {email} — {n} unread emails"),
+        (n, None) => format!("WattMail — {n} unread emails"),
     };
     let _ = tray.set_tooltip(Some(tooltip));
     if unread > 0 {
@@ -208,6 +236,12 @@ pub(crate) fn update_tray(app: &AppHandle, unread: u32) {
     } else if let Some(icon) = app.default_window_icon().cloned() {
         let _ = tray.set_icon(Some(icon));
     }
+}
+
+/// Read the cached account email from the SQLite store (synchronous, best-effort).
+fn cached_account_email(app: &AppHandle) -> Option<String> {
+    let store = app.state::<SqliteStore>();
+    store.cached_account_email()
 }
 
 /// Bring the main window to the foreground.

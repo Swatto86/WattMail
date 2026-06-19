@@ -4,6 +4,44 @@
 //! depend on the [`MailProvider`] trait, never on a concrete backend.
 
 use async_trait::async_trait;
+use serde::{Deserialize, Serialize};
+
+/// A server-side inbox rule (Microsoft Graph `messageRule`).
+///
+/// Conditions and actions are simplified to the subset the UI manages: sender /
+/// subject / recipient contains, and move-to-folder or mark-as-read actions.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MessageRule {
+    pub id: String,
+    pub display_name: String,
+    pub sequence: i32,
+    pub is_enabled: bool,
+    pub conditions: MessageRuleConditions,
+    pub actions: MessageRuleActions,
+}
+
+/// The conditions under which a [`MessageRule`] fires.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MessageRuleConditions {
+    #[serde(default)]
+    pub sender_contains: Vec<String>,
+    #[serde(default)]
+    pub subject_contains: Vec<String>,
+    #[serde(default)]
+    pub recipient_contains: Vec<String>,
+}
+
+/// The actions a [`MessageRule`] performs when its conditions are met.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MessageRuleActions {
+    #[serde(default)]
+    pub move_to_folder_id: Option<String>,
+    #[serde(default)]
+    pub mark_as_read: bool,
+}
 
 /// A validated email address.
 #[derive(Debug, Clone, PartialEq, Eq)]

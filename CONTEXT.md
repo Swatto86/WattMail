@@ -5,7 +5,7 @@
 > new milestone state, a decision made/reversed, or an open question resolved.
 > Keep newest progress entries at the top of the log.
 >
-> **Last updated:** 2026-06-17
+> **Last updated:** 2026-06-18
 
 ---
 
@@ -77,6 +77,15 @@ Entra app registration (public, not secret):
 ---
 
 ## Progress log
+
+### 2026-06-18 — Notifications, tray tooltip, inbox rules, link context menu, shortcuts cheat-sheet (v0.1.13)
+Built as a multi-agent batch (plan → implement → build verify). `cargo check`, `cargo clippy --all-targets -D warnings`, `cargo fmt --check`, and `npm run build` all clean. Live run pending.
+
+- **Desktop notifications for new mail** — after each Inbox background sync, the frontend calls a new `check_new_mail` command that compares the cached messages' `received` timestamps against an in-memory `last_notified_at` (managed `NotificationState` in `lib.rs`). If newer unread messages exist and the `notifications_enabled` setting is on, a native OS notification is shown via `@tauri-apps/plugin-notification` (JS API: `sendNotification`). The setting persists in `settings.json` (`Settings.notifications_enabled`); on first enable, OS permission is requested and the toggle reverts if denied. `tauri-plugin-notification` added to `Cargo.toml` + capabilities. Notification click is handled by a Tauri `open-message` event listener that focuses the window and opens the message.
+- **Tray tooltip with account email** — `update_tray` now reads the cached account email from the SQLite store (new `SqliteStore::cached_account_email()` sync helper) and includes it in the tooltip: `WattMail — user@example.com — N unread emails`. The icon still switches to `tray-unread.png` when unread > 0.
+- **Message rules manager** — new domain types `MessageRule` / `MessageRuleConditions` / `MessageRuleActions` (serde, camelCase). Graph client methods `list_message_rules` / `create_message_rule` / `update_message_rule` / `delete_message_rule` over `GET/POST/PATCH/DELETE /me/mailFolders/inbox/messageRules`, mapping Graph `fromAddresses`/`subjectContains`/`recipientContains`/`moveToFolder`/`markAsRead`. Tauri commands wired in `commands.rs` + `lib.rs` `generate_handler!`. Frontend rules overlay (list + editor form) inside the settings panel; conditions are sender/subject/recipient contains (comma lists), actions are move-to-folder dropdown + mark-as-read checkbox. **`MailboxSettings.ReadWrite`** scope added to `auth/mod.rs` — existing signed-in users need to sign out and back in for the new scope to take effect.
+- **"Copy link address" in reading pane** — `wireFrameLinks` now also attaches a `contextmenu` listener inside the sandboxed iframe. Right-clicking an `<a>` shows a custom context menu with "Copy link address"; clicking it copies the href via the existing `copyText` helper. The menu is dismissed on outside click / Escape / window blur.
+- **Keyboard shortcut cheat-sheet** — pressing `?` (when not typing / no modal open) toggles a `#shortcuts-overlay` listing all shortcuts in a two-column table. Closeable with Escape or clicking the backdrop. Added to `aModalIsOpen()` and the Escape handler.
 
 ### 2026-06-17 — Compose: resizable/maximizable + rich input (v0.1.12)
 Built as a multi-agent batch (sequential backend→frontend implement → full build verify →

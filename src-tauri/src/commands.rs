@@ -2,7 +2,7 @@
 
 use base64::Engine;
 use serde::{Deserialize, Serialize};
-use tauri::State;
+use tauri::{Manager, State};
 
 use crate::settings::{self, SettingsState};
 use wattmail_application::{
@@ -14,7 +14,7 @@ use wattmail_application::{
     send_draft as app_send_draft, send_message as app_send_message, set_flag as app_set_flag,
     set_read as app_set_read, sync_folder as app_sync_folder,
 };
-use wattmail_domain::{Folder, MessageSummary, OutgoingAttachment, OutgoingMessage};
+use wattmail_domain::{Folder, MessageRule, MessageSummary, OutgoingAttachment, OutgoingMessage};
 use wattmail_infrastructure::{AuthService, GraphClient, SqliteStore};
 
 #[derive(Serialize)]
@@ -579,6 +579,161 @@ pub fn set_close_to_tray(state: State<'_, SettingsState>, value: bool) -> Result
 #[tauri::command]
 pub fn set_unread(app: tauri::AppHandle, count: u32) {
     crate::update_tray(&app, count);
+}
+
+/// Whether desktop notifications for new mail are enabled.
+#[tauri::command]
+pub fn get_notification_setting(state: State<'_, SettingsState>) -> bool {
+    state
+        .0
+        .read()
+        .map(|s| s.notifications_enabled)
+        .unwrap_or(true)
+}
+
+/// Enable/disable desktop notifications for new mail, persisting the setting.
+#[tauri::command]
+pub fn set_notification_setting(
+    state: State<'_, SettingsState>,
+    value: bool,
+) -> Result<(), String> {
+    let updated = {
+        let mut guard = state
+            .0
+            .write()
+            .map_err(|_| "settings lock poisoned".to_string())?;
+        guard.notifications_enabled = value;
+        guard.clone()
+    };
+    settings::save(&updated).map_err(|e| e.to_string())
+}
+
+/// Check the Inbox cache for messages newer than the last-notified timestamp and
+/// return info about the new batch so the frontend can show a notification.
+/// Returns `None` when notifications are disabled or there are no new messages.
+#[tauri::command]
+pub async fn check_new_mail(
+    app: tauri::AppHandle,
+    notif_state: State<'_, crate::NotificationState>,
+    messages: Vec<NewMailMessage>,
+) -> Result<Option<NewMailBatch>, String> {
+    let enabled = app
+        .state::<SettingsState>()
+        .0
+        .read()
+        .map(|s| s.notifications_enabled)
+        .unwrap_or(true);
+    if !enabled {
+        return Ok(None);
+    }
+
+    // Filter to unread messages newer than the last-notified timestamp.
+    let last = notif_state
+        .last_notified_at
+        .read()
+        .map_err(|_| "notification state lock poisoned".to_string())?
+        .clone();
+
+    let mut new_messages: Vec<&NewMailMessage> = messages
+        .iter()
+        .filter(|m| !m.is_read && last.as_deref().is_none_or(|l| m.received.as_str() > l))
+        .collect();
+    if new_messages.is_empty() {
+        return Ok(None);
+    }
+
+    // Sort newest-first so we report the single newest subject / use its id.
+    new_messages.sort_by(|a, b| b.received.cmp(&a.received));
+    let newest = new_messages[0];
+    let count = new_messages.len();
+
+    let batch = NewMailBatch {
+        count,
+        newest_id: newest.id.clone(),
+        newest_subject: newest.subject.clone(),
+    };
+
+    // Update the last-notified timestamp to the newest message we saw.
+    let mut guard = notif_state
+        .last_notified_at
+        .write()
+        .map_err(|_| "notification state lock poisoned".to_string())?;
+    *guard = Some(newest.received.clone());
+
+    Ok(Some(batch))
+}
+
+/// A message summary passed to `check_new_mail` for notification deduplication.
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NewMailMessage {
+    pub id: String,
+    pub subject: String,
+    pub received: String,
+    pub is_read: bool,
+}
+
+/// The result of `check_new_mail`: info about the new batch for the frontend to
+/// show a notification.
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NewMailBatch {
+    pub count: usize,
+    pub newest_id: String,
+    pub newest_subject: String,
+}
+
+// ---- Message rules (server-side inbox rules) ----
+
+/// List the user's inbox message rules.
+#[tauri::command]
+pub async fn list_message_rules(auth: State<'_, AuthService>) -> Result<Vec<MessageRule>, String> {
+    let token = auth.access_token().await.map_err(|e| e.to_string())?;
+    let provider = GraphClient::new(token);
+    provider
+        .list_message_rules()
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Create a new inbox message rule. Returns the created rule with its assigned id.
+#[tauri::command]
+pub async fn create_message_rule(
+    auth: State<'_, AuthService>,
+    rule: MessageRule,
+) -> Result<MessageRule, String> {
+    let token = auth.access_token().await.map_err(|e| e.to_string())?;
+    let provider = GraphClient::new(token);
+    provider
+        .create_message_rule(&rule)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Update an existing inbox message rule (enable/disable, edit conditions…).
+#[tauri::command]
+pub async fn update_message_rule(
+    auth: State<'_, AuthService>,
+    id: String,
+    rule: MessageRule,
+) -> Result<(), String> {
+    let token = auth.access_token().await.map_err(|e| e.to_string())?;
+    let provider = GraphClient::new(token);
+    provider
+        .update_message_rule(&id, &rule)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Delete an inbox message rule.
+#[tauri::command]
+pub async fn delete_message_rule(auth: State<'_, AuthService>, id: String) -> Result<(), String> {
+    let token = auth.access_token().await.map_err(|e| e.to_string())?;
+    let provider = GraphClient::new(token);
+    provider
+        .delete_message_rule(&id)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 /// Whether this instance was launched into the tray via autostart (`--hidden`),

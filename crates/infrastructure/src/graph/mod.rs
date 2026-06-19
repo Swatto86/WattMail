@@ -7,8 +7,8 @@ use async_trait::async_trait;
 use base64::Engine;
 use wattmail_domain::{
     Attachment, DraftPrefill, EmailAddress, Folder, MailError, MailProvider, MessageBody,
-    MessageChange, MessageHeader, MessageSummary, OutgoingAttachment, OutgoingMessage, SyncBatch,
-    SyncToken, UserProfile,
+    MessageChange, MessageHeader, MessageRule, MessageRuleActions, MessageRuleConditions,
+    MessageSummary, OutgoingAttachment, OutgoingMessage, SyncBatch, SyncToken, UserProfile,
 };
 
 const GRAPH_BASE: &str = "https://graph.microsoft.com/v1.0";
@@ -74,6 +74,77 @@ impl GraphClient {
             .await
             .map_err(|e| MailError::Decode(e.to_string()))?;
         Ok(body.value)
+    }
+
+    /// List the user's inbox message rules (server-side Graph `messageRule`s).
+    pub async fn list_message_rules(&self) -> Result<Vec<MessageRule>, MailError> {
+        let url = format!("{GRAPH_BASE}/me/mailFolders/inbox/messageRules");
+        let body: GraphMessageRules = self
+            .get(&url)
+            .await?
+            .json()
+            .await
+            .map_err(|e| MailError::Decode(e.to_string()))?;
+        Ok(body.value.into_iter().map(MessageRule::from).collect())
+    }
+
+    /// Create a new inbox message rule. Graph returns the created rule with its
+    /// assigned id; the caller's `id` field is ignored.
+    pub async fn create_message_rule(&self, rule: &MessageRule) -> Result<MessageRule, MailError> {
+        let url = format!("{GRAPH_BASE}/me/mailFolders/inbox/messageRules");
+        let payload = message_rule_json(rule);
+        let response = self
+            .http
+            .post(&url)
+            .bearer_auth(&self.access_token)
+            .json(&payload)
+            .send()
+            .await
+            .map_err(|e| MailError::Network(e.to_string()))?;
+        let created: GraphMessageRule = check_status(response)
+            .await?
+            .json()
+            .await
+            .map_err(|e| MailError::Decode(e.to_string()))?;
+        Ok(MessageRule::from(created))
+    }
+
+    /// Update an existing inbox message rule (enable/disable, edit conditions…).
+    pub async fn update_message_rule(&self, id: &str, rule: &MessageRule) -> Result<(), MailError> {
+        let mut url = url::Url::parse(&format!("{GRAPH_BASE}/me/mailFolders/inbox/messageRules"))
+            .expect("valid base");
+        url.path_segments_mut()
+            .expect("base URL is a proper path")
+            .push(id);
+        let payload = message_rule_json(rule);
+        let response = self
+            .http
+            .patch(url.as_str())
+            .bearer_auth(&self.access_token)
+            .json(&payload)
+            .send()
+            .await
+            .map_err(|e| MailError::Network(e.to_string()))?;
+        check_status(response).await?;
+        Ok(())
+    }
+
+    /// Delete an inbox message rule.
+    pub async fn delete_message_rule(&self, id: &str) -> Result<(), MailError> {
+        let mut url = url::Url::parse(&format!("{GRAPH_BASE}/me/mailFolders/inbox/messageRules"))
+            .expect("valid base");
+        url.path_segments_mut()
+            .expect("base URL is a proper path")
+            .push(id);
+        let response = self
+            .http
+            .delete(url.as_str())
+            .bearer_auth(&self.access_token)
+            .send()
+            .await
+            .map_err(|e| MailError::Network(e.to_string()))?;
+        check_status(response).await?;
+        Ok(())
     }
 }
 
@@ -898,6 +969,122 @@ fn format_recipient(recipient: Option<GraphRecipient>) -> String {
 struct GraphEmailAddress {
     name: Option<String>,
     address: Option<String>,
+}
+
+// ---- Message rules (Graph messageRule) ----
+
+#[derive(serde::Deserialize)]
+struct GraphMessageRules {
+    value: Vec<GraphMessageRule>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GraphMessageRule {
+    id: String,
+    display_name: String,
+    sequence: i32,
+    is_enabled: bool,
+    conditions: Option<GraphRuleConditions>,
+    actions: Option<GraphRuleActions>,
+}
+
+#[derive(serde::Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct GraphRuleConditions {
+    #[serde(default)]
+    from_addresses: Vec<GraphRecipient>,
+    #[serde(default)]
+    subject_contains: Vec<String>,
+    #[serde(default)]
+    recipient_contains: Vec<GraphRecipient>,
+}
+
+#[derive(serde::Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct GraphRuleActions {
+    #[serde(default)]
+    move_to_folder: Option<String>,
+    #[serde(default)]
+    mark_as_read: bool,
+}
+
+impl From<GraphMessageRule> for MessageRule {
+    fn from(r: GraphMessageRule) -> Self {
+        let conditions = r.conditions.unwrap_or_default();
+        let actions = r.actions.unwrap_or_default();
+        MessageRule {
+            id: r.id,
+            display_name: r.display_name,
+            sequence: r.sequence,
+            is_enabled: r.is_enabled,
+            conditions: MessageRuleConditions {
+                sender_contains: conditions
+                    .from_addresses
+                    .into_iter()
+                    .filter_map(|rec| rec.email_address.address)
+                    .collect(),
+                subject_contains: conditions.subject_contains,
+                recipient_contains: conditions
+                    .recipient_contains
+                    .into_iter()
+                    .filter_map(|rec| rec.email_address.address)
+                    .collect(),
+            },
+            actions: MessageRuleActions {
+                move_to_folder_id: actions.move_to_folder,
+                mark_as_read: actions.mark_as_read,
+            },
+        }
+    }
+}
+
+/// Build the Graph JSON payload for a create/update message rule request.
+fn message_rule_json(rule: &MessageRule) -> serde_json::Value {
+    let mut conditions = serde_json::json!({});
+    if !rule.conditions.sender_contains.is_empty() {
+        conditions["fromAddresses"] = serde_json::Value::Array(
+            rule.conditions
+                .sender_contains
+                .iter()
+                .map(|a| serde_json::json!({ "emailAddress": { "address": a } }))
+                .collect(),
+        );
+    }
+    if !rule.conditions.subject_contains.is_empty() {
+        conditions["subjectContains"] = serde_json::Value::Array(
+            rule.conditions
+                .subject_contains
+                .iter()
+                .map(|s| serde_json::Value::String(s.clone()))
+                .collect(),
+        );
+    }
+    if !rule.conditions.recipient_contains.is_empty() {
+        conditions["recipientContains"] = serde_json::Value::Array(
+            rule.conditions
+                .recipient_contains
+                .iter()
+                .map(|a| serde_json::json!({ "emailAddress": { "address": a } }))
+                .collect(),
+        );
+    }
+
+    let mut actions = serde_json::json!({});
+    if let Some(folder_id) = &rule.actions.move_to_folder_id {
+        actions["moveToFolder"] = serde_json::Value::String(folder_id.clone());
+    }
+    if rule.actions.mark_as_read {
+        actions["markAsRead"] = serde_json::Value::Bool(true);
+    }
+
+    serde_json::json!({
+        "displayName": rule.display_name,
+        "sequence": rule.sequence,
+        "isEnabled": rule.is_enabled,
+        "conditions": conditions,
+        "actions": actions,
+    })
 }
 
 impl From<GraphMessage> for MessageSummary {

@@ -11,6 +11,7 @@ import {
   disable as disableAutostart,
   isEnabled as isAutostartEnabled,
 } from "@tauri-apps/plugin-autostart";
+import { isPermissionGranted, requestPermission, sendNotification } from "@tauri-apps/plugin-notification";
 import "./styles.css";
 
 // ---- Backend DTOs (mirror src-tauri/src/commands.rs) ----
@@ -69,6 +70,26 @@ interface AttachmentInfo {
 interface HeaderItem {
   name: string;
   value: string;
+}
+interface MessageRule {
+  id: string;
+  displayName: string;
+  sequence: number;
+  isEnabled: boolean;
+  conditions: {
+    senderContains: string[];
+    subjectContains: string[];
+    recipientContains: string[];
+  };
+  actions: {
+    moveToFolderId: string | null;
+    markAsRead: boolean;
+  };
+}
+interface NewMailBatch {
+  count: number;
+  newestId: string;
+  newestSubject: string;
 }
 
 // The whole folder is cached locally; the list reads a growing window of it.
@@ -251,6 +272,14 @@ appRoot.innerHTML = /* html */ `
         <span>Start with Windows<br /><span class="hint">Launch hidden in the system tray at sign-in</span></span>
         <input type="checkbox" id="set-autostart" class="toggle toggle-sm toggle-primary" />
       </label>
+      <label class="settings-row">
+        <span>Show notifications for new mail<br /><span class="hint">A desktop alert when unread messages arrive in the Inbox</span></span>
+        <input type="checkbox" id="set-notifications" class="toggle toggle-sm toggle-primary" />
+      </label>
+      <div class="settings-row">
+        <span>Inbox rules<br /><span class="hint">Server-side rules that move or mark messages on arrival</span></span>
+        <button id="rules-btn" class="btn btn-sm">Rules&hellip;</button>
+      </div>
       <div class="settings-row">
         <span>Account<br /><span class="hint" id="set-account">&mdash;</span></span>
         <button id="signout-btn" class="btn btn-sm btn-error">Sign out</button>
@@ -306,6 +335,61 @@ appRoot.innerHTML = /* html */ `
       <div id="headers-body" class="headers-body"></div>
     </div>
   </div>
+
+  <div id="rules-overlay" class="overlay hidden">
+    <div class="settings-panel rules-panel">
+      <div class="rules-head">
+        <div class="settings-title">Inbox rules</div>
+        <div class="rules-tools">
+          <button id="rules-new" class="btn btn-xs btn-primary">New rule</button>
+          <button id="rules-close" class="btn btn-xs">Close</button>
+        </div>
+      </div>
+      <div id="rules-msg" class="settings-msg"></div>
+      <div id="rules-list" class="rules-list"></div>
+      <div id="rules-editor" class="rules-editor hidden">
+        <div class="settings-title" id="rules-editor-title">New rule</div>
+        <label class="settings-row"><span>Name</span><input id="rule-name" class="input input-bordered input-sm" placeholder="Rule name" autocomplete="off" /></label>
+        <label class="settings-row"><span>Sequence (order)</span><input id="rule-sequence" class="input input-bordered input-sm" type="number" value="1" min="1" /></label>
+        <label class="settings-row"><span>Enabled</span><input type="checkbox" id="rule-enabled" class="toggle toggle-sm toggle-primary" /></label>
+        <label class="settings-row"><span>Sender contains<br /><span class="hint">Comma-separated</span></span><input id="rule-sender" class="input input-bordered input-sm" placeholder="e.g. newsletter@example.com" autocomplete="off" /></label>
+        <label class="settings-row"><span>Subject contains<br /><span class="hint">Comma-separated</span></span><input id="rule-subject" class="input input-bordered input-sm" placeholder="e.g. invoice, receipt" autocomplete="off" /></label>
+        <label class="settings-row"><span>Recipient contains<br /><span class="hint">Comma-separated</span></span><input id="rule-recipient" class="input input-bordered input-sm" placeholder="e.g. support@example.com" autocomplete="off" /></label>
+        <label class="settings-row"><span>Move to folder</span><select id="rule-folder" class="select select-bordered select-sm"><option value="">(none)</option></select></label>
+        <label class="settings-row"><span>Mark as read</span><input type="checkbox" id="rule-markread" class="toggle toggle-sm toggle-primary" /></label>
+        <div class="settings-actions" style="gap: 8px">
+          <button id="rule-delete" class="btn btn-sm btn-error hidden">Delete</button>
+          <span style="flex:1"></span>
+          <button id="rule-cancel" class="btn btn-sm">Cancel</button>
+          <button id="rule-save" class="btn btn-sm btn-primary">Save</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div id="shortcuts-overlay" class="overlay hidden">
+    <div class="settings-panel shortcuts-panel">
+      <div class="settings-title">Keyboard shortcuts</div>
+      <table class="shortcuts-table">
+        <tbody>
+          <tr><td><kbd>j</kbd> / <kbd>&darr;</kbd></td><td>Move cursor down</td></tr>
+          <tr><td><kbd>k</kbd> / <kbd>&uarr;</kbd></td><td>Move cursor up</td></tr>
+          <tr><td><kbd>Enter</kbd></td><td>Open message under cursor</td></tr>
+          <tr><td><kbd>r</kbd></td><td>Reply</td></tr>
+          <tr><td><kbd>a</kbd></td><td>Reply all</td></tr>
+          <tr><td><kbd>f</kbd></td><td>Forward</td></tr>
+          <tr><td><kbd>u</kbd></td><td>Toggle read / unread</td></tr>
+          <tr><td><kbd>g</kbd></td><td>Toggle follow-up flag</td></tr>
+          <tr><td><kbd>#</kbd></td><td>Delete message</td></tr>
+          <tr><td><kbd>c</kbd></td><td>Compose new message</td></tr>
+          <tr><td><kbd>/</kbd></td><td>Focus search</td></tr>
+          <tr><td><kbd>?</kbd></td><td>Show this cheat-sheet</td></tr>
+          <tr><td><kbd>Esc</kbd></td><td>Close modal / overlay</td></tr>
+        </tbody>
+      </table>
+      <div class="settings-actions"><button id="shortcuts-close" class="btn btn-sm">Close</button></div>
+    </div>
+  </div>
 `;
 
 const accountEl = document.querySelector<HTMLDivElement>("#account")!;
@@ -359,6 +443,30 @@ const headersBody = document.querySelector<HTMLDivElement>("#headers-body")!;
 const headersFilter = document.querySelector<HTMLInputElement>("#headers-filter")!;
 const headersCopyBtn = document.querySelector<HTMLButtonElement>("#headers-copy")!;
 const headersCloseBtn = document.querySelector<HTMLButtonElement>("#headers-close")!;
+
+// ---- Notification / rules / shortcuts element refs ----
+const setNotifications = document.querySelector<HTMLInputElement>("#set-notifications")!;
+const rulesBtn = document.querySelector<HTMLButtonElement>("#rules-btn")!;
+const rulesOverlay = document.querySelector<HTMLDivElement>("#rules-overlay")!;
+const rulesMsg = document.querySelector<HTMLDivElement>("#rules-msg")!;
+const rulesList = document.querySelector<HTMLDivElement>("#rules-list")!;
+const rulesEditor = document.querySelector<HTMLDivElement>("#rules-editor")!;
+const rulesEditorTitle = document.querySelector<HTMLDivElement>("#rules-editor-title")!;
+const rulesNewBtn = document.querySelector<HTMLButtonElement>("#rules-new")!;
+const rulesCloseBtn = document.querySelector<HTMLButtonElement>("#rules-close")!;
+const ruleName = document.querySelector<HTMLInputElement>("#rule-name")!;
+const ruleSequence = document.querySelector<HTMLInputElement>("#rule-sequence")!;
+const ruleEnabled = document.querySelector<HTMLInputElement>("#rule-enabled")!;
+const ruleSender = document.querySelector<HTMLInputElement>("#rule-sender")!;
+const ruleSubject = document.querySelector<HTMLInputElement>("#rule-subject")!;
+const ruleRecipient = document.querySelector<HTMLInputElement>("#rule-recipient")!;
+const ruleFolder = document.querySelector<HTMLSelectElement>("#rule-folder")!;
+const ruleMarkRead = document.querySelector<HTMLInputElement>("#rule-markread")!;
+const ruleDeleteBtn = document.querySelector<HTMLButtonElement>("#rule-delete")!;
+const ruleCancelBtn = document.querySelector<HTMLButtonElement>("#rule-cancel")!;
+const ruleSaveBtn = document.querySelector<HTMLButtonElement>("#rule-save")!;
+const shortcutsOverlay = document.querySelector<HTMLDivElement>("#shortcuts-overlay")!;
+const shortcutsCloseBtn = document.querySelector<HTMLButtonElement>("#shortcuts-close")!;
 
 // ---- View state ----
 let selectedId: string | null = null;
@@ -725,7 +833,8 @@ function renderReader(msg: MessageView): void {
 
 // Intercept clicks inside the (script-disabled, same-origin) email frame so links
 // open in the system browser — where the user can see the real destination —
-// instead of navigating the frame.
+// instead of navigating the frame. Also intercept right-click on links to offer
+// a "Copy link address" context menu.
 function wireFrameLinks(frame: HTMLIFrameElement): void {
   const doc = frame.contentDocument;
   if (!doc) return;
@@ -735,7 +844,63 @@ function wireFrameLinks(frame: HTMLIFrameElement): void {
     const href = anchor?.getAttribute("href") ?? "";
     if (/^https?:\/\//i.test(href)) void openUrl(href);
   });
+  doc.addEventListener("contextmenu", (ev) => {
+    const anchor = (ev.target as HTMLElement | null)?.closest?.("a");
+    if (!anchor) return; // off a link: leave the default menu
+    const href = anchor.getAttribute("href") ?? "";
+    if (!href) return;
+    ev.preventDefault();
+    showLinkContextMenu(ev.clientX, ev.clientY, href, frame);
+  });
 }
+
+// ---- Link context menu (reading pane) ----
+const linkCtxMenu = document.createElement("div");
+linkCtxMenu.className = "ctx-menu link-ctx-menu hidden";
+linkCtxMenu.setAttribute("role", "menu");
+linkCtxMenu.innerHTML = `<button class="ctx-item" data-act="copy">Copy link address</button>`;
+document.body.appendChild(linkCtxMenu);
+
+function showLinkContextMenu(x: number, y: number, href: string, frame: HTMLIFrameElement): void {
+  linkCtxMenu.style.left = "0";
+  linkCtxMenu.style.top = "0";
+  linkCtxMenu.classList.remove("hidden");
+  // Position relative to the viewport (the iframe coords are already viewport-relative
+  // because contextmenu event clientX/Y are from the iframe's viewport, which maps
+  // to the parent viewport via the iframe's bounding rect).
+  const frameRect = frame.getBoundingClientRect();
+  const absX = frameRect.left + x;
+  const absY = frameRect.top + y;
+  const left = Math.max(4, Math.min(absX, window.innerWidth - linkCtxMenu.offsetWidth - 4));
+  const top = Math.max(4, Math.min(absY, window.innerHeight - linkCtxMenu.offsetHeight - 4));
+  linkCtxMenu.style.left = `${left}px`;
+  linkCtxMenu.style.top = `${top}px`;
+  linkCtxMenu.dataset.href = href;
+}
+
+linkCtxMenu.addEventListener("click", (e) => {
+  e.stopPropagation();
+  const item = (e.target as HTMLElement).closest<HTMLElement>(".ctx-item");
+  if (!item) return;
+  const href = linkCtxMenu.dataset.href ?? "";
+  if (item.dataset.act === "copy") {
+    void copyText(href).then((ok) => {
+      item.textContent = ok ? "Copied!" : "Copy failed";
+      setTimeout(() => {
+        item.textContent = "Copy link address";
+        linkCtxMenu.classList.add("hidden");
+      }, 1000);
+    });
+  }
+});
+
+document.addEventListener("click", (e) => {
+  if (!linkCtxMenu.contains(e.target as Node)) linkCtxMenu.classList.add("hidden");
+});
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape") linkCtxMenu.classList.add("hidden");
+});
+window.addEventListener("blur", () => linkCtxMenu.classList.add("hidden"));
 
 async function loadAttachments(messageId: string): Promise<void> {
   let list: AttachmentInfo[];
@@ -1124,6 +1289,182 @@ async function copyText(text: string): Promise<boolean> {
   }
 }
 
+// ---- Message rules manager ----
+// Server-side inbox rules via Graph messageRule. The UI lists existing rules,
+// and an editor form creates/updates/deletes them. Conditions are simplified to
+// sender/subject/recipient contains; actions are move-to-folder or mark-as-read.
+
+let editingRuleId: string | null = null;
+
+async function openRules(): Promise<void> {
+  rulesMsg.textContent = "";
+  rulesEditor.classList.add("hidden");
+  rulesOverlay.classList.remove("hidden");
+  await loadRules();
+}
+
+function closeRules(): void {
+  rulesOverlay.classList.add("hidden");
+}
+
+async function loadRules(): Promise<void> {
+  rulesList.innerHTML = `<div class="rules-loading">Loading rules…</div>`;
+  try {
+    const rules = await invoke<MessageRule[]>("list_message_rules");
+    renderRulesList(rules);
+  } catch (e) {
+    rulesList.innerHTML = `<div class="rules-loading">Could not load rules: ${esc(String(e))}</div>`;
+  }
+}
+
+function ruleSummary(rule: MessageRule): string {
+  const parts: string[] = [];
+  if (rule.conditions.senderContains.length) parts.push(`from: ${rule.conditions.senderContains.join(", ")}`);
+  if (rule.conditions.subjectContains.length) parts.push(`subject: ${rule.conditions.subjectContains.join(", ")}`);
+  if (rule.conditions.recipientContains.length) parts.push(`to: ${rule.conditions.recipientContains.join(", ")}`);
+  const cond = parts.length ? parts.join(" · ") : "(no conditions)";
+  const actions: string[] = [];
+  if (rule.actions.moveToFolderId) {
+    const folder = folders.find((f) => f.id === rule.actions.moveToFolderId);
+    actions.push(`move to ${folder ? folder.name : "folder"}`);
+  }
+  if (rule.actions.markAsRead) actions.push("mark as read");
+  const act = actions.length ? actions.join(" · ") : "(no actions)";
+  return `${cond} &rarr; ${act}`;
+}
+
+function renderRulesList(rules: MessageRule[]): void {
+  if (rules.length === 0) {
+    rulesList.innerHTML = `<div class="rules-loading">No rules yet. Click "New rule" to create one.</div>`;
+    return;
+  }
+  rulesList.innerHTML = rules
+    .map(
+      (r) => `
+      <div class="rule-item" data-rid="${esc(r.id)}">
+        <div class="rule-info">
+          <div class="rule-name">${esc(r.displayName)}${r.isEnabled ? "" : " <span class=\"rule-disabled\">(disabled)</span>"}</div>
+          <div class="rule-summary">${ruleSummary(r)}</div>
+        </div>
+        <button class="btn btn-xs rule-edit" data-rid="${esc(r.id)}">Edit</button>
+      </div>`,
+    )
+    .join("");
+  rulesList.querySelectorAll<HTMLButtonElement>(".rule-edit").forEach((btn) => {
+    btn.addEventListener("click", () => void editRule(btn.dataset.rid!));
+  });
+}
+
+function populateFolderDropdown(): void {
+  ruleFolder.innerHTML = `<option value="">(none)</option>` +
+    folders.map((f) => `<option value="${esc(f.id)}">${esc(f.name)}</option>`).join("");
+}
+
+function showRuleEditor(rule?: MessageRule): void {
+  editingRuleId = rule?.id ?? null;
+  rulesEditorTitle.textContent = rule ? "Edit rule" : "New rule";
+  ruleName.value = rule?.displayName ?? "";
+  ruleSequence.value = String(rule?.sequence ?? 1);
+  ruleEnabled.checked = rule?.isEnabled ?? true;
+  ruleSender.value = rule?.conditions.senderContains.join(", ") ?? "";
+  ruleSubject.value = rule?.conditions.subjectContains.join(", ") ?? "";
+  ruleRecipient.value = rule?.conditions.recipientContains.join(", ") ?? "";
+  populateFolderDropdown();
+  if (rule?.actions.moveToFolderId) ruleFolder.value = rule.actions.moveToFolderId;
+  ruleMarkRead.checked = rule?.actions.markAsRead ?? false;
+  ruleDeleteBtn.classList.toggle("hidden", !rule);
+  rulesEditor.classList.remove("hidden");
+}
+
+async function editRule(id: string): Promise<void> {
+  try {
+    const rules = await invoke<MessageRule[]>("list_message_rules");
+    const rule = rules.find((r) => r.id === id);
+    if (rule) showRuleEditor(rule);
+  } catch (e) {
+    rulesMsg.textContent = `Could not load rule: ${e}`;
+  }
+}
+
+function parseCommaList(value: string): string[] {
+  return value.split(",").map((s) => s.trim()).filter(Boolean);
+}
+
+function buildRuleFromForm(): MessageRule {
+  return {
+    id: editingRuleId ?? "",
+    displayName: ruleName.value.trim() || "Untitled rule",
+    sequence: Number.parseInt(ruleSequence.value, 10) || 1,
+    isEnabled: ruleEnabled.checked,
+    conditions: {
+      senderContains: parseCommaList(ruleSender.value),
+      subjectContains: parseCommaList(ruleSubject.value),
+      recipientContains: parseCommaList(ruleRecipient.value),
+    },
+    actions: {
+      moveToFolderId: ruleFolder.value || null,
+      markAsRead: ruleMarkRead.checked,
+    },
+  };
+}
+
+async function saveRule(): Promise<void> {
+  const rule = buildRuleFromForm();
+  ruleSaveBtn.disabled = true;
+  rulesMsg.textContent = "Saving…";
+  try {
+    if (editingRuleId) {
+      await invoke("update_message_rule", { id: editingRuleId, rule });
+    } else {
+      await invoke("create_message_rule", { rule });
+    }
+    rulesMsg.textContent = "";
+    rulesEditor.classList.add("hidden");
+    await loadRules();
+  } catch (e) {
+    rulesMsg.textContent = `Could not save rule: ${e}`;
+  } finally {
+    ruleSaveBtn.disabled = false;
+  }
+}
+
+async function deleteRule(): Promise<void> {
+  if (!editingRuleId) return;
+  ruleDeleteBtn.disabled = true;
+  rulesMsg.textContent = "Deleting…";
+  try {
+    await invoke("delete_message_rule", { id: editingRuleId });
+    rulesMsg.textContent = "";
+    rulesEditor.classList.add("hidden");
+    await loadRules();
+  } catch (e) {
+    rulesMsg.textContent = `Could not delete rule: ${e}`;
+  } finally {
+    ruleDeleteBtn.disabled = false;
+  }
+}
+
+rulesNewBtn.addEventListener("click", () => showRuleEditor());
+rulesCloseBtn.addEventListener("click", closeRules);
+ruleCancelBtn.addEventListener("click", () => rulesEditor.classList.add("hidden"));
+ruleSaveBtn.addEventListener("click", () => void saveRule());
+ruleDeleteBtn.addEventListener("click", () => void deleteRule());
+rulesOverlay.addEventListener("click", (e) => {
+  if (e.target === rulesOverlay) closeRules();
+});
+
+// ---- Keyboard shortcut cheat-sheet overlay ----
+function toggleShortcuts(): void {
+  shortcutsOverlay.classList.toggle("hidden");
+}
+function closeShortcuts(): void {
+  shortcutsOverlay.classList.add("hidden");
+}
+shortcutsCloseBtn.addEventListener("click", closeShortcuts);
+shortcutsOverlay.addEventListener("click", (e) => {
+  if (e.target === shortcutsOverlay) closeShortcuts();
+});
+
 // ---- Resizable splitter ----
 const LIST_W_KEY = "wattmail.listWidth";
 const clampWidth = (w: number): number => Math.max(260, Math.min(640, w));
@@ -1278,6 +1619,32 @@ async function selectFolder(id: string): Promise<void> {
   await syncFolder();
 }
 
+// ---- Desktop notifications for new mail ----
+// After an Inbox sync, ask the backend to check for messages newer than the
+// last-notified timestamp. If there are new unread messages, show a native OS
+// notification; clicking it focuses the window and opens the message.
+async function checkNewMail(): Promise<void> {
+  try {
+    const inbox = await invoke<Inbox>("folder_from_cache", {
+      folderId: currentFolderId!,
+      top: loadedCount,
+    });
+    const batch = await invoke<NewMailBatch | null>("check_new_mail", {
+      messages: inbox.messages.map((m) => ({
+        id: m.id,
+        subject: m.subject,
+        received: m.received,
+        isRead: m.isRead,
+      })),
+    });
+    if (!batch) return;
+    const body = batch.count === 1 ? batch.newestSubject : `${batch.count} new messages`;
+    await sendNotification({ title: "WattMail", body });
+  } catch {
+    /* notifications are best-effort — don't disrupt the sync */
+  }
+}
+
 // ---- Actions ----
 let syncing = false;
 
@@ -1329,6 +1696,15 @@ async function syncFolder(quiet = false): Promise<void> {
     await invoke("sync_folder", { folderId: currentFolderId });
     await refreshFromCache(quiet);
     await loadFolders(); // refresh unread counts
+    // After an Inbox sync, check for new mail to show a desktop notification.
+    // Only when not searching (search results aren't the inbox) and the current
+    // folder is the Inbox.
+    if (!searchActive) {
+      const inboxFolder = folders.find((f) => f.name.toLowerCase() === "inbox");
+      if (inboxFolder && currentFolderId === inboxFolder.id) {
+        void checkNewMail();
+      }
+    }
     if (!quiet) {
       const shown =
         currentTotal > currentIds.size
@@ -1380,6 +1756,9 @@ function openSettings(): void {
     .catch(() => {});
   isAutostartEnabled()
     .then((v) => (setAutostart.checked = v))
+    .catch(() => {});
+  invoke<boolean>("get_notification_setting")
+    .then((v) => (setNotifications.checked = v))
     .catch(() => {});
   settingsOverlay.classList.remove("hidden");
 }
@@ -2222,12 +2601,40 @@ setAutostart.addEventListener("change", () => {
     setAutostart.checked = !want; // revert the toggle to the real state
   });
 });
+setNotifications.addEventListener("change", async () => {
+  const want = setNotifications.checked;
+  try {
+    if (want) {
+      // Request OS permission on first enable; if denied, revert the toggle.
+      let granted = await isPermissionGranted();
+      if (!granted) {
+        const permission = await requestPermission();
+        granted = permission === "granted";
+      }
+      if (!granted) {
+        setNotifications.checked = false;
+        settingsMsg.textContent = "Notification permission was denied. You can re-enable it from your system settings.";
+        return;
+      }
+    }
+    await invoke("set_notification_setting", { value: want });
+  } catch (e) {
+    settingsMsg.textContent = `Could not change notification setting: ${e}`;
+    setNotifications.checked = !want;
+  }
+});
+rulesBtn.addEventListener("click", () => void openRules());
 settingsOverlay.addEventListener("click", (e) => {
   if (e.target === settingsOverlay) closeSettings();
 });
 document.addEventListener("keydown", (e) => {
   if (e.key !== "Escape") return;
-  if (!headersOverlay.classList.contains("hidden")) closeHeaders();
+  if (!shortcutsOverlay.classList.contains("hidden")) closeShortcuts();
+  else if (!rulesOverlay.classList.contains("hidden")) {
+    if (!rulesEditor.classList.contains("hidden")) rulesEditor.classList.add("hidden");
+    else closeRules();
+  }
+  else if (!headersOverlay.classList.contains("hidden")) closeHeaders();
   else if (!settingsOverlay.classList.contains("hidden")) closeSettings();
   else if (!composeOverlay.classList.contains("hidden")) closeCompose();
 });
@@ -2254,7 +2661,9 @@ function aModalIsOpen(): boolean {
   return (
     !composeOverlay.classList.contains("hidden") ||
     !settingsOverlay.classList.contains("hidden") ||
-    !headersOverlay.classList.contains("hidden")
+    !headersOverlay.classList.contains("hidden") ||
+    !rulesOverlay.classList.contains("hidden") ||
+    !shortcutsOverlay.classList.contains("hidden")
   );
 }
 
@@ -2280,6 +2689,13 @@ document.addEventListener("keydown", (e) => {
     e.preventDefault();
     searchInput.focus();
     searchInput.select();
+    return;
+  }
+
+  // "?" opens the keyboard shortcut cheat-sheet (when not typing / in a modal).
+  if (e.key === "?") {
+    e.preventDefault();
+    toggleShortcuts();
     return;
   }
 
@@ -2341,6 +2757,14 @@ updateLater.addEventListener("click", () => updateBanner.classList.add("hidden")
 
 // Tray "Settings…" menu item asks the frontend to open the modal.
 void listen("open-settings", () => openSettings());
+
+// Notification click: focus the window and open the message.
+void listen<string>("open-message", (event) => {
+  void getCurrentWindow().show();
+  void getCurrentWindow().setFocus();
+  const id = event.payload;
+  if (id) void openMessage(id);
+});
 
 // ---- Updates ----
 let pendingUpdate: Update | null = null;

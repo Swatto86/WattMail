@@ -105,6 +105,21 @@ impl SqliteStore {
         .map_err(storage_err)?
         .map_err(storage_err)
     }
+
+    /// Synchronously read the cached account email (best-effort, for the tray
+    /// tooltip). Returns `None` if the store isn't populated yet.
+    pub fn cached_account_email(&self) -> Option<String> {
+        let guard = self.conn.lock().expect("sqlite mutex poisoned");
+        let encrypted: Option<String> = guard
+            .query_row(
+                "SELECT value FROM sync_state WHERE key = 'account.email'",
+                [],
+                |r| r.get::<_, String>(0),
+            )
+            .optional()
+            .ok()?;
+        encrypted.and_then(|v| self.cipher.try_decrypt(&v))
+    }
 }
 
 /// Create the schema, dropping and rebuilding on a version mismatch.
