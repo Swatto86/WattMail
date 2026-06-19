@@ -48,6 +48,12 @@ jobs:
       # paying for it twice. fmt/clippy/frontend above still run.
       - name: Tauri build
         if: ${{ !contains(github.event.head_commit.message, '[release]') }}
+        # `createUpdaterArtifacts: true` makes the bundler sign the installer, so
+        # the signing key must be present or the build fails after producing the
+        # bundle ("public key found, but no private key"). Mirror release.yml.
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ""
         run: npm run tauri build
 
   # WattMail ships Windows-first, but the codebase is cross-platform. This job
