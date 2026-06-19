@@ -20,6 +20,14 @@ pub struct Sanitized {
     pub html: String,
     /// True if the original carried remote content (e.g. images) that was removed.
     pub remote_content_blocked: bool,
+    /// True when the email sets its own (non-white) large-area background —
+    /// the signature of designed/marketing mail. Theme-independent, so it is
+    /// safe to compute once and cache. Conservative: biased to `true`, because
+    /// the safe failure is rendering on the light "paper" card. Drives the
+    /// frontend's light-card vs. adapt-to-theme decision; a pure-white or absent
+    /// background is treated as *not* designed, so ordinary mail can follow the
+    /// app theme in dark mode.
+    pub is_designed: bool,
 }
 
 /// Inline CSS properties we allow through (everything else is dropped). None of
@@ -78,6 +86,7 @@ pub fn sanitize_email(content: &str, is_html: bool, allow_images: bool) -> Sanit
         return Sanitized {
             html: text_to_html(content),
             remote_content_blocked: false,
+            is_designed: false,
         };
     }
 
@@ -123,11 +132,17 @@ pub fn sanitize_email(content: &str, is_html: bool, allow_images: bool) -> Sanit
         // Removing `img` closes the remote-image / tracking-pixel vector.
         builder.rm_tags(["img"]);
     }
+    // Classify against the raw source (before cleaning) so author intent is
+    // visible even where the sanitizer would later drop a value. This only
+    // reads; it can never reintroduce blocked content.
+    let is_designed = has_own_background(content);
+
     let html = builder.clean(content).to_string();
 
     Sanitized {
         html,
         remote_content_blocked,
+        is_designed,
     }
 }
 
@@ -182,4 +197,167 @@ fn has_remote_content(html: &str) -> bool {
         || lower.contains("url(http")
         || lower.contains("background:url")
         || lower.contains("background: url")
+}
+
+/// Conservative, theme-independent test: does the source declare its own
+/// large-area background that is *not* the default white canvas? "Designed"
+/// (marketing/HTML) mail almost always sets at least one non-white background
+/// (a header bar, a card, a coloured cell); plain mail sets none, or only a
+/// pure-white one it inherits by convention. Pure-white / transparent / absent
+/// backgrounds count as *not* designed so ordinary mail can follow the app
+/// theme in dark mode — this mirrors how Apple Mail treats a white background
+/// the same as no background. Biased to `true` on anything else.
+fn has_own_background(html: &str) -> bool {
+    let lower = html.to_ascii_lowercase();
+    has_designed_bgcolor_attr(&lower)
+        || has_designed_css_background(&lower, "background-color:")
+        || has_designed_css_background(&lower, "background:")
+}
+
+/// Any `bgcolor="…"` presentational attribute whose value is a real, non-white
+/// colour. Scans every occurrence — one non-white hit is enough.
+fn has_designed_bgcolor_attr(lower: &str) -> bool {
+    let mut rest = lower;
+    while let Some(i) = rest.find("bgcolor=") {
+        let after = &rest[i + "bgcolor=".len()..];
+        if !is_ignorable_background(read_attr_value(after)) {
+            return true;
+        }
+        rest = after;
+    }
+    false
+}
+
+/// Any inline `background[-color]:` declaration with a real, non-white value.
+fn has_designed_css_background(lower: &str, key: &str) -> bool {
+    let mut rest = lower;
+    while let Some(i) = rest.find(key) {
+        let after = &rest[i + key.len()..];
+        let end = after.find([';', '"', '\'', '}']).unwrap_or(after.len());
+        if !is_ignorable_background(after[..end].trim()) {
+            return true;
+        }
+        rest = after;
+    }
+    false
+}
+
+/// Read an HTML attribute value, quoted (`"…"` / `'…'`) or bare (up to
+/// whitespace or `>`). Input is the slice immediately following `name=`.
+fn read_attr_value(after: &str) -> &str {
+    let mut chars = after.chars();
+    match chars.next() {
+        Some(q @ ('"' | '\'')) => {
+            let body = &after[1..];
+            let end = body.find(q).unwrap_or(body.len());
+            body[..end].trim()
+        }
+        _ => {
+            let end = after
+                .find(|c: char| c.is_whitespace() || c == '>')
+                .unwrap_or(after.len());
+            after[..end].trim()
+        }
+    }
+}
+
+/// A background value that should *not* mark an email as designed: empty, a
+/// CSS default keyword, or pure white in any common notation.
+fn is_ignorable_background(value: &str) -> bool {
+    let v = value.trim();
+    if v.is_empty() {
+        return true;
+    }
+    if [
+        "transparent",
+        "inherit",
+        "none",
+        "initial",
+        "unset",
+        "currentcolor",
+    ]
+    .iter()
+    .any(|kw| v.starts_with(kw))
+    {
+        return true;
+    }
+    is_white(v)
+}
+
+/// Pure white in the notations mail actually uses (whitespace-insensitive).
+fn is_white(value: &str) -> bool {
+    let compact: String = value.chars().filter(|c| !c.is_whitespace()).collect();
+    matches!(
+        compact.as_str(),
+        "#fff" | "#ffffff" | "#ffffffff" | "white" | "rgb(255,255,255)" | "rgba(255,255,255,1)"
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn designed(html: &str) -> bool {
+        sanitize_email(html, true, false).is_designed
+    }
+
+    #[test]
+    fn plain_text_is_never_designed() {
+        assert!(!sanitize_email("hello", false, false).is_designed);
+    }
+
+    #[test]
+    fn unstyled_html_is_not_designed() {
+        assert!(!designed("<p>hi there</p>"));
+    }
+
+    #[test]
+    fn plain_coloured_text_is_not_designed() {
+        // Dark text on no background is the *plain* case we adapt per-element,
+        // not a designed layout.
+        assert!(!designed(r##"<p style="color:#000000">hi</p>"##));
+    }
+
+    #[test]
+    fn non_white_bgcolor_attr_is_designed() {
+        assert!(designed(
+            r##"<table bgcolor="#0a66c2"><tr><td>x</td></tr></table>"##
+        ));
+    }
+
+    #[test]
+    fn non_white_inline_background_is_designed() {
+        assert!(designed(
+            r##"<div style="background-color:#102030">x</div>"##
+        ));
+        assert!(designed(
+            r##"<div style="background:#102030 none repeat">x</div>"##
+        ));
+    }
+
+    #[test]
+    fn white_background_is_not_designed() {
+        // Ordinary mail that merely restates the white canvas must still adapt.
+        assert!(!designed(r##"<body bgcolor="#FFFFFF"><p>hi</p></body>"##));
+        assert!(!designed(r##"<div style="background-color:#fff">x</div>"##));
+        assert!(!designed(
+            r#"<table bgcolor="white"><tr><td>x</td></tr></table>"#
+        ));
+        assert!(!designed(
+            r#"<div style="background:rgb(255, 255, 255)">x</div>"#
+        ));
+    }
+
+    #[test]
+    fn transparent_background_is_not_designed() {
+        assert!(!designed(r#"<div style="background:transparent">x</div>"#));
+    }
+
+    #[test]
+    fn white_then_coloured_background_is_designed() {
+        // A white page wrapper plus any coloured cell is a designed layout.
+        assert!(designed(
+            r##"<body bgcolor="#ffffff"><td bgcolor="#0a66c2">x</td></body>"##
+        ));
+    }
 }

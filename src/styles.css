@@ -529,8 +529,19 @@ body,
   flex: 1;
   width: 100%;
   border: 0;
-  /* Email bodies render on white (email HTML assumes a light theme). */
+  /* Theme base; the iframe's own <body> paints the real surface (a white paper
+     card for designed/light mail, the theme surface for adapted plain mail). */
+  background: oklch(var(--b1));
+}
+/* Designed / light-mode emails keep their white surface. In the dark theme,
+   frame that white as a "paper card" so it reads as an intentional sheet rather
+   than a full-bleed slab. In the light theme the card and app are both light,
+   so no framing is needed (this rule is scoped to the dark theme). */
+[data-theme="business"] .reader-frame.is-paper-card {
   background: #ffffff;
+  margin: 8px;
+  border-radius: 8px;
+  box-shadow: 0 1px 4px oklch(var(--bc) / 0.25);
 }
 
 /* Folder sidebar */

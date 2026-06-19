@@ -306,6 +306,7 @@ impl MailProvider for GraphClient {
             received: message.received_date_time.unwrap_or_default(),
             html,
             remote_content_blocked: sanitized.remote_content_blocked,
+            is_designed: sanitized.is_designed,
         })
     }
 

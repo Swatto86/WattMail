@@ -177,6 +177,9 @@ pub struct MessageViewDto {
     pub received: String,
     pub html: String,
     pub remote_blocked: bool,
+    /// True when the email sets its own (non-white) background — render it on a
+    /// light card; false lets plain mail follow the app theme in dark mode.
+    pub designed: bool,
 }
 
 #[tauri::command]
@@ -199,6 +202,7 @@ pub async fn load_message(
         received: body.received,
         html: body.html,
         remote_blocked: body.remote_content_blocked,
+        designed: body.is_designed,
     })
 }
 

@@ -5,7 +5,7 @@
 > new milestone state, a decision made/reversed, or an open question resolved.
 > Keep newest progress entries at the top of the log.
 >
-> **Last updated:** 2026-06-18
+> **Last updated:** 2026-06-19
 
 ---
 
@@ -77,6 +77,55 @@ Entra app registration (public, not secret):
 ---
 
 ## Progress log
+
+### 2026-06-19 — Adaptive dark-mode email-body rendering (v0.1.15)
+Email bodies used to render on a **forced white background regardless of theme**
+(`wrapEmailHtml` hardcoded `#1a1a1a` on `#ffffff`), so in the default dark theme
+every message was a jarring full-bleed white slab. Replaced with an **adaptive
+("smart") strategy** — accuracy preserved for designed mail, readability for
+plain mail in both themes:
+
+- **Rust classifier (theme-independent, cache-safe).** `sanitize_email` now also
+  returns `Sanitized.is_designed` (→ `MessageBody.is_designed` → `MessageViewDto.designed`,
+  serde camelCase `designed`). `has_own_background` scans the *raw source* for a
+  `bgcolor=` attribute or an inline `background[-color]:` whose value is real and
+  **not pure white** (`#fff`/`#ffffff`/`white`/`rgb(255,255,255)`/transparent/
+  inherit/none → ignored). Rationale: designed/marketing mail almost always sets at
+  least one non-white background (header bar, card, coloured cell); plain mail sets
+  none or only restates the white canvas. **Pure-white is treated as *not* designed**
+  — mirrors Apple Mail treating a white background like no background — so ordinary
+  Outlook white-`bgcolor` mail still adapts in dark mode. Conservative: biased to
+  `true` (the safe failure is the light card, never unreadable). 8 unit tests in `html.rs`.
+- **Frontend render (`src/main.ts`).** `wrapEmailHtml(inner, {adapt, bg, fg})` now
+  builds three cases: **(a) designed (any theme)** and **(b) plain + light** keep the
+  existing light "paper card" (`#1a1a1a` on `#ffffff`); **(c) plain + dark** renders
+  on the resolved DaisyUI surface (`oklch(var(--b1))`/`--bc`, read once via a probe
+  span in `readThemeColors`), with the default link colour lifted to ≥3:1.
+- **Per-element colour repair (`adaptPlainEmail`, plain+dark only).** On the iframe
+  `load` event, walks `[style], font[color]` (cap 4000, skips media tags) and, using
+  **WCAG relative-luminance contrast**: KEEPs author colours already ≥4.5:1 (links
+  ≥3:1) — they're readable and intentional; STRIPs near-neutral dark text (HSL S<0.15,
+  e.g. `#000`) so it inherits the theme foreground; LIFTs chromatic colours by HSL
+  lightness (12-step binary search, hue preserved) until they clear the gate. Skips
+  any element on a light *local* background so dark text on a highlight cell isn't
+  stranded. Reads/rewrites already-sanitised inline values only — no new tags, no
+  remote loads, no sanitiser change.
+- **Paper-card framing.** `.reader-frame` base background is now `oklch(var(--b1))`;
+  designed/light mail gets `.is-paper-card` (set in `renderReader`) which, **only in
+  the dark theme**, frames the white surface with `margin:8px`, `border-radius:8px`
+  and a soft shadow so it reads as an intentional sheet, not a slab.
+- **Theme-change re-render.** Toggling the theme select or the OS theme (system mode)
+  now calls `reRenderOpenMessage()` → `renderReader(lastMessage)` + reload attachments,
+  so an open message re-applies the light-card/adapt decision. No network fetch; the
+  cached `msg.html` is never mutated (the pass only edits the freshly rebuilt iframe DOM).
+- **Verified.** `cargo fmt --check`, `clippy --all-targets -D warnings`, `cargo test`
+  (8/8), `tsc --noEmit`, `vite build` all clean. Rendering confirmed **visually in a
+  throwaway harness** running the real adaptation logic over representative emails
+  (plain reply, chromatic heading, `<font color=#000>`, Outlook white-bg, designed
+  newsletter) in **both themes** — plain mail adapts to readable light-on-dark, the
+  navy heading lifts to a readable blue, the newsletter stays a framed white card.
+- **Out of scope (deliberate):** the compose quoted-original is *not* adapted — it is
+  editable, send-bound content; recolouring it would corrupt outgoing mail.
 
 ### 2026-06-19 — Fix inbox-rules decode + botched-version release (v0.1.14)
 Two bugs from the v0.1.13 batch (which was compile-verified but never run live):

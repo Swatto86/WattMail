@@ -110,6 +110,11 @@ pub struct MessageBody {
     pub html: String,
     /// True if remote content (e.g. images) was stripped during sanitization.
     pub remote_content_blocked: bool,
+    /// True when the email sets its own (non-white) large-area background —
+    /// designed/marketing mail. Theme-independent; lets the presentation layer
+    /// render designed mail on a light card while letting plain mail follow the
+    /// app theme in dark mode.
+    pub is_designed: bool,
 }
 
 /// A single internet message header (an RFC 5322 `name: value` pair), as
