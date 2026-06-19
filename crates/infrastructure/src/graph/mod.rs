@@ -992,12 +992,15 @@ struct GraphMessageRule {
 #[derive(serde::Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 struct GraphRuleConditions {
+    // All three are Graph `Collection(String)` substring predicates — matching
+    // the "… contains" semantics the UI offers. (`fromAddresses` is a separate
+    // exact-address recipient collection and is intentionally not used here.)
     #[serde(default)]
-    from_addresses: Vec<GraphRecipient>,
+    sender_contains: Vec<String>,
     #[serde(default)]
     subject_contains: Vec<String>,
     #[serde(default)]
-    recipient_contains: Vec<GraphRecipient>,
+    recipient_contains: Vec<String>,
 }
 
 #[derive(serde::Deserialize, Default)]
@@ -1019,17 +1022,9 @@ impl From<GraphMessageRule> for MessageRule {
             sequence: r.sequence,
             is_enabled: r.is_enabled,
             conditions: MessageRuleConditions {
-                sender_contains: conditions
-                    .from_addresses
-                    .into_iter()
-                    .filter_map(|rec| rec.email_address.address)
-                    .collect(),
+                sender_contains: conditions.sender_contains,
                 subject_contains: conditions.subject_contains,
-                recipient_contains: conditions
-                    .recipient_contains
-                    .into_iter()
-                    .filter_map(|rec| rec.email_address.address)
-                    .collect(),
+                recipient_contains: conditions.recipient_contains,
             },
             actions: MessageRuleActions {
                 move_to_folder_id: actions.move_to_folder,
@@ -1041,33 +1036,26 @@ impl From<GraphMessageRule> for MessageRule {
 
 /// Build the Graph JSON payload for a create/update message rule request.
 fn message_rule_json(rule: &MessageRule) -> serde_json::Value {
+    // Each predicate is a Graph `Collection(String)`; build them uniformly.
+    let string_array = |values: &[String]| {
+        serde_json::Value::Array(
+            values
+                .iter()
+                .cloned()
+                .map(serde_json::Value::String)
+                .collect(),
+        )
+    };
+
     let mut conditions = serde_json::json!({});
     if !rule.conditions.sender_contains.is_empty() {
-        conditions["fromAddresses"] = serde_json::Value::Array(
-            rule.conditions
-                .sender_contains
-                .iter()
-                .map(|a| serde_json::json!({ "emailAddress": { "address": a } }))
-                .collect(),
-        );
+        conditions["senderContains"] = string_array(&rule.conditions.sender_contains);
     }
     if !rule.conditions.subject_contains.is_empty() {
-        conditions["subjectContains"] = serde_json::Value::Array(
-            rule.conditions
-                .subject_contains
-                .iter()
-                .map(|s| serde_json::Value::String(s.clone()))
-                .collect(),
-        );
+        conditions["subjectContains"] = string_array(&rule.conditions.subject_contains);
     }
     if !rule.conditions.recipient_contains.is_empty() {
-        conditions["recipientContains"] = serde_json::Value::Array(
-            rule.conditions
-                .recipient_contains
-                .iter()
-                .map(|a| serde_json::json!({ "emailAddress": { "address": a } }))
-                .collect(),
-        );
+        conditions["recipientContains"] = string_array(&rule.conditions.recipient_contains);
     }
 
     let mut actions = serde_json::json!({});

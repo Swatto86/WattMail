@@ -78,6 +78,14 @@ Entra app registration (public, not secret):
 
 ## Progress log
 
+### 2026-06-19 — Fix inbox-rules decode + botched-version release (v0.1.14)
+Two bugs from the v0.1.13 batch (which was compile-verified but never run live):
+
+- **Inbox rules "invalid response body"** — the Graph layer modelled `recipientContains` (and `senderContains`, via the wrong `fromAddresses` mapping) as recipient *objects*, but Graph's `messageRulePredicates` defines `senderContains`/`recipientContains`/`subjectContains` all as `Collection(String)` substring predicates. So any existing rule with a `recipientContains` condition failed to deserialize, crashing the whole `list_message_rules` decode (surfaced as reqwest's "error decoding response body"). Fixed `GraphRuleConditions`, its `From` impl, and `message_rule_json` to use string collections for all three "… contains" predicates — matching the UI's substring semantics and round-tripping rules created in Outlook. Compiled-but-wrong is why fmt/clippy/`cargo check` stayed green.
+- **Setup showed 0.1.12** — the v0.1.13 batch never bumped the version, so `tauri-action` built `WattMail_0.1.12_x64-setup.exe` and a `latest.json` advertising 0.1.12 under the v0.1.13 tag (auto-update would never fire). Bumped `package.json` / `tauri.conf.json` / `src-tauri/Cargo.toml` to **0.1.14**, synced `Cargo.lock`. Cutting a clean 0.1.14 rather than reusing the 0.1.13 tag (monotonic, supersedes the broken installer). Old v0.1.12 + v0.1.13 releases/tags deleted per the rolling-release model.
+
+fmt + `clippy --all-targets -D warnings` + `npm run build` clean.
+
 ### 2026-06-18 — Notifications, tray tooltip, inbox rules, link context menu, shortcuts cheat-sheet (v0.1.13)
 Built as a multi-agent batch (plan → implement → build verify). `cargo check`, `cargo clippy --all-targets -D warnings`, `cargo fmt --check`, and `npm run build` all clean. Live run pending.
 
