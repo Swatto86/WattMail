@@ -1,9 +1,12 @@
 //! Tauri commands bridging the frontend to the application/infrastructure layers.
 
+use std::sync::Arc;
+
 use base64::Engine;
 use serde::{Deserialize, Serialize};
 use tauri::{Manager, State};
 
+use crate::accounts::{AccountManager, AccountSummary, ManagedAccount};
 use crate::settings::{self, SettingsState};
 use wattmail_application::{
     cached_folders as app_cached_folders, compose_forward, compose_reply,
@@ -14,8 +17,27 @@ use wattmail_application::{
     send_draft as app_send_draft, send_message as app_send_message, set_flag as app_set_flag,
     set_read as app_set_read, sync_folder as app_sync_folder,
 };
-use wattmail_domain::{Folder, MessageRule, MessageSummary, OutgoingAttachment, OutgoingMessage};
-use wattmail_infrastructure::{AuthService, GraphClient, SqliteStore};
+use wattmail_domain::{
+    Folder, MailProvider, MessageRule, MessageSummary, OutgoingAttachment, OutgoingMessage,
+};
+use wattmail_infrastructure::{build_mail_provider, ProviderKind};
+
+/// Resolve the active account and a mail provider authenticated for it — the
+/// common preamble for every command that talks to the server. The provider is
+/// the right backend for the account (Graph or Gmail). Holding the returned
+/// `Arc` keeps the account's cache available for write-through.
+async fn active_provider(
+    accounts: &AccountManager,
+) -> Result<(Arc<ManagedAccount>, Box<dyn MailProvider>), String> {
+    let account = accounts.active()?;
+    let token = account
+        .auth
+        .access_token()
+        .await
+        .map_err(|e| e.to_string())?;
+    let provider = build_mail_provider(account.record.provider, token);
+    Ok((account, provider))
+}
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -77,40 +99,60 @@ fn folder_dto(f: Folder) -> FolderDto {
     }
 }
 
+/// Whether at least one account is signed in.
 #[tauri::command]
-pub fn is_signed_in(auth: State<'_, AuthService>) -> bool {
-    auth.has_cached_credentials()
+pub fn is_signed_in(accounts: State<'_, AccountManager>) -> bool {
+    accounts.is_signed_in()
 }
 
+/// All signed-in accounts, with the active one flagged.
 #[tauri::command]
-pub async fn sign_in(auth: State<'_, AuthService>) -> Result<(), String> {
-    auth.sign_in().await.map_err(|e| e.to_string())
+pub fn list_accounts(accounts: State<'_, AccountManager>) -> Vec<AccountSummary> {
+    accounts.list()
 }
 
+/// Interactively sign in and add a new account for `provider` (browser login),
+/// making it the active account. Re-signing into an existing account just
+/// refreshes it. `provider` is a tag: `office365`, `outlook_consumer`, or `gmail`.
 #[tauri::command]
-pub fn sign_out(auth: State<'_, AuthService>) -> Result<(), String> {
-    auth.sign_out().map_err(|e| e.to_string())
+pub async fn add_account(
+    accounts: State<'_, AccountManager>,
+    provider: String,
+) -> Result<AccountSummary, String> {
+    let kind =
+        ProviderKind::from_tag(&provider).ok_or_else(|| format!("unknown provider: {provider}"))?;
+    accounts.add_account(kind).await
+}
+
+/// Switch the active account.
+#[tauri::command]
+pub fn switch_account(accounts: State<'_, AccountManager>, id: String) -> Result<(), String> {
+    accounts.switch(&id)
+}
+
+/// Remove an account: forget its credentials and delete its local cache.
+#[tauri::command]
+pub fn remove_account(accounts: State<'_, AccountManager>, id: String) -> Result<(), String> {
+    accounts.remove_account(&id)
 }
 
 /// List the user's mail folders. Tries the live Graph list (persisting it to the
 /// cache write-through); on a provider/network failure, falls back to the cached
 /// list so the sidebar still renders offline.
 #[tauri::command]
-pub async fn list_folders(
-    auth: State<'_, AuthService>,
-    store: State<'_, SqliteStore>,
-) -> Result<Vec<FolderDto>, String> {
-    let live = match auth.access_token().await {
+pub async fn list_folders(accounts: State<'_, AccountManager>) -> Result<Vec<FolderDto>, String> {
+    let account = accounts.active()?;
+    let live = match account.auth.access_token().await {
         Ok(token) => {
-            let provider = GraphClient::new(token);
-            app_list_folders(&provider, &*store).await
+            let provider = build_mail_provider(account.record.provider, token);
+            app_list_folders(&*provider, &account.store).await
         }
         Err(e) => Err(wattmail_domain::MailError::Network(e.to_string())),
     };
 
     let folders = match live {
         Ok(folders) => folders,
-        Err(_) => app_cached_folders(&*store)
+        Err(_) => app_cached_folders(&account.store)
             .await
             .map_err(|e| e.to_string())?,
     };
@@ -120,11 +162,12 @@ pub async fn list_folders(
 /// Read a folder from the local cache — instant, works offline.
 #[tauri::command]
 pub async fn folder_from_cache(
-    store: State<'_, SqliteStore>,
+    accounts: State<'_, AccountManager>,
     folder_id: String,
     top: u32,
 ) -> Result<InboxDto, String> {
-    let cached = app_folder_from_cache(&*store, &folder_id, top)
+    let account = accounts.active()?;
+    let cached = app_folder_from_cache(&account.store, &folder_id, top)
         .await
         .map_err(|e| e.to_string())?;
     Ok(InboxDto {
@@ -140,13 +183,11 @@ pub async fn folder_from_cache(
 /// Pull changes for one folder from the server into the local cache.
 #[tauri::command]
 pub async fn sync_folder(
-    auth: State<'_, AuthService>,
-    store: State<'_, SqliteStore>,
+    accounts: State<'_, AccountManager>,
     folder_id: String,
 ) -> Result<(), String> {
-    let token = auth.access_token().await.map_err(|e| e.to_string())?;
-    let provider = GraphClient::new(token);
-    app_sync_folder(&provider, &*store, &folder_id)
+    let (account, provider) = active_provider(&accounts).await?;
+    app_sync_folder(&*provider, &account.store, &folder_id)
         .await
         .map_err(|e| e.to_string())
 }
@@ -155,13 +196,12 @@ pub async fn sync_folder(
 /// cached; an empty/whitespace query yields no results.
 #[tauri::command]
 pub async fn search_messages(
-    auth: State<'_, AuthService>,
+    accounts: State<'_, AccountManager>,
     query: String,
     top: u32,
 ) -> Result<Vec<MessageDto>, String> {
-    let token = auth.access_token().await.map_err(|e| e.to_string())?;
-    let provider = GraphClient::new(token);
-    let results = app_search_messages(&provider, &query, top)
+    let (_account, provider) = active_provider(&accounts).await?;
+    let results = app_search_messages(&*provider, &query, top)
         .await
         .map_err(|e| e.to_string())?;
     Ok(results.into_iter().map(message_dto).collect())
@@ -184,13 +224,12 @@ pub struct MessageViewDto {
 
 #[tauri::command]
 pub async fn load_message(
-    auth: State<'_, AuthService>,
+    accounts: State<'_, AccountManager>,
     id: String,
     allow_images: bool,
 ) -> Result<MessageViewDto, String> {
-    let token = auth.access_token().await.map_err(|e| e.to_string())?;
-    let provider = GraphClient::new(token);
-    let body = read_message(&provider, &id, allow_images)
+    let (_account, provider) = active_provider(&accounts).await?;
+    let body = read_message(&*provider, &id, allow_images)
         .await
         .map_err(|e| e.to_string())?;
 
@@ -216,12 +255,11 @@ pub struct HeaderDto {
 /// Fetch a message's raw internet headers (RFC 5322), in transit order.
 #[tauri::command]
 pub async fn message_headers(
-    auth: State<'_, AuthService>,
+    accounts: State<'_, AccountManager>,
     id: String,
 ) -> Result<Vec<HeaderDto>, String> {
-    let token = auth.access_token().await.map_err(|e| e.to_string())?;
-    let provider = GraphClient::new(token);
-    let headers = read_headers(&provider, &id)
+    let (_account, provider) = active_provider(&accounts).await?;
+    let headers = read_headers(&*provider, &id)
         .await
         .map_err(|e| e.to_string())?;
     Ok(headers
@@ -236,14 +274,12 @@ pub async fn message_headers(
 /// Set a message's read state on the server and in the cache.
 #[tauri::command]
 pub async fn set_read(
-    auth: State<'_, AuthService>,
-    store: State<'_, SqliteStore>,
+    accounts: State<'_, AccountManager>,
     id: String,
     read: bool,
 ) -> Result<(), String> {
-    let token = auth.access_token().await.map_err(|e| e.to_string())?;
-    let provider = GraphClient::new(token);
-    app_set_read(&provider, &*store, &id, read)
+    let (account, provider) = active_provider(&accounts).await?;
+    app_set_read(&*provider, &account.store, &id, read)
         .await
         .map_err(|e| e.to_string())
 }
@@ -251,28 +287,21 @@ pub async fn set_read(
 /// Set a message's follow-up flag on the server and in the cache.
 #[tauri::command]
 pub async fn set_flag(
-    auth: State<'_, AuthService>,
-    store: State<'_, SqliteStore>,
+    accounts: State<'_, AccountManager>,
     id: String,
     flagged: bool,
 ) -> Result<(), String> {
-    let token = auth.access_token().await.map_err(|e| e.to_string())?;
-    let provider = GraphClient::new(token);
-    app_set_flag(&provider, &*store, &id, flagged)
+    let (account, provider) = active_provider(&accounts).await?;
+    app_set_flag(&*provider, &account.store, &id, flagged)
         .await
         .map_err(|e| e.to_string())
 }
 
 /// Delete a message (moves it to Deleted Items) and drop it from the cache.
 #[tauri::command]
-pub async fn delete_message(
-    auth: State<'_, AuthService>,
-    store: State<'_, SqliteStore>,
-    id: String,
-) -> Result<(), String> {
-    let token = auth.access_token().await.map_err(|e| e.to_string())?;
-    let provider = GraphClient::new(token);
-    app_delete_message(&provider, &*store, &id)
+pub async fn delete_message(accounts: State<'_, AccountManager>, id: String) -> Result<(), String> {
+    let (account, provider) = active_provider(&accounts).await?;
+    app_delete_message(&*provider, &account.store, &id)
         .await
         .map_err(|e| e.to_string())
 }
@@ -280,14 +309,12 @@ pub async fn delete_message(
 /// Move a message to another folder and drop it from the source folder's cache.
 #[tauri::command]
 pub async fn move_message(
-    auth: State<'_, AuthService>,
-    store: State<'_, SqliteStore>,
+    accounts: State<'_, AccountManager>,
     id: String,
     destination_folder_id: String,
 ) -> Result<(), String> {
-    let token = auth.access_token().await.map_err(|e| e.to_string())?;
-    let provider = GraphClient::new(token);
-    app_move_message(&provider, &*store, &id, &destination_folder_id)
+    let (account, provider) = active_provider(&accounts).await?;
+    app_move_message(&*provider, &account.store, &id, &destination_folder_id)
         .await
         .map_err(|e| e.to_string())
 }
@@ -304,14 +331,13 @@ pub struct ComposeDto {
 /// Build a reply / reply-all prefill from a message.
 #[tauri::command]
 pub async fn prepare_reply(
-    auth: State<'_, AuthService>,
+    accounts: State<'_, AccountManager>,
     id: String,
     reply_all: bool,
     self_email: String,
 ) -> Result<ComposeDto, String> {
-    let token = auth.access_token().await.map_err(|e| e.to_string())?;
-    let provider = GraphClient::new(token);
-    let message = read_message(&provider, &id, false)
+    let (_account, provider) = active_provider(&accounts).await?;
+    let message = read_message(&*provider, &id, false)
         .await
         .map_err(|e| e.to_string())?;
     let prefill = compose_reply(&message, &self_email, reply_all);
@@ -326,12 +352,11 @@ pub async fn prepare_reply(
 /// Build a forward prefill from a message.
 #[tauri::command]
 pub async fn prepare_forward(
-    auth: State<'_, AuthService>,
+    accounts: State<'_, AccountManager>,
     id: String,
 ) -> Result<ComposeDto, String> {
-    let token = auth.access_token().await.map_err(|e| e.to_string())?;
-    let provider = GraphClient::new(token);
-    let message = read_message(&provider, &id, false)
+    let (_account, provider) = active_provider(&accounts).await?;
+    let message = read_message(&*provider, &id, false)
         .await
         .map_err(|e| e.to_string())?;
     let prefill = compose_forward(&message);
@@ -356,7 +381,7 @@ pub struct InlineImageDto {
 /// Send a message (compose / reply / forward), saved to Sent Items.
 #[tauri::command]
 pub async fn send_message(
-    auth: State<'_, AuthService>,
+    accounts: State<'_, AccountManager>,
     to: Vec<String>,
     cc: Vec<String>,
     subject: String,
@@ -364,8 +389,7 @@ pub async fn send_message(
     attachment_paths: Vec<String>,
     inline_images: Vec<InlineImageDto>,
 ) -> Result<(), String> {
-    let token = auth.access_token().await.map_err(|e| e.to_string())?;
-    let provider = GraphClient::new(token);
+    let (_account, provider) = active_provider(&accounts).await?;
 
     let mut attachments = Vec::new();
     for path in &attachment_paths {
@@ -406,7 +430,7 @@ pub async fn send_message(
         body_html,
         attachments,
     };
-    app_send_message(&provider, &message)
+    app_send_message(&*provider, &message)
         .await
         .map_err(|e| e.to_string())
 }
@@ -455,15 +479,14 @@ fn extension_for(content_type: &str) -> &'static str {
 /// Returns the draft's id so the frontend can track it for later saves/sends.
 #[tauri::command]
 pub async fn save_draft(
-    auth: State<'_, AuthService>,
+    accounts: State<'_, AccountManager>,
     id: Option<String>,
     to: Vec<String>,
     cc: Vec<String>,
     subject: String,
     body_html: String,
 ) -> Result<String, String> {
-    let token = auth.access_token().await.map_err(|e| e.to_string())?;
-    let provider = GraphClient::new(token);
+    let (_account, provider) = active_provider(&accounts).await?;
     let message = OutgoingMessage {
         to,
         cc,
@@ -471,17 +494,16 @@ pub async fn save_draft(
         body_html,
         attachments: Vec::new(),
     };
-    app_save_draft(&provider, id.as_deref(), &message)
+    app_save_draft(&*provider, id.as_deref(), &message)
         .await
         .map_err(|e| e.to_string())
 }
 
 /// Send an existing draft (moves it to Sent Items, consuming the draft).
 #[tauri::command]
-pub async fn send_draft(auth: State<'_, AuthService>, id: String) -> Result<(), String> {
-    let token = auth.access_token().await.map_err(|e| e.to_string())?;
-    let provider = GraphClient::new(token);
-    app_send_draft(&provider, &id)
+pub async fn send_draft(accounts: State<'_, AccountManager>, id: String) -> Result<(), String> {
+    let (_account, provider) = active_provider(&accounts).await?;
+    app_send_draft(&*provider, &id)
         .await
         .map_err(|e| e.to_string())
 }
@@ -498,12 +520,11 @@ pub struct DraftPrefillDto {
 /// Load a draft for editing, with its raw (unsanitized) body.
 #[tauri::command]
 pub async fn load_draft(
-    auth: State<'_, AuthService>,
+    accounts: State<'_, AccountManager>,
     id: String,
 ) -> Result<DraftPrefillDto, String> {
-    let token = auth.access_token().await.map_err(|e| e.to_string())?;
-    let provider = GraphClient::new(token);
-    let draft = app_load_draft(&provider, &id)
+    let (_account, provider) = active_provider(&accounts).await?;
+    let draft = app_load_draft(&*provider, &id)
         .await
         .map_err(|e| e.to_string())?;
     Ok(DraftPrefillDto {
@@ -526,12 +547,11 @@ pub struct AttachmentDto {
 /// List a message's (non-inline file) attachments.
 #[tauri::command]
 pub async fn attachments(
-    auth: State<'_, AuthService>,
+    accounts: State<'_, AccountManager>,
     message_id: String,
 ) -> Result<Vec<AttachmentDto>, String> {
-    let token = auth.access_token().await.map_err(|e| e.to_string())?;
-    let provider = GraphClient::new(token);
-    let list = list_attachments(&provider, &message_id)
+    let (_account, provider) = active_provider(&accounts).await?;
+    let list = list_attachments(&*provider, &message_id)
         .await
         .map_err(|e| e.to_string())?;
     Ok(list
@@ -548,14 +568,13 @@ pub async fn attachments(
 /// Download one attachment to `dest_path`.
 #[tauri::command]
 pub async fn save_attachment(
-    auth: State<'_, AuthService>,
+    accounts: State<'_, AccountManager>,
     message_id: String,
     attachment_id: String,
     dest_path: String,
 ) -> Result<(), String> {
-    let token = auth.access_token().await.map_err(|e| e.to_string())?;
-    let provider = GraphClient::new(token);
-    let bytes = download_attachment(&provider, &message_id, &attachment_id)
+    let (_account, provider) = active_provider(&accounts).await?;
+    let bytes = download_attachment(&*provider, &message_id, &attachment_id)
         .await
         .map_err(|e| e.to_string())?;
     std::fs::write(&dest_path, bytes).map_err(|e| e.to_string())
@@ -691,9 +710,10 @@ pub struct NewMailBatch {
 
 /// List the user's inbox message rules.
 #[tauri::command]
-pub async fn list_message_rules(auth: State<'_, AuthService>) -> Result<Vec<MessageRule>, String> {
-    let token = auth.access_token().await.map_err(|e| e.to_string())?;
-    let provider = GraphClient::new(token);
+pub async fn list_message_rules(
+    accounts: State<'_, AccountManager>,
+) -> Result<Vec<MessageRule>, String> {
+    let (_account, provider) = active_provider(&accounts).await?;
     provider
         .list_message_rules()
         .await
@@ -703,11 +723,10 @@ pub async fn list_message_rules(auth: State<'_, AuthService>) -> Result<Vec<Mess
 /// Create a new inbox message rule. Returns the created rule with its assigned id.
 #[tauri::command]
 pub async fn create_message_rule(
-    auth: State<'_, AuthService>,
+    accounts: State<'_, AccountManager>,
     rule: MessageRule,
 ) -> Result<MessageRule, String> {
-    let token = auth.access_token().await.map_err(|e| e.to_string())?;
-    let provider = GraphClient::new(token);
+    let (_account, provider) = active_provider(&accounts).await?;
     provider
         .create_message_rule(&rule)
         .await
@@ -717,12 +736,11 @@ pub async fn create_message_rule(
 /// Update an existing inbox message rule (enable/disable, edit conditions…).
 #[tauri::command]
 pub async fn update_message_rule(
-    auth: State<'_, AuthService>,
+    accounts: State<'_, AccountManager>,
     id: String,
     rule: MessageRule,
 ) -> Result<(), String> {
-    let token = auth.access_token().await.map_err(|e| e.to_string())?;
-    let provider = GraphClient::new(token);
+    let (_account, provider) = active_provider(&accounts).await?;
     provider
         .update_message_rule(&id, &rule)
         .await
@@ -731,9 +749,11 @@ pub async fn update_message_rule(
 
 /// Delete an inbox message rule.
 #[tauri::command]
-pub async fn delete_message_rule(auth: State<'_, AuthService>, id: String) -> Result<(), String> {
-    let token = auth.access_token().await.map_err(|e| e.to_string())?;
-    let provider = GraphClient::new(token);
+pub async fn delete_message_rule(
+    accounts: State<'_, AccountManager>,
+    id: String,
+) -> Result<(), String> {
+    let (_account, provider) = active_provider(&accounts).await?;
     provider
         .delete_message_rule(&id)
         .await

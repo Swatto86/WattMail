@@ -15,7 +15,9 @@ const TENANT_ID: &str = "652459b1-612f-4586-b424-a0069d51cc32";
 async fn main() -> anyhow::Result<()> {
     let config = OAuthConfig::office365(TENANT_ID, CLIENT_ID);
 
-    let auth = AuthService::new(config).context("initialising auth service")?;
+    // The spike shares the legacy single-account credential namespace.
+    let auth =
+        AuthService::new(config, "office365:refresh-token").context("initialising auth service")?;
     let access_token = auth
         .access_token()
         .await

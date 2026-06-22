@@ -3,6 +3,7 @@
 //! Wires the infrastructure (`AuthService`, Graph) into Tauri commands and owns
 //! the window, tray, and settings. No domain logic lives here.
 
+mod accounts;
 mod commands;
 mod paths;
 mod settings;
@@ -14,12 +15,8 @@ use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{AppHandle, Emitter, Manager, WindowEvent};
 
+use accounts::AccountManager;
 use settings::SettingsState;
-use wattmail_infrastructure::{AuthService, OAuthConfig, SqliteStore};
-
-// Public client identifiers — NOT secrets. Safe to ship in the binary.
-const CLIENT_ID: &str = "60d6101b-3d8a-4a09-8718-ad90c0d88f13";
-const TENANT_ID: &str = "652459b1-612f-4586-b424-a0069d51cc32";
 
 /// CLI flag the autostart entry passes so a login-launched instance stays in the
 /// tray instead of showing its window. Manual launches omit it and show normally.
@@ -42,9 +39,7 @@ pub(crate) struct NotificationState {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    let auth = AuthService::new(OAuthConfig::office365(TENANT_ID, CLIENT_ID))
-        .expect("initialise auth service");
-    let store = SqliteStore::open(cache_db_path()).expect("open mail cache");
+    let accounts = AccountManager::load();
     let loaded = settings::load();
     let start_hidden = std::env::args().any(|arg| arg == HIDDEN_FLAG);
 
@@ -65,8 +60,7 @@ pub fn run() {
             Some(vec![HIDDEN_FLAG]),
         ))
         .plugin(tauri_plugin_notification::init())
-        .manage(auth)
-        .manage(store)
+        .manage(accounts)
         .manage(SettingsState(RwLock::new(loaded)))
         .manage(StartHidden(start_hidden))
         .manage(NotificationState::default())
@@ -101,8 +95,10 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             commands::is_signed_in,
-            commands::sign_in,
-            commands::sign_out,
+            commands::list_accounts,
+            commands::add_account,
+            commands::switch_account,
+            commands::remove_account,
             commands::list_folders,
             commands::folder_from_cache,
             commands::sync_folder,
@@ -177,13 +173,6 @@ fn build_tray(app: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// Path to the local message cache, in WattMail's per-user data dir
-/// (`%LOCALAPPDATA%\WattMail` / `~/Library/Application Support/WattMail` /
-/// `~/.local/share/WattMail`). `SqliteStore::open` creates the parent on demand.
-fn cache_db_path() -> std::path::PathBuf {
-    paths::data_dir().join("cache.db")
-}
-
 /// Last reported inbox unread count; `-1` until the first report. Used to play a
 /// sound only when the count *increases* (new mail), not on every sync.
 static LAST_UNREAD: AtomicI64 = AtomicI64::new(-1);
@@ -238,10 +227,10 @@ pub(crate) fn update_tray(app: &AppHandle, unread: u32) {
     }
 }
 
-/// Read the cached account email from the SQLite store (synchronous, best-effort).
+/// Read the active account's cached email (synchronous, best-effort) for the
+/// tray tooltip.
 fn cached_account_email(app: &AppHandle) -> Option<String> {
-    let store = app.state::<SqliteStore>();
-    store.cached_account_email()
+    app.state::<AccountManager>().active_cached_email()
 }
 
 /// Bring the main window to the foreground.

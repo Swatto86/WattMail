@@ -14,7 +14,6 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
 const KEYRING_SERVICE: &str = "WattMail";
-const ACCOUNT_PREFIX: &str = "office365:refresh-token";
 /// Conservative chunk size: 1024 chars stays under the 2560 limit whether it is
 /// measured in chars or UTF-16 bytes.
 const CHUNK_CHARS: usize = 1024;
@@ -47,20 +46,31 @@ impl TokenSet {
     }
 }
 
-/// Keyring-backed, chunked persistence for the refresh token.
-pub struct TokenStore;
+/// Keyring-backed, chunked persistence for one account's refresh token.
+///
+/// Entries are namespaced by `prefix`: the metadata entry is `prefix` and the
+/// chunks are `prefix:0`, `prefix:1`, … so multiple accounts can coexist in the
+/// same keyring service without colliding. The legacy single-account install
+/// used the prefix `office365:refresh-token`; reusing that prefix for the
+/// adopted "default" account keeps its credentials in place with no migration.
+pub struct TokenStore {
+    prefix: String,
+}
 
 impl TokenStore {
-    pub fn new() -> Result<Self, keyring::Error> {
-        Ok(Self)
+    /// Create a store whose keyring entries are namespaced under `prefix`.
+    pub fn new(prefix: impl Into<String>) -> Result<Self, keyring::Error> {
+        Ok(Self {
+            prefix: prefix.into(),
+        })
     }
 
     /// Reassemble the refresh token from its chunks, or `None` if absent.
     pub fn load_refresh_token(&self) -> Option<String> {
-        let count: usize = meta_entry().ok()?.get_password().ok()?.parse().ok()?;
+        let count: usize = self.meta_entry().ok()?.get_password().ok()?.parse().ok()?;
         let mut token = String::new();
         for i in 0..count {
-            token.push_str(&chunk_entry(i).ok()?.get_password().ok()?);
+            token.push_str(&self.chunk_entry(i).ok()?.get_password().ok()?);
         }
         Some(token)
     }
@@ -70,32 +80,32 @@ impl TokenStore {
         self.clear()?;
         let chunks = chunk_string(token, CHUNK_CHARS);
         for (i, chunk) in chunks.iter().enumerate() {
-            chunk_entry(i)?.set_password(chunk)?;
+            self.chunk_entry(i)?.set_password(chunk)?;
         }
-        meta_entry()?.set_password(&chunks.len().to_string())
+        self.meta_entry()?.set_password(&chunks.len().to_string())
     }
 
     /// Delete the metadata entry and every chunk.
     pub fn clear(&self) -> Result<(), keyring::Error> {
-        let meta = meta_entry()?;
+        let meta = self.meta_entry()?;
         if let Ok(count) = meta
             .get_password()
             .and_then(|raw| raw.parse::<usize>().map_err(|_| keyring::Error::NoEntry))
         {
             for i in 0..count {
-                delete_ignoring_missing(&chunk_entry(i)?)?;
+                delete_ignoring_missing(&self.chunk_entry(i)?)?;
             }
         }
         delete_ignoring_missing(&meta)
     }
-}
 
-fn meta_entry() -> Result<keyring::Entry, keyring::Error> {
-    keyring::Entry::new(KEYRING_SERVICE, ACCOUNT_PREFIX)
-}
+    fn meta_entry(&self) -> Result<keyring::Entry, keyring::Error> {
+        keyring::Entry::new(KEYRING_SERVICE, &self.prefix)
+    }
 
-fn chunk_entry(index: usize) -> Result<keyring::Entry, keyring::Error> {
-    keyring::Entry::new(KEYRING_SERVICE, &format!("{ACCOUNT_PREFIX}:{index}"))
+    fn chunk_entry(&self, index: usize) -> Result<keyring::Entry, keyring::Error> {
+        keyring::Entry::new(KEYRING_SERVICE, &format!("{}:{index}", self.prefix))
+    }
 }
 
 fn delete_ignoring_missing(entry: &keyring::Entry) -> Result<(), keyring::Error> {

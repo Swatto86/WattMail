@@ -1,0 +1,72 @@
+//! Provider selection: which mail backend (and credential/cache namespace) an
+//! account uses. The OAuth *configuration* per provider lives on
+//! [`crate::OAuthConfig`]; this module maps a [`ProviderKind`] to a concrete
+//! [`MailProvider`] backend at runtime.
+
+use serde::{Deserialize, Serialize};
+use wattmail_domain::MailProvider;
+
+use crate::gmail::GmailClient;
+use crate::graph::GraphClient;
+
+/// The identity provider / mail backend an account is signed in with.
+///
+/// Serialized in `accounts.json`; new variants must keep existing tags stable.
+/// `Office365` is the default so a pre-provider account record (no `provider`
+/// field) deserializes to the original Microsoft work/school backend.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProviderKind {
+    /// Office 365 work/school mailbox over Microsoft Graph (single tenant).
+    #[default]
+    Office365,
+    /// Consumer Outlook.com / Hotmail / Live mailbox over Microsoft Graph.
+    OutlookConsumer,
+    /// Gmail over the Gmail REST API.
+    Gmail,
+}
+
+impl ProviderKind {
+    /// Parse the frontend's provider tag (matches the serde `snake_case` names).
+    pub fn from_tag(tag: &str) -> Option<Self> {
+        match tag {
+            "office365" => Some(Self::Office365),
+            "outlook_consumer" => Some(Self::OutlookConsumer),
+            "gmail" => Some(Self::Gmail),
+            _ => None,
+        }
+    }
+
+    /// Stable short slug for keyring / cache-file namespacing. Must never change
+    /// for an existing provider or accounts would lose their credentials/cache.
+    pub fn slug(&self) -> &'static str {
+        match self {
+            Self::Office365 => "office365",
+            Self::OutlookConsumer => "outlook",
+            Self::Gmail => "gmail",
+        }
+    }
+
+    /// Human-readable provider name for the UI / logs.
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::Office365 => "Office 365",
+            Self::OutlookConsumer => "Outlook.com",
+            Self::Gmail => "Gmail",
+        }
+    }
+}
+
+/// Build the mail backend for `kind`, authenticated with `access_token`.
+///
+/// Office 365 and consumer Outlook share the Microsoft Graph backend (the
+/// `/me/*` surface is identical for work/school and personal accounts); Gmail
+/// uses the Gmail REST backend.
+pub fn build_mail_provider(kind: ProviderKind, access_token: String) -> Box<dyn MailProvider> {
+    match kind {
+        ProviderKind::Office365 | ProviderKind::OutlookConsumer => {
+            Box::new(GraphClient::new(access_token))
+        }
+        ProviderKind::Gmail => Box::new(GmailClient::new(access_token)),
+    }
+}

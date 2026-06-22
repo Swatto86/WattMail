@@ -13,6 +13,11 @@ encrypted at rest.
 ## Features
 
 - **Office 365 over Microsoft Graph** with OAuth 2.0 (public client + PKCE, no secret).
+- **Multiple accounts & providers** — add and switch between several mailboxes from the
+  toolbar, choosing a provider per account: **Office 365**, **Outlook.com / Hotmail**
+  (consumer), and **Gmail** (Gmail API). Each account keeps its own keychain-isolated
+  credentials and encrypted cache, so mail and tokens never cross between accounts.
+  (Yahoo/IMAP is planned — see [`CONTEXT.md`](CONTEXT.md).)
 - **Folder navigation** (nested folders, unread counts) with per-folder delta sync;
   the folder sidebar is cached, so it still renders on a cold offline start.
 - **Local SQLite cache** — instant, offline-capable; auto-syncs every 60s.

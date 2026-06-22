@@ -73,6 +73,10 @@ impl std::fmt::Display for EmailAddress {
 /// The signed-in user's profile.
 #[derive(Debug, Clone)]
 pub struct UserProfile {
+    /// Stable, opaque account identifier (the Entra object id / `oid`). Used to
+    /// key per-account credential storage and local caches; never changes even
+    /// if the user's email or display name does.
+    pub id: String,
     pub display_name: String,
     pub email: EmailAddress,
 }
@@ -185,6 +189,8 @@ pub enum MailError {
     Decode(String),
     #[error("local store error: {0}")]
     Storage(String),
+    #[error("operation not supported by this provider")]
+    Unsupported,
 }
 
 /// A mail folder (Inbox, Sent Items, a custom folder, …).
@@ -269,6 +275,38 @@ pub trait MailProvider: Send + Sync {
         message_id: &str,
         attachment_id: &str,
     ) -> Result<Vec<u8>, MailError>;
+
+    // ---- Server-side inbox rules (optional per provider) ----
+    //
+    // Only Exchange/Graph backends support server-side message rules. Providers
+    // without them (Gmail, IMAP, …) inherit these defaults: an empty list on
+    // read, and `Unsupported` on mutation, so the UI can degrade gracefully.
+
+    /// List the user's server-side inbox rules.
+    async fn list_message_rules(&self) -> Result<Vec<MessageRule>, MailError> {
+        Ok(Vec::new())
+    }
+
+    /// Create a server-side inbox rule, returning it with its assigned id.
+    async fn create_message_rule(&self, _rule: &MessageRule) -> Result<MessageRule, MailError> {
+        Err(MailError::Unsupported)
+    }
+
+    /// Update an existing server-side inbox rule in place.
+    async fn update_message_rule(&self, _id: &str, _rule: &MessageRule) -> Result<(), MailError> {
+        Err(MailError::Unsupported)
+    }
+
+    /// Delete a server-side inbox rule.
+    async fn delete_message_rule(&self, _id: &str) -> Result<(), MailError> {
+        Err(MailError::Unsupported)
+    }
+
+    /// Whether this provider supports server-side inbox rules (Exchange/Graph).
+    /// Lets the presentation layer hide rule UI for providers that don't.
+    fn supports_message_rules(&self) -> bool {
+        false
+    }
 }
 
 /// An opaque, provider-defined cursor for incremental sync (a Graph deltaLink,

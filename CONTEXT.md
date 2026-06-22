@@ -5,7 +5,7 @@
 > new milestone state, a decision made/reversed, or an open question resolved.
 > Keep newest progress entries at the top of the log.
 >
-> **Last updated:** 2026-06-19
+> **Last updated:** 2026-06-20
 
 ---
 
@@ -77,6 +77,112 @@ Entra app registration (public, not secret):
 ---
 
 ## Progress log
+
+### 2026-06-20 — Multiple providers: Outlook.com + Gmail (v0.1.17)
+Generalized the single-provider (Office 365) stack into a pluggable
+provider abstraction and added two backends, building on the `AccountManager`.
+
+- **Provider abstraction.** New `ProviderKind` (infra) = `Office365` /
+  `OutlookConsumer` / `Gmail` (serde `snake_case`, default `Office365` so legacy
+  records load unchanged). `build_mail_provider(kind, token) -> Box<dyn MailProvider>`
+  is the runtime factory. `OAuthConfig` is now provider-neutral (explicit
+  authorize/token endpoints, optional `client_secret`, `extra_authorize_params`)
+  with `office365` / `outlook_consumer` / `google` constructors; `AuthService`
+  drives the same PKCE loopback flow for all, appending the client secret at the
+  token endpoint only when present (Google installed-app), and the extra authorize
+  params (Google `access_type=offline` + `prompt=consent`).
+- **Server-side rules moved onto the trait.** The four Graph `messageRule`
+  methods + `supports_message_rules()` are now `MailProvider` methods with
+  defaults (empty list / `MailError::Unsupported` / `false`); only `GraphClient`
+  overrides them (returns `true`). Non-Exchange providers degrade cleanly and the
+  UI hides the Rules row for them.
+- **Outlook.com / Hotmail (consumer).** Reuses `GraphClient` verbatim — `/me/*`
+  is identical for personal MSAs — with a `consumers`-tenant OAuth config and
+  reduced scopes (no `MailboxSettings.ReadWrite`; personal accounts have no rules).
+- **Gmail (`crates/infrastructure/src/gmail/mod.rs`, ~1200 lines).** New
+  `GmailClient: MailProvider` over the Gmail REST API: labels↔folders, base64url
+  MIME bodies (reuses `crate::html::sanitize_email`), History-API incremental
+  sync with full-list fallback, label-mutation read/flag/move, trash-as-delete,
+  hand-built RFC 5322 MIME for send/draft. **No new crates** (reqwest/serde/
+  base64/url only — deliberately hand-rolls date math + MIME to avoid chrono /
+  mail-builder and a `Cargo.lock` change).
+- **Account model.** `AccountRecord` gained `provider`; keyring/cache namespaces
+  are `"{slug}:{id}:refresh-token"` / `cache-{slug}-{id}.db` (the adopted legacy
+  Office 365 mailbox still uses `office365:refresh-token` + `cache.db`).
+  `add_account(provider)` runs that provider's OAuth + identity discovery via the
+  factory. Same-mailbox re-sign-in is still a silent in-place refresh (matched by
+  id or case-insensitive email) — confirmed, no dialog. `AccountSummary` carries
+  `provider`/`provider_label`/`supports_rules`. Commands resolve a
+  `Box<dyn MailProvider>` per active account.
+- **Frontend.** "Add account" (welcome / toolbar / settings) opens a provider
+  picker (Office 365 / Outlook.com / Gmail) before launching OAuth; account rows
+  and the switcher show a provider chip; the Rules row is hidden unless the active
+  account supports rules.
+- **OAuth app registrations required (placeholders shipped).** `accounts.rs`
+  holds the public client ids: Office 365 works as-is; **Outlook.com needs an
+  Entra app that allows personal accounts**, and **Gmail needs a Google Cloud
+  "Desktop app" client id + secret** — both are `REPLACE_WITH_…` placeholders and
+  must be filled before those providers work in a release.
+- **Yahoo — deliberately staged (next pass).** Yahoo means IMAP + SMTP (XOAUTH2),
+  a distinct transport with the largest surface, and it requires new crates
+  (`imap`, `lettre`, `mail-parser`) → a `Cargo.lock` update that can't be
+  generated without a Rust toolchain in this environment, plus Yahoo OAuth-for-IMAP
+  app approval. `ProviderKind` leaves the seam so it's purely additive.
+- **Verification.** Frontend `tsc --noEmit` is clean (0 errors). Rust reviewed by
+  subagent against the trait/signatures (no compiler here) — no blocking issues
+  after restoring a tail-truncation in `commands.rs` (see note below). **Run
+  `cargo fmt && cargo clippy --all-targets -- -D warnings` before release.**
+- **⚠️ Environment note.** Mid-session the editor/sync layer truncated several
+  source files' tails (and corrupted `.git/index`). All were restored from the
+  real on-disk files; if anything looks off after pulling, re-check `commands.rs`,
+  `src/main.ts`, and `crates/infrastructure/src/lib.rs`, and rebuild the git index
+  (`del .git\index.lock & del .git\index & git reset`).
+
+### 2026-06-20 — Multiple accounts / mailboxes (v0.1.16)
+WattMail was single-account: one `AuthService` and one `SqliteStore` were created
+in the composition root and `.manage()`d directly, and every Tauri command pulled
+`State<AuthService>` / `State<SqliteStore>`. You can now add and switch between
+several Office 365 mailboxes, each fully isolated.
+
+- **`AccountManager` (new `src-tauri/src/accounts.rs`) is the composition root.**
+  It owns a `Vec<Arc<ManagedAccount>>` (each = `AuthService` + `SqliteStore` +
+  durable `AccountRecord`) plus an `active_id`, behind a single `RwLock`. The list
+  and active selection persist to `accounts.json` (atomic temp-file + rename, like
+  `settings.json`). Commands now take `State<AccountManager>` and resolve the active
+  account via a shared `active_provider()` helper. Guards are never held across an
+  `.await` — `add_account` does its network work (login, `/me`) with no lock held,
+  then takes a brief write lock to register.
+- **Per-account credential + cache isolation.** `TokenStore` is now namespaced by a
+  keyring `prefix` (meta = `prefix`, chunks = `prefix:i`), and `AuthService::new`
+  takes that prefix. New accounts use `office365:<oid>:refresh-token` + a
+  `cache-<oid>.db` file; the shared AES-256-GCM cache key (`cache-key`) is unchanged,
+  so all per-account DBs stay readable.
+- **Account identity.** `UserProfile`/`GraphUser` gained the Entra object id
+  (`oid`), selected from `/me`. `add_account` runs an interactive login on a
+  throwaway service, reads `/me` to learn the stable id + email, then persists the
+  tokens under that account's own namespace. Re-signing into an existing mailbox
+  (matched by id **or** case-insensitive email) refreshes it in place instead of
+  duplicating it.
+- **Legacy adoption — zero migration.** A pre-multi-account install is adopted on
+  first launch under id `default`, reusing the original keyring entry
+  (`office365:refresh-token`) and `cache.db` verbatim, so the existing mailbox keeps
+  working with no re-sign-in. Identity is backfilled from the legacy cache.
+- **Frontend.** Toolbar account label is now a switcher dropdown (list accounts,
+  switch, "Add account…", caret only when >1). Settings replaces the single
+  "Sign out" with an accounts manager (per-account Switch / Remove + Add account).
+  Switching resets all per-account view state (folders, cursor, search, reader)
+  before loading the new mailbox. Commands `sign_in`/`sign_out` were replaced by
+  `list_accounts` / `add_account` / `switch_account` / `remove_account`;
+  `is_signed_in` now means "≥1 account".
+- **Follow-up (out of scope here):** shared/delegated mailboxes (same credentials,
+  Graph `/users/{id}` base + `Mail.Read.Shared`) — the `/me`-relative `GraphClient`
+  and the `AccountRecord` model leave room for this as a later, additive change.
+- **Verification.** Frontend `tsc --noEmit` shows no new errors vs. the committed
+  baseline (the 14 reported are pre-existing, environment-only "unused import"
+  noise from Tauri-API type resolution in the sandbox). The Rust workspace was not
+  compiled locally (no toolchain in this environment); changes were reviewed against
+  the application/domain signatures and rely on CI's `cargo fmt` + `clippy -D warnings`
+  compile-gate. **Run `cargo clippy --all-targets -- -D warnings` before release.**
 
 ### 2026-06-19 — Adaptive dark-mode email-body rendering (v0.1.15)
 Email bodies used to render on a **forced white background regardless of theme**

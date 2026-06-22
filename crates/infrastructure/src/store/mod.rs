@@ -109,13 +109,22 @@ impl SqliteStore {
     /// Synchronously read the cached account email (best-effort, for the tray
     /// tooltip). Returns `None` if the store isn't populated yet.
     pub fn cached_account_email(&self) -> Option<String> {
+        self.cached_state_sync("account.email")
+    }
+
+    /// Synchronously read the cached account display name (best-effort, for the
+    /// account switcher). Returns `None` if the store isn't populated yet.
+    pub fn cached_account_name(&self) -> Option<String> {
+        self.cached_state_sync("account.displayName")
+    }
+
+    /// Synchronously read and decrypt one `sync_state` value (best-effort).
+    fn cached_state_sync(&self, key: &str) -> Option<String> {
         let guard = self.conn.lock().expect("sqlite mutex poisoned");
         let encrypted: Option<String> = guard
-            .query_row(
-                "SELECT value FROM sync_state WHERE key = 'account.email'",
-                [],
-                |r| r.get::<_, String>(0),
-            )
+            .query_row("SELECT value FROM sync_state WHERE key = ?1", [key], |r| {
+                r.get::<_, String>(0)
+            })
             .optional()
             .ok()?;
         encrypted.and_then(|v| self.cipher.try_decrypt(&v))

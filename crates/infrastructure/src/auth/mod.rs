@@ -14,45 +14,88 @@ pub use token_store::{TokenSet, TokenStore};
 use pkce::{random_token, Pkce};
 use std::sync::Mutex;
 
-/// Static OAuth configuration for an Office 365 / Microsoft Entra tenant.
+/// Static OAuth configuration for one identity provider. Provider-neutral: the
+/// endpoints, scopes, and any extra authorize parameters are explicit, so the
+/// same PKCE loopback flow drives Microsoft, Google, and others.
 #[derive(Debug, Clone)]
 pub struct OAuthConfig {
-    pub tenant_id: String,
     pub client_id: String,
+    /// Installed-app client secret. `None` for true public clients (Microsoft);
+    /// `Some` for providers that still require it at the token endpoint (Google
+    /// "Desktop app" clients — the secret is not confidential for installed apps).
+    pub client_secret: Option<String>,
+    pub authorize_endpoint: String,
+    pub token_endpoint: String,
     pub scopes: Vec<String>,
+    /// Extra query parameters appended to the authorize URL (e.g. Google's
+    /// `access_type=offline` + `prompt=consent` to reliably get a refresh token).
+    pub extra_authorize_params: Vec<(String, String)>,
 }
 
 impl OAuthConfig {
-    /// Configuration for an Office 365 mailbox with read/write + send scopes.
-    pub fn office365(tenant_id: impl Into<String>, client_id: impl Into<String>) -> Self {
-        Self {
-            tenant_id: tenant_id.into(),
-            client_id: client_id.into(),
-            scopes: [
+    /// Office 365 / Microsoft Entra work-or-school mailbox (single tenant).
+    pub fn office365(tenant_id: impl AsRef<str>, client_id: impl Into<String>) -> Self {
+        Self::microsoft(
+            tenant_id.as_ref(),
+            client_id,
+            &[
                 "offline_access",
                 "User.Read",
                 "Mail.ReadWrite",
                 "Mail.Send",
                 "MailboxSettings.ReadWrite",
+            ],
+        )
+    }
+
+    /// Consumer Outlook.com / Hotmail / Live mailbox (personal Microsoft account).
+    /// Uses the `consumers` tenant and drops Exchange-only mailbox-settings scope
+    /// (personal accounts have no server-side message rules).
+    pub fn outlook_consumer(client_id: impl Into<String>) -> Self {
+        Self::microsoft(
+            "consumers",
+            client_id,
+            &["offline_access", "User.Read", "Mail.ReadWrite", "Mail.Send"],
+        )
+    }
+
+    /// Gmail via Google OAuth + the Gmail API (`gmail.modify` for read/write,
+    /// `userinfo.email` for identity). Installed-app flow: PKCE + client secret,
+    /// `access_type=offline` & `prompt=consent` for a durable refresh token.
+    pub fn google(client_id: impl Into<String>, client_secret: impl Into<String>) -> Self {
+        Self {
+            client_id: client_id.into(),
+            client_secret: Some(client_secret.into()),
+            authorize_endpoint: "https://accounts.google.com/o/oauth2/v2/auth".to_string(),
+            token_endpoint: "https://oauth2.googleapis.com/token".to_string(),
+            scopes: [
+                "https://www.googleapis.com/auth/gmail.modify",
+                "https://www.googleapis.com/auth/userinfo.email",
+                "openid",
             ]
             .iter()
             .map(|s| (*s).to_string())
             .collect(),
+            extra_authorize_params: vec![
+                ("access_type".to_string(), "offline".to_string()),
+                ("prompt".to_string(), "consent".to_string()),
+            ],
         }
     }
 
-    fn authorize_endpoint(&self) -> String {
-        format!(
-            "https://login.microsoftonline.com/{}/oauth2/v2.0/authorize",
-            self.tenant_id
-        )
-    }
-
-    fn token_endpoint(&self) -> String {
-        format!(
-            "https://login.microsoftonline.com/{}/oauth2/v2.0/token",
-            self.tenant_id
-        )
+    fn microsoft(tenant_id: &str, client_id: impl Into<String>, scopes: &[&str]) -> Self {
+        Self {
+            client_id: client_id.into(),
+            client_secret: None,
+            authorize_endpoint: format!(
+                "https://login.microsoftonline.com/{tenant_id}/oauth2/v2.0/authorize"
+            ),
+            token_endpoint: format!(
+                "https://login.microsoftonline.com/{tenant_id}/oauth2/v2.0/token"
+            ),
+            scopes: scopes.iter().map(|s| (*s).to_string()).collect(),
+            extra_authorize_params: Vec::new(),
+        }
     }
 
     fn scope_param(&self) -> String {
@@ -103,11 +146,13 @@ pub struct AuthService {
 }
 
 impl AuthService {
-    pub fn new(config: OAuthConfig) -> Result<Self, AuthError> {
+    /// Create an auth service whose refresh token is persisted under the keyring
+    /// namespace `keyring_prefix`, so multiple accounts never collide.
+    pub fn new(config: OAuthConfig, keyring_prefix: impl Into<String>) -> Result<Self, AuthError> {
         Ok(Self {
             config,
             http: reqwest::Client::new(),
-            store: TokenStore::new()?,
+            store: TokenStore::new(keyring_prefix)?,
             cache: Mutex::new(None),
         })
     }
@@ -160,6 +205,15 @@ impl AuthService {
         Ok(())
     }
 
+    /// Persist and cache an externally-obtained token set. Used by the
+    /// add-account flow, which runs [`interactive_login`](Self::interactive_login)
+    /// on a throwaway service to obtain tokens, discovers the account identity,
+    /// then hands the tokens to the real per-account service to store under its
+    /// own keyring namespace.
+    pub fn remember_tokens(&self, tokens: &TokenSet) -> Result<(), AuthError> {
+        self.remember(tokens)
+    }
+
     /// Whether a sign-in exists (in memory or persisted) — lets the UI choose its
     /// signed-in vs. signed-out state without a network call.
     pub fn has_cached_credentials(&self) -> bool {
@@ -208,16 +262,23 @@ impl AuthService {
     }
 
     fn build_authorize_url(&self, redirect_uri: &str, challenge: &str, state: &str) -> String {
-        let mut url = url::Url::parse(&self.config.authorize_endpoint()).expect("valid endpoint");
-        url.query_pairs_mut()
-            .append_pair("client_id", &self.config.client_id)
-            .append_pair("response_type", "code")
-            .append_pair("redirect_uri", redirect_uri)
-            .append_pair("response_mode", "query")
-            .append_pair("scope", &self.config.scope_param())
-            .append_pair("state", state)
-            .append_pair("code_challenge", challenge)
-            .append_pair("code_challenge_method", "S256");
+        let mut url =
+            url::Url::parse(&self.config.authorize_endpoint).expect("valid authorize endpoint");
+        {
+            let mut pairs = url.query_pairs_mut();
+            pairs
+                .append_pair("client_id", &self.config.client_id)
+                .append_pair("response_type", "code")
+                .append_pair("redirect_uri", redirect_uri)
+                .append_pair("response_mode", "query")
+                .append_pair("scope", &self.config.scope_param())
+                .append_pair("state", state)
+                .append_pair("code_challenge", challenge)
+                .append_pair("code_challenge_method", "S256");
+            for (key, value) in &self.config.extra_authorize_params {
+                pairs.append_pair(key, value);
+            }
+        }
         url.to_string()
     }
 
@@ -228,7 +289,7 @@ impl AuthService {
         verifier: &str,
     ) -> Result<TokenSet, AuthError> {
         let scope = self.config.scope_param();
-        let params = [
+        let params = vec![
             ("client_id", self.config.client_id.as_str()),
             ("grant_type", "authorization_code"),
             ("code", code),
@@ -236,25 +297,30 @@ impl AuthService {
             ("code_verifier", verifier),
             ("scope", scope.as_str()),
         ];
-        self.post_token(&params).await
+        self.post_token(params).await
     }
 
     async fn refresh(&self, refresh_token: &str) -> Result<TokenSet, AuthError> {
         let scope = self.config.scope_param();
-        let params = [
+        let params = vec![
             ("client_id", self.config.client_id.as_str()),
             ("grant_type", "refresh_token"),
             ("refresh_token", refresh_token),
             ("scope", scope.as_str()),
         ];
-        self.post_token(&params).await
+        self.post_token(params).await
     }
 
-    async fn post_token(&self, params: &[(&str, &str)]) -> Result<TokenSet, AuthError> {
+    async fn post_token(&self, mut params: Vec<(&str, &str)>) -> Result<TokenSet, AuthError> {
+        // Installed-app providers (Google) require the client secret at the token
+        // endpoint; public clients (Microsoft) omit it.
+        if let Some(secret) = self.config.client_secret.as_deref() {
+            params.push(("client_secret", secret));
+        }
         let response = self
             .http
-            .post(self.config.token_endpoint())
-            .form(params)
+            .post(&self.config.token_endpoint)
+            .form(&params)
             .send()
             .await
             .map_err(AuthError::Http)?;

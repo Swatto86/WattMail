@@ -19,6 +19,15 @@ interface Account {
   displayName: string;
   email: string;
 }
+interface AccountSummary {
+  id: string;
+  provider: string; // slug: office365 | outlook | gmail
+  providerLabel: string;
+  email: string;
+  displayName: string;
+  active: boolean;
+  supportsRules: boolean;
+}
 interface Message {
   id: string;
   subject: string;
@@ -224,7 +233,7 @@ appRoot.innerHTML = /* html */ `
         <span class="brand-name">WattMail</span>
         <span id="brand-version" class="brand-version"></span>
       </div>
-      <div id="account" class="text-xs opacity-70 truncate flex-1"></div>
+      <button id="account" class="account-switch text-xs opacity-70 flex-1 hidden" title="Switch account" type="button"></button>
       <div class="toolbar-search">
         <input id="search" class="input input-bordered input-xs" type="search" placeholder="Search mail…" autocomplete="off" />
         <button id="search-clear" class="search-clear hidden" type="button" title="Clear search">&times;</button>
@@ -280,16 +289,29 @@ appRoot.innerHTML = /* html */ `
         <span>Show notifications for new mail<br /><span class="hint">A desktop alert when unread messages arrive in the Inbox</span></span>
         <input type="checkbox" id="set-notifications" class="toggle toggle-sm toggle-primary" />
       </label>
-      <div class="settings-row">
+      <div class="settings-row" id="rules-row">
         <span>Inbox rules<br /><span class="hint">Server-side rules that move or mark messages on arrival</span></span>
         <button id="rules-btn" class="btn btn-sm">Rules&hellip;</button>
       </div>
-      <div class="settings-row">
-        <span>Account<br /><span class="hint" id="set-account">&mdash;</span></span>
-        <button id="signout-btn" class="btn btn-sm btn-error">Sign out</button>
+      <div class="settings-row settings-accounts">
+        <div class="settings-accounts-head">
+          <span>Accounts<br /><span class="hint">Switch, add, or remove mailboxes</span></span>
+          <button id="add-account-btn" class="btn btn-sm btn-primary">Add account</button>
+        </div>
+        <div id="accounts-list" class="accounts-list"></div>
       </div>
       <div id="settings-msg" class="settings-msg"></div>
       <div class="settings-actions"><button id="settings-close" class="btn btn-sm">Close</button></div>
+    </div>
+  </div>
+
+  <div id="provider-overlay" class="overlay hidden">
+    <div class="settings-panel provider-panel">
+      <div class="settings-title">Add an account</div>
+      <div class="hint" style="margin-bottom: 8px">Choose your email provider</div>
+      <div id="provider-list" class="provider-list"></div>
+      <div id="provider-msg" class="settings-msg"></div>
+      <div class="settings-actions"><button id="provider-cancel" class="btn btn-sm">Cancel</button></div>
     </div>
   </div>
 
@@ -396,7 +418,7 @@ appRoot.innerHTML = /* html */ `
   </div>
 `;
 
-const accountEl = document.querySelector<HTMLDivElement>("#account")!;
+const accountEl = document.querySelector<HTMLButtonElement>("#account")!;
 const brandVersion = document.querySelector<HTMLSpanElement>("#brand-version")!;
 const refreshBtn = document.querySelector<HTMLButtonElement>("#refresh")!;
 const gear = document.querySelector<HTMLButtonElement>("#gear")!;
@@ -420,8 +442,12 @@ const settingsOverlay = document.querySelector<HTMLDivElement>("#settings-overla
 const setTheme = document.querySelector<HTMLSelectElement>("#set-theme")!;
 const setTray = document.querySelector<HTMLInputElement>("#set-tray")!;
 const setAutostart = document.querySelector<HTMLInputElement>("#set-autostart")!;
-const setAccount = document.querySelector<HTMLSpanElement>("#set-account")!;
-const signoutBtn = document.querySelector<HTMLButtonElement>("#signout-btn")!;
+const addAccountBtn = document.querySelector<HTMLButtonElement>("#add-account-btn")!;
+const accountsListEl = document.querySelector<HTMLDivElement>("#accounts-list")!;
+const rulesRow = document.querySelector<HTMLDivElement>("#rules-row")!;
+const providerOverlay = document.querySelector<HTMLDivElement>("#provider-overlay")!;
+const providerListEl = document.querySelector<HTMLDivElement>("#provider-list")!;
+const providerCancelBtn = document.querySelector<HTMLButtonElement>("#provider-cancel")!;
 const settingsMsg = document.querySelector<HTMLDivElement>("#settings-msg")!;
 const settingsClose = document.querySelector<HTMLButtonElement>("#settings-close")!;
 const composeBtn = document.querySelector<HTMLButtonElement>("#compose")!;
@@ -479,6 +505,7 @@ let currentIds = new Set<string>();
 let currentFolderId: string | null = null;
 let folders: FolderInfo[] = [];
 let accountEmail = "";
+let accountList: AccountSummary[] = [];
 // Keyboard-navigation cursor: the id of the row the cursor is on, kept distinct
 // from `selectedId` (the opened/read message) so j/k can move without opening.
 // Reconciled against the rendered rows on every list re-render (see syncCursor).
@@ -489,8 +516,10 @@ function showSignedOut(): void {
   mainView.classList.add("hidden");
   refreshBtn.classList.add("hidden");
   composeBtn.classList.add("hidden");
+  accountEl.classList.add("hidden");
   accountEl.textContent = "";
   accountEmail = "";
+  accountList = [];
   currentFolderId = null;
   folders = [];
   foldersEl.innerHTML = "";
@@ -507,6 +536,7 @@ function showSignedIn(): void {
   mainView.classList.remove("hidden");
   refreshBtn.classList.remove("hidden");
   composeBtn.classList.remove("hidden");
+  accountEl.classList.remove("hidden");
 }
 
 function resetReader(): void {
@@ -542,10 +572,9 @@ function messageRowHtml(m: Message, showRecipient: boolean): string {
 function renderInbox(inbox: Inbox): void {
   if (inbox.account) {
     accountEmail = inbox.account.email;
-    accountEl.textContent = `${inbox.account.displayName} · ${inbox.account.email}`;
-    setAccount.textContent = inbox.account.email;
-  } else {
-    accountEl.textContent = "";
+    accountEl.textContent = inbox.account.displayName
+      ? `${inbox.account.displayName} · ${inbox.account.email}`
+      : inbox.account.email;
   }
   currentIds = new Set(inbox.messages.map((m) => m.id));
   currentTotal = inbox.total;
@@ -1935,37 +1964,233 @@ async function syncFolder(quiet = false): Promise<void> {
   }
 }
 
-async function signIn(): Promise<void> {
-  signinBtn.disabled = true;
-  signinMsg.textContent = "Opening your browser to sign in…";
+// ---- Accounts ----
+// Pull the account list from the backend and re-render the toolbar switcher and
+// the settings list. Cheap; called after any account change (add/switch/remove)
+// and on boot.
+async function refreshAccounts(): Promise<void> {
   try {
-    await invoke("sign_in");
-    signinMsg.textContent = "";
-    await loadFolders();
-    await refreshFromCache().catch(() => {});
-    await syncFolder();
-  } catch (e) {
-    signinMsg.textContent = `Sign-in failed: ${e}`;
-  } finally {
-    signinBtn.disabled = false;
+    accountList = await invoke<AccountSummary[]>("list_accounts");
+  } catch {
+    accountList = [];
+  }
+  renderAccountButton();
+  renderAccountsSettings();
+}
+
+function renderAccountButton(): void {
+  const active = accountList.find((a) => a.active);
+  if (active) {
+    const label =
+      active.displayName && active.email
+        ? `${active.displayName} · ${active.email}`
+        : active.email || active.displayName || "Account";
+    accountEl.textContent = label;
+    accountEl.classList.toggle("has-many", accountList.length > 1);
+    accountEl.title = accountList.length > 1 ? "Switch account" : label;
   }
 }
 
-async function signOut(): Promise<void> {
-  try {
-    await invoke("sign_out");
-  } catch (e) {
-    settingsMsg.textContent = `Sign-out failed: ${e}`;
+function renderAccountsSettings(): void {
+  // Hide the inbox-rules row unless the active account's provider supports them
+  // (Exchange work/school only).
+  const active = accountList.find((a) => a.active);
+  rulesRow.style.display = active && active.supportsRules ? "" : "none";
+
+  if (accountList.length === 0) {
+    accountsListEl.innerHTML = `<div class="accounts-empty">No accounts signed in.</div>`;
     return;
   }
-  closeSettings();
-  showSignedOut();
+  accountsListEl.innerHTML = accountList
+    .map(
+      (a) => `
+        <div class="account-row${a.active ? " account-row-active" : ""}">
+          <div class="account-row-info">
+            <div class="account-row-name">${esc(a.displayName || a.email || "Account")}${a.active ? ` <span class="account-badge">Active</span>` : ""}</div>
+            <div class="account-row-email">${esc(a.email)}<span class="provider-tag">${esc(a.providerLabel)}</span></div>
+          </div>
+          <div class="account-row-actions">
+            ${a.active ? "" : `<button class="btn btn-xs" data-switch="${esc(a.id)}">Switch</button>`}
+            <button class="btn btn-xs btn-error" data-remove="${esc(a.id)}">Remove</button>
+          </div>
+        </div>`,
+    )
+    .join("");
 }
+
+// Reset per-account view state and load the (now) active account's mailbox, so
+// one mailbox's folders, cursor, or search never bleed into another's.
+async function loadActiveAccount(): Promise<void> {
+  currentFolderId = null;
+  folders = [];
+  loadedCount = PAGE_SIZE;
+  searchActive = false;
+  searchSeq++;
+  searchInput.value = "";
+  setSearchClearVisible(false);
+  cursorId = null;
+  resetReader();
+  showSignedIn();
+  await loadFolders();
+  await refreshFromCache().catch(() => {});
+  await syncFolder();
+}
+
+// The providers a user can add. Tags match the backend's ProviderKind serde
+// names (see ProviderKind::from_tag).
+const PROVIDERS: { tag: string; label: string; hint: string }[] = [
+  { tag: "office365", label: "Office 365", hint: "Work or school (Microsoft)" },
+  { tag: "outlook_consumer", label: "Outlook.com / Hotmail", hint: "Personal Microsoft account" },
+  { tag: "gmail", label: "Gmail", hint: "Google account" },
+];
+
+let providerResolve: ((tag: string | null) => void) | null = null;
+
+// Show the provider chooser and resolve with the chosen tag (or null if cancelled).
+function pickProvider(): Promise<string | null> {
+  providerListEl.innerHTML = PROVIDERS.map(
+    (p) => `
+      <button class="provider-option" data-provider="${esc(p.tag)}">
+        <span class="provider-option-label">${esc(p.label)}</span>
+        <span class="provider-option-hint">${esc(p.hint)}</span>
+      </button>`,
+  ).join("");
+  providerOverlay.classList.remove("hidden");
+  return new Promise((resolve) => {
+    providerResolve = resolve;
+  });
+}
+function closeProvider(tag: string | null): void {
+  providerOverlay.classList.add("hidden");
+  const resolve = providerResolve;
+  providerResolve = null;
+  resolve?.(tag);
+}
+providerListEl.addEventListener("click", (e) => {
+  const btn = (e.target as HTMLElement).closest("button");
+  if (btn?.dataset.provider) closeProvider(btn.dataset.provider);
+});
+providerCancelBtn.addEventListener("click", () => closeProvider(null));
+providerOverlay.addEventListener("click", (e) => {
+  if (e.target === providerOverlay) closeProvider(null);
+});
+
+// Interactive add (browser sign-in). Used by the welcome screen, the toolbar
+// switcher, and the settings "Add account" button. Prompts for a provider, then
+// runs that provider's OAuth flow; on success the new account becomes active.
+async function addAccount(): Promise<void> {
+  const provider = await pickProvider();
+  if (!provider) return;
+  signinBtn.disabled = true;
+  addAccountBtn.disabled = true;
+  signinMsg.textContent = "Opening your browser to sign in…";
+  settingsMsg.textContent = "Opening your browser to sign in…";
+  try {
+    await invoke<AccountSummary>("add_account", { provider });
+    signinMsg.textContent = "";
+    settingsMsg.textContent = "";
+    await refreshAccounts();
+    await loadActiveAccount();
+  } catch (e) {
+    signinMsg.textContent = `Sign-in failed: ${e}`;
+    settingsMsg.textContent = `Add account failed: ${e}`;
+  } finally {
+    signinBtn.disabled = false;
+    addAccountBtn.disabled = false;
+  }
+}
+
+async function switchAccount(id: string): Promise<void> {
+  const active = accountList.find((a) => a.active);
+  if (active && active.id === id) return;
+  try {
+    await invoke("switch_account", { id });
+  } catch (e) {
+    statusEl.textContent = `Could not switch account: ${e}`;
+    return;
+  }
+  await refreshAccounts();
+  await loadActiveAccount();
+}
+
+async function removeAccount(id: string): Promise<void> {
+  try {
+    await invoke("remove_account", { id });
+  } catch (e) {
+    settingsMsg.textContent = `Could not remove account: ${e}`;
+    return;
+  }
+  await refreshAccounts();
+  if (accountList.length > 0) {
+    await loadActiveAccount();
+  } else {
+    closeSettings();
+    showSignedOut();
+  }
+}
+
+// ---- Toolbar account switcher dropdown ----
+const accountMenu = document.createElement("div");
+accountMenu.className = "ctx-menu account-menu hidden";
+accountMenu.setAttribute("role", "menu");
+document.body.appendChild(accountMenu);
+
+function hideAccountMenu(): void {
+  accountMenu.classList.add("hidden");
+}
+
+function showAccountMenu(): void {
+  const rows = accountList
+    .map(
+      (a) => `
+        <button class="ctx-item account-item${a.active ? " account-active" : ""}" data-acc="${esc(a.id)}" title="${esc(a.email)}">
+          <span class="account-item-name">${esc(a.displayName || a.email || "Account")}</span>
+          <span class="account-item-email">${esc(a.email)}<span class="provider-tag">${esc(a.providerLabel)}</span></span>
+        </button>`,
+    )
+    .join("");
+  accountMenu.innerHTML =
+    rows +
+    `<div class="ctx-sep"></div>` +
+    `<button class="ctx-item" data-acc-add="1">+ Add account…</button>`;
+  accountMenu.classList.remove("hidden");
+  // Position under the account button, clamped to the viewport.
+  const r = accountEl.getBoundingClientRect();
+  accountMenu.style.left = "0";
+  accountMenu.style.top = "0";
+  const left = Math.max(4, Math.min(r.left, window.innerWidth - accountMenu.offsetWidth - 4));
+  const top = Math.min(r.bottom + 4, window.innerHeight - accountMenu.offsetHeight - 4);
+  accountMenu.style.left = `${left}px`;
+  accountMenu.style.top = `${top}px`;
+}
+
+accountEl.addEventListener("click", (e) => {
+  e.stopPropagation();
+  if (accountMenu.classList.contains("hidden")) showAccountMenu();
+  else hideAccountMenu();
+});
+accountMenu.addEventListener("click", (e) => {
+  const btn = (e.target as HTMLElement).closest("button");
+  if (!btn) return;
+  hideAccountMenu();
+  if (btn.dataset.accAdd) void addAccount();
+  else if (btn.dataset.acc) void switchAccount(btn.dataset.acc);
+});
+document.addEventListener("click", (e) => {
+  if (!accountMenu.contains(e.target as Node) && e.target !== accountEl) hideAccountMenu();
+});
+document.addEventListener("keydown", (e) => {
+  if (e.key !== "Escape") return;
+  hideAccountMenu();
+  if (!providerOverlay.classList.contains("hidden")) closeProvider(null);
+});
+window.addEventListener("blur", hideAccountMenu);
 
 // ---- Settings ----
 function openSettings(): void {
   setTheme.value = loadThemePref();
   settingsMsg.textContent = "";
+  void refreshAccounts();
   invoke<boolean>("get_close_to_tray")
     .then((v) => (setTray.checked = v))
     .catch(() => {});
@@ -2717,9 +2942,15 @@ searchClearBtn.addEventListener("click", () => {
   searchInput.focus();
 });
 gear.addEventListener("click", openSettings);
-signinBtn.addEventListener("click", () => void signIn());
+signinBtn.addEventListener("click", () => void addAccount());
 settingsClose.addEventListener("click", closeSettings);
-signoutBtn.addEventListener("click", () => void signOut());
+addAccountBtn.addEventListener("click", () => void addAccount());
+accountsListEl.addEventListener("click", (e) => {
+  const btn = (e.target as HTMLElement).closest("button");
+  if (!btn) return;
+  if (btn.dataset.switch) void switchAccount(btn.dataset.switch);
+  else if (btn.dataset.remove) void removeAccount(btn.dataset.remove);
+});
 composeBtn.addEventListener("click", composeNew);
 composeCancel.addEventListener("click", closeCompose);
 composeSaveDraftBtn.addEventListener("click", () => void saveDraft());
@@ -3027,9 +3258,8 @@ async function boot(): Promise<void> {
   try {
     const signedIn = await invoke<boolean>("is_signed_in");
     if (signedIn) {
-      await loadFolders();
-      await refreshFromCache().catch(() => {}); // instant cached view (may be empty)
-      await syncFolder(); // then update from the server
+      await refreshAccounts();
+      await loadActiveAccount(); // cached view first, then sync from the server
     } else {
       showSignedOut();
     }

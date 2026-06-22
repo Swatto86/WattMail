@@ -75,83 +75,12 @@ impl GraphClient {
             .map_err(|e| MailError::Decode(e.to_string()))?;
         Ok(body.value)
     }
-
-    /// List the user's inbox message rules (server-side Graph `messageRule`s).
-    pub async fn list_message_rules(&self) -> Result<Vec<MessageRule>, MailError> {
-        let url = format!("{GRAPH_BASE}/me/mailFolders/inbox/messageRules");
-        let body: GraphMessageRules = self
-            .get(&url)
-            .await?
-            .json()
-            .await
-            .map_err(|e| MailError::Decode(e.to_string()))?;
-        Ok(body.value.into_iter().map(MessageRule::from).collect())
-    }
-
-    /// Create a new inbox message rule. Graph returns the created rule with its
-    /// assigned id; the caller's `id` field is ignored.
-    pub async fn create_message_rule(&self, rule: &MessageRule) -> Result<MessageRule, MailError> {
-        let url = format!("{GRAPH_BASE}/me/mailFolders/inbox/messageRules");
-        let payload = message_rule_json(rule);
-        let response = self
-            .http
-            .post(&url)
-            .bearer_auth(&self.access_token)
-            .json(&payload)
-            .send()
-            .await
-            .map_err(|e| MailError::Network(e.to_string()))?;
-        let created: GraphMessageRule = check_status(response)
-            .await?
-            .json()
-            .await
-            .map_err(|e| MailError::Decode(e.to_string()))?;
-        Ok(MessageRule::from(created))
-    }
-
-    /// Update an existing inbox message rule (enable/disable, edit conditions…).
-    pub async fn update_message_rule(&self, id: &str, rule: &MessageRule) -> Result<(), MailError> {
-        let mut url = url::Url::parse(&format!("{GRAPH_BASE}/me/mailFolders/inbox/messageRules"))
-            .expect("valid base");
-        url.path_segments_mut()
-            .expect("base URL is a proper path")
-            .push(id);
-        let payload = message_rule_json(rule);
-        let response = self
-            .http
-            .patch(url.as_str())
-            .bearer_auth(&self.access_token)
-            .json(&payload)
-            .send()
-            .await
-            .map_err(|e| MailError::Network(e.to_string()))?;
-        check_status(response).await?;
-        Ok(())
-    }
-
-    /// Delete an inbox message rule.
-    pub async fn delete_message_rule(&self, id: &str) -> Result<(), MailError> {
-        let mut url = url::Url::parse(&format!("{GRAPH_BASE}/me/mailFolders/inbox/messageRules"))
-            .expect("valid base");
-        url.path_segments_mut()
-            .expect("base URL is a proper path")
-            .push(id);
-        let response = self
-            .http
-            .delete(url.as_str())
-            .bearer_auth(&self.access_token)
-            .send()
-            .await
-            .map_err(|e| MailError::Network(e.to_string()))?;
-        check_status(response).await?;
-        Ok(())
-    }
 }
 
 #[async_trait]
 impl MailProvider for GraphClient {
     async fn current_user(&self) -> Result<UserProfile, MailError> {
-        let url = format!("{GRAPH_BASE}/me?$select=displayName,mail,userPrincipalName");
+        let url = format!("{GRAPH_BASE}/me?$select=id,displayName,mail,userPrincipalName");
         let body: GraphUser = self
             .get(&url)
             .await?
@@ -161,6 +90,7 @@ impl MailProvider for GraphClient {
 
         let email_raw = body.mail.or(body.user_principal_name).unwrap_or_default();
         Ok(UserProfile {
+            id: body.id.unwrap_or_default(),
             display_name: body.display_name.unwrap_or_else(|| "Unknown".to_string()),
             email: EmailAddress::parse(email_raw)?,
         })
@@ -614,11 +544,87 @@ impl MailProvider for GraphClient {
             .map_err(|e| MailError::Network(e.to_string()))?;
         Ok(bytes.to_vec())
     }
+
+    fn supports_message_rules(&self) -> bool {
+        true
+    }
+
+    /// List the user's inbox message rules (server-side Graph `messageRule`s).
+    async fn list_message_rules(&self) -> Result<Vec<MessageRule>, MailError> {
+        let url = format!("{GRAPH_BASE}/me/mailFolders/inbox/messageRules");
+        let body: GraphMessageRules = self
+            .get(&url)
+            .await?
+            .json()
+            .await
+            .map_err(|e| MailError::Decode(e.to_string()))?;
+        Ok(body.value.into_iter().map(MessageRule::from).collect())
+    }
+
+    /// Create a new inbox message rule. Graph returns the created rule with its
+    /// assigned id; the caller's `id` field is ignored.
+    async fn create_message_rule(&self, rule: &MessageRule) -> Result<MessageRule, MailError> {
+        let url = format!("{GRAPH_BASE}/me/mailFolders/inbox/messageRules");
+        let payload = message_rule_json(rule);
+        let response = self
+            .http
+            .post(&url)
+            .bearer_auth(&self.access_token)
+            .json(&payload)
+            .send()
+            .await
+            .map_err(|e| MailError::Network(e.to_string()))?;
+        let created: GraphMessageRule = check_status(response)
+            .await?
+            .json()
+            .await
+            .map_err(|e| MailError::Decode(e.to_string()))?;
+        Ok(MessageRule::from(created))
+    }
+
+    /// Update an existing inbox message rule (enable/disable, edit conditions…).
+    async fn update_message_rule(&self, id: &str, rule: &MessageRule) -> Result<(), MailError> {
+        let mut url = url::Url::parse(&format!("{GRAPH_BASE}/me/mailFolders/inbox/messageRules"))
+            .expect("valid base");
+        url.path_segments_mut()
+            .expect("base URL is a proper path")
+            .push(id);
+        let payload = message_rule_json(rule);
+        let response = self
+            .http
+            .patch(url.as_str())
+            .bearer_auth(&self.access_token)
+            .json(&payload)
+            .send()
+            .await
+            .map_err(|e| MailError::Network(e.to_string()))?;
+        check_status(response).await?;
+        Ok(())
+    }
+
+    /// Delete an inbox message rule.
+    async fn delete_message_rule(&self, id: &str) -> Result<(), MailError> {
+        let mut url = url::Url::parse(&format!("{GRAPH_BASE}/me/mailFolders/inbox/messageRules"))
+            .expect("valid base");
+        url.path_segments_mut()
+            .expect("base URL is a proper path")
+            .push(id);
+        let response = self
+            .http
+            .delete(url.as_str())
+            .bearer_auth(&self.access_token)
+            .send()
+            .await
+            .map_err(|e| MailError::Network(e.to_string()))?;
+        check_status(response).await?;
+        Ok(())
+    }
 }
 
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct GraphUser {
+    id: Option<String>,
     display_name: Option<String>,
     mail: Option<String>,
     user_principal_name: Option<String>,
