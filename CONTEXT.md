@@ -78,6 +78,30 @@ Entra app registration (public, not secret):
 
 ## Progress log
 
+### 2026-06-22 — Compile/verify + provider gating + release (v0.1.17)
+First build of the v0.1.16/v0.1.17 work on a machine with a Rust toolchain (the
+prior session had none), then cut the release.
+
+- **Fixed two clippy `-D warnings` blockers** the no-toolchain session couldn't
+  catch: an `unnecessary_cast` (`as i64` on an already-`i64`) in
+  `gmail/mod.rs::civil_from_days`, and an unused `wattmail_domain::MailProvider`
+  import in `accounts.rs`. Truncation/corruption from the prior session left no
+  damage — the whole workspace compiles, `clippy --all-targets -D warnings` is
+  clean, `cargo test --workspace` passes, `tsc`/`vite build` clean.
+- **Provider gating (the release decision).** Outlook.com + Gmail still ship with
+  `REPLACE_WITH_…` OAuth placeholders, so they can't sign in. Rather than ship a
+  picker with two dead options, the **picker now only offers configured
+  providers**: `ProviderKind::ALL`/`tag()` (infra), `is_real_credential` +
+  `configured_provider_tags()` (accounts.rs), a `configured_providers` Tauri
+  command, and a frontend filter in `pickProvider` (auto-selects when exactly one
+  provider is configured → Office 365 alone shows no chooser). `add_account` also
+  rejects an unconfigured provider defensively. Two unit tests lock it in. **When
+  the Outlook.com/Gmail credentials are filled, they reappear automatically** —
+  no further UI change needed.
+- **Released v0.1.17** (Office 365 only, functionally). v0.1.16 (multi-account)
+  ships under the same tag — it was never separately released (rolling-release =
+  latest only).
+
 ### 2026-06-20 — Multiple providers: Outlook.com + Gmail (v0.1.17)
 Generalized the single-provider (Office 365) stack into a pluggable
 provider abstraction and added two backends, building on the `AccountManager`.

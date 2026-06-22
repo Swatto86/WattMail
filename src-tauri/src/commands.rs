@@ -124,6 +124,14 @@ pub async fn add_account(
     accounts.add_account(kind).await
 }
 
+/// Provider tags (`office365` / `outlook_consumer` / `gmail`) whose OAuth
+/// credentials are configured in this build, so the picker offers only
+/// providers that can actually complete sign-in.
+#[tauri::command]
+pub fn configured_providers() -> Vec<String> {
+    crate::accounts::configured_provider_tags()
+}
+
 /// Switch the active account.
 #[tauri::command]
 pub fn switch_account(accounts: State<'_, AccountManager>, id: String) -> Result<(), String> {

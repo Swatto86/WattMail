@@ -60,6 +60,33 @@ fn oauth_config_for(provider: ProviderKind) -> OAuthConfig {
     }
 }
 
+/// Whether a provider's OAuth app credentials are real (not a `REPLACE_WITH_…`
+/// placeholder). An unconfigured provider can't complete sign-in, so it is
+/// hidden from the picker and rejected by `add_account`.
+fn is_provider_configured(provider: ProviderKind) -> bool {
+    match provider {
+        ProviderKind::Office365 => is_real_credential(O365_CLIENT_ID),
+        ProviderKind::OutlookConsumer => is_real_credential(OUTLOOK_CONSUMER_CLIENT_ID),
+        ProviderKind::Gmail => {
+            is_real_credential(GOOGLE_CLIENT_ID) && is_real_credential(GOOGLE_CLIENT_SECRET)
+        }
+    }
+}
+
+/// A credential is "real" when it is non-empty and not a `REPLACE_WITH_…` placeholder.
+fn is_real_credential(value: &str) -> bool {
+    !value.is_empty() && !value.starts_with("REPLACE_WITH")
+}
+
+/// Provider tags whose credentials are configured, for the add-account picker.
+pub fn configured_provider_tags() -> Vec<String> {
+    ProviderKind::ALL
+        .into_iter()
+        .filter(|&p| is_provider_configured(p))
+        .map(|p| p.tag().to_string())
+        .collect()
+}
+
 /// Whether a provider exposes server-side inbox rules (Exchange work/school only).
 fn provider_supports_rules(provider: ProviderKind) -> bool {
     matches!(provider, ProviderKind::Office365)
@@ -232,6 +259,12 @@ impl AccountManager {
     /// account that already exists refreshes its credentials in place instead of
     /// duplicating it.
     pub async fn add_account(&self, provider: ProviderKind) -> Result<AccountSummary, String> {
+        if !is_provider_configured(provider) {
+            return Err(format!(
+                "{} is not available in this build (no OAuth credentials configured).",
+                provider.label()
+            ));
+        }
         let config = oauth_config_for(provider);
 
         // 1. Interactive login (no store writes happen here).
@@ -500,4 +533,24 @@ fn now_unix() -> u64 {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn placeholder_credentials_are_not_real() {
+        assert!(!is_real_credential("REPLACE_WITH_GOOGLE_CLIENT_ID"));
+        assert!(!is_real_credential(""));
+        assert!(is_real_credential("60d6101b-3d8a-4a09-8718-ad90c0d88f13"));
+    }
+
+    #[test]
+    fn office365_is_always_offered() {
+        // The work/school client id ships configured, so it must always be in the
+        // picker; providers still on placeholder credentials are filtered out.
+        assert!(configured_provider_tags().contains(&"office365".to_string()));
+        assert!(is_provider_configured(ProviderKind::Office365));
+    }
 }

@@ -27,6 +27,9 @@ pub enum ProviderKind {
 }
 
 impl ProviderKind {
+    /// Every provider, for enumeration (e.g. building the add-account picker).
+    pub const ALL: [ProviderKind; 3] = [Self::Office365, Self::OutlookConsumer, Self::Gmail];
+
     /// Parse the frontend's provider tag (matches the serde `snake_case` names).
     pub fn from_tag(tag: &str) -> Option<Self> {
         match tag {
@@ -34,6 +37,15 @@ impl ProviderKind {
             "outlook_consumer" => Some(Self::OutlookConsumer),
             "gmail" => Some(Self::Gmail),
             _ => None,
+        }
+    }
+
+    /// The frontend provider tag (inverse of [`from_tag`](Self::from_tag)).
+    pub fn tag(&self) -> &'static str {
+        match self {
+            Self::Office365 => "office365",
+            Self::OutlookConsumer => "outlook_consumer",
+            Self::Gmail => "gmail",
         }
     }
 

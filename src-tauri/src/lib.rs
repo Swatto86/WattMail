@@ -97,6 +97,7 @@ pub fn run() {
             commands::is_signed_in,
             commands::list_accounts,
             commands::add_account,
+            commands::configured_providers,
             commands::switch_account,
             commands::remove_account,
             commands::list_folders,

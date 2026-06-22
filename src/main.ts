@@ -2047,14 +2047,27 @@ const PROVIDERS: { tag: string; label: string; hint: string }[] = [
 let providerResolve: ((tag: string | null) => void) | null = null;
 
 // Show the provider chooser and resolve with the chosen tag (or null if cancelled).
-function pickProvider(): Promise<string | null> {
-  providerListEl.innerHTML = PROVIDERS.map(
-    (p) => `
+// Only providers the backend reports as configured (real OAuth credentials, not
+// placeholders) are offered; if exactly one is available, it's auto-selected.
+async function pickProvider(): Promise<string | null> {
+  let providers = PROVIDERS;
+  try {
+    const configured = new Set(await invoke<string[]>("configured_providers"));
+    const filtered = PROVIDERS.filter((p) => configured.has(p.tag));
+    if (filtered.length) providers = filtered;
+  } catch {
+    // Backend unreachable: fall back to the full list rather than block sign-in.
+  }
+  if (providers.length === 1) return providers[0].tag;
+  providerListEl.innerHTML = providers
+    .map(
+      (p) => `
       <button class="provider-option" data-provider="${esc(p.tag)}">
         <span class="provider-option-label">${esc(p.label)}</span>
         <span class="provider-option-hint">${esc(p.hint)}</span>
       </button>`,
-  ).join("");
+    )
+    .join("");
   providerOverlay.classList.remove("hidden");
   return new Promise((resolve) => {
     providerResolve = resolve;
