@@ -113,6 +113,8 @@ body,
   padding: 8px 12px;
   border-bottom: 1px solid oklch(var(--bc) / 0.08);
   cursor: pointer;
+  /* Keep the keyboard cursor row clear of the sticky date-section header. */
+  scroll-margin-top: 28px;
 }
 .msg:hover {
   background: oklch(var(--bc) / 0.06);
@@ -197,6 +199,56 @@ body,
 .msg.unread .msg-subject {
   font-weight: 700;
 }
+
+/* Outlook-style date section header (sticky as the list scrolls). */
+.msg-section {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  padding: 6px 12px 4px;
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: oklch(var(--bc) / 0.55);
+  background: oklch(var(--b1));
+  border-bottom: 1px solid oklch(var(--b2));
+}
+
+/* Quick-filter segmented control in the toolbar. */
+.filter-seg {
+  display: inline-flex;
+  border: 1px solid oklch(var(--b3));
+  border-radius: 6px;
+  overflow: hidden;
+}
+.filter-seg button {
+  padding: 2px 8px;
+  font-size: 11px;
+  line-height: 1.6;
+  color: oklch(var(--bc) / 0.7);
+  background: oklch(var(--b1));
+  border: none;
+  border-left: 1px solid oklch(var(--b3));
+  cursor: pointer;
+}
+.filter-seg button:first-child {
+  border-left: none;
+}
+.filter-seg button:hover {
+  background: oklch(var(--b2));
+}
+.filter-seg button.active {
+  color: oklch(var(--pc));
+  background: oklch(var(--p));
+}
+/* Group-by-date toggle pressed state. */
+#group-toggle.active {
+  color: oklch(var(--pc));
+  background: oklch(var(--p));
+  border-color: oklch(var(--p));
+}
+
 .load-more {
   display: block;
   width: 100%;

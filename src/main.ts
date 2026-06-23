@@ -217,6 +217,80 @@ function sortMessages(messages: Message[]): Message[] {
   }
 }
 
+// ---- Quick filters (client-side, over the loaded window) ----
+type FilterMode = "all" | "unread" | "flagged";
+const FILTER_KEY = "wattmail.filter";
+function loadFilterMode(): FilterMode {
+  const v = localStorage.getItem(FILTER_KEY);
+  return v === "unread" || v === "flagged" ? v : "all";
+}
+let filterMode: FilterMode = loadFilterMode();
+
+function applyFilter(messages: Message[]): Message[] {
+  switch (filterMode) {
+    case "unread":
+      return messages.filter((m) => !m.isRead);
+    case "flagged":
+      return messages.filter((m) => m.isFlagged);
+    default:
+      return messages;
+  }
+}
+
+// ---- Date grouping (Outlook-style sections) ----
+const GROUP_KEY = "wattmail.group";
+// Grouping is on by default; only meaningful for date-ordered sorts.
+let groupByDate = localStorage.getItem(GROUP_KEY) !== "0";
+function groupingActive(): boolean {
+  return groupByDate && (sortMode === "dateDesc" || sortMode === "dateAsc");
+}
+
+// The Outlook-style section a message falls in, relative to now: Today,
+// Yesterday, This Week, Last Week, This Month, Last Month, then "Month YYYY".
+function dateSectionLabel(iso: string): string {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return "Unknown date";
+  const now = new Date();
+  const dayMs = 86_400_000;
+  const startOfDay = (x: Date): number =>
+    new Date(x.getFullYear(), x.getMonth(), x.getDate()).getTime();
+  const today = startOfDay(now);
+  const msgDay = startOfDay(d);
+  const diffDays = Math.round((today - msgDay) / dayMs);
+  if (diffDays <= 0) return "Today"; // today (future-dated mail lumps in here)
+  if (diffDays === 1) return "Yesterday";
+  // Week starts Monday (dow: 0 = Mon … 6 = Sun).
+  const dow = (now.getDay() + 6) % 7;
+  const startOfWeek = today - dow * dayMs;
+  if (msgDay >= startOfWeek) return "This Week";
+  if (msgDay >= startOfWeek - 7 * dayMs) return "Last Week";
+  if (d.getFullYear() === now.getFullYear() && d.getMonth() === now.getMonth()) return "This Month";
+  const lastMonth = new Date(now.getFullYear(), now.getMonth() - 1, 1);
+  if (d.getFullYear() === lastMonth.getFullYear() && d.getMonth() === lastMonth.getMonth()) {
+    return "Last Month";
+  }
+  return `${d.toLocaleString(undefined, { month: "long" })} ${d.getFullYear()}`;
+}
+
+// Build the list body: grouped into date sections when grouping is active,
+// otherwise a flat list of rows. `sorted` must already be in display order.
+function renderListBody(sorted: Message[], showRecipient: boolean): string {
+  if (!groupingActive()) {
+    return sorted.map((m) => messageRowHtml(m, showRecipient)).join("");
+  }
+  let html = "";
+  let section = "";
+  for (const m of sorted) {
+    const label = dateSectionLabel(m.received);
+    if (label !== section) {
+      section = label;
+      html += `<div class="msg-section">${esc(label)}</div>`;
+    }
+    html += messageRowHtml(m, showRecipient);
+  }
+  return html;
+}
+
 // ---- App shell ----
 const appRoot = document.querySelector<HTMLDivElement>("#app")!;
 appRoot.innerHTML = /* html */ `
@@ -238,6 +312,11 @@ appRoot.innerHTML = /* html */ `
         <input id="search" class="input input-bordered input-xs" type="search" placeholder="Search mail…" autocomplete="off" />
         <button id="search-clear" class="search-clear hidden" type="button" title="Clear search">&times;</button>
       </div>
+      <div id="filter-seg" class="filter-seg" role="group" aria-label="Filter messages">
+        <button type="button" data-filter="all" title="Show all">All</button>
+        <button type="button" data-filter="unread" title="Unread only">Unread</button>
+        <button type="button" data-filter="flagged" title="Flagged only">Flagged</button>
+      </div>
       <select id="sort" class="select select-bordered select-xs" title="Sort by">
         <option value="dateDesc">Newest</option>
         <option value="dateAsc">Oldest</option>
@@ -245,6 +324,7 @@ appRoot.innerHTML = /* html */ `
         <option value="subject">Subject</option>
         <option value="unread">Unread first</option>
       </select>
+      <button id="group-toggle" class="btn btn-xs" type="button" title="Group by date">&#9776;</button>
       <button id="compose" class="btn btn-xs btn-primary" title="Compose">&#9993; Compose</button>
       <button id="refresh" class="btn btn-xs" title="Refresh">&#8635; Refresh</button>
       <button id="gear" class="btn btn-xs" title="Settings">&#9881;</button>
@@ -423,6 +503,8 @@ const brandVersion = document.querySelector<HTMLSpanElement>("#brand-version")!;
 const refreshBtn = document.querySelector<HTMLButtonElement>("#refresh")!;
 const gear = document.querySelector<HTMLButtonElement>("#gear")!;
 const sortSelect = document.querySelector<HTMLSelectElement>("#sort")!;
+const filterSeg = document.querySelector<HTMLDivElement>("#filter-seg")!;
+const groupToggle = document.querySelector<HTMLButtonElement>("#group-toggle")!;
 const searchInput = document.querySelector<HTMLInputElement>("#search")!;
 const searchClearBtn = document.querySelector<HTMLButtonElement>("#search-clear")!;
 const updateBanner = document.querySelector<HTMLDivElement>("#update-banner")!;
@@ -579,26 +661,25 @@ function renderInbox(inbox: Inbox): void {
   currentIds = new Set(inbox.messages.map((m) => m.id));
   currentTotal = inbox.total;
 
-  if (inbox.messages.length === 0) {
-    listEl.innerHTML = `<div class="p-6 text-center opacity-60">No messages.</div>`;
-    resetReader();
-    syncCursor();
-    return;
-  }
-
   const folder = folders.find((f) => f.id === currentFolderId);
   const showRecipient = !!folder && isOutgoingFolder(folder.name);
 
-  const rows = sortMessages(inbox.messages)
-    .map((m) => messageRowHtml(m, showRecipient))
-    .join("");
+  // Quick-filter then sort the loaded window; grouping happens in renderListBody.
+  const visible = sortMessages(applyFilter(inbox.messages));
 
   const remaining = inbox.total - inbox.messages.length;
   const more =
     remaining > 0
       ? `<button class="load-more" data-role="load-more">Load ${Math.min(remaining, PAGE_SIZE)} more (${remaining} older)</button>`
       : "";
-  listEl.innerHTML = rows + more;
+
+  if (visible.length === 0) {
+    const empty =
+      inbox.messages.length === 0 ? "No messages." : "No messages match this filter.";
+    listEl.innerHTML = `<div class="p-6 text-center opacity-60">${empty}</div>` + more;
+  } else {
+    listEl.innerHTML = renderListBody(visible, showRecipient) + more;
+  }
 
   // A refresh may have dropped the open message; clear the reader if so.
   if (selectedId && !currentIds.has(selectedId)) resetReader();
@@ -750,16 +831,19 @@ function setSearchClearVisible(visible: boolean): void {
 // Render search results into the list area, reusing the folder list-row markup.
 function renderSearchResults(query: string, results: Message[]): void {
   currentIds = new Set(results.map((m) => m.id));
-  const header = `<div class="search-header">Search results for: ${esc(query)} (${results.length})</div>`;
-  if (results.length === 0) {
+  // The quick filter also applies to search results; grouping does not (results
+  // keep their relevance/date order under the search header).
+  const visible = sortMessages(applyFilter(results));
+  const count =
+    visible.length === results.length ? `${results.length}` : `${visible.length} of ${results.length}`;
+  const header = `<div class="search-header">Search results for: ${esc(query)} (${count})</div>`;
+  if (visible.length === 0) {
     listEl.innerHTML = header + `<div class="p-6 text-center opacity-60">No matching messages.</div>`;
     if (selectedId && !currentIds.has(selectedId)) resetReader();
     syncCursor();
     return;
   }
-  const rows = sortMessages(results)
-    .map((m) => messageRowHtml(m, false))
-    .join("");
+  const rows = visible.map((m) => messageRowHtml(m, false)).join("");
   listEl.innerHTML = header + rows;
   if (selectedId && !currentIds.has(selectedId)) resetReader();
   highlightSelected();
@@ -2939,12 +3023,47 @@ refreshBtn.addEventListener("click", () => {
   if (searchActive) exitSearch(); // Refresh leaves search and reloads the folder
   void syncFolder();
 });
+// Re-render the current view (search results or cached folder) without a fetch —
+// used when sort / filter / grouping changes.
+function rerenderList(): void {
+  if (searchActive) void runSearch(searchInput.value);
+  else void refreshFromCache(true);
+}
+function updateFilterUi(): void {
+  for (const b of filterSeg.querySelectorAll<HTMLButtonElement>("button")) {
+    b.classList.toggle("active", b.dataset.filter === filterMode);
+  }
+}
+function updateGroupUi(): void {
+  // Grouping only applies to date sorts: pressed when active, disabled otherwise.
+  const dateSort = sortMode === "dateDesc" || sortMode === "dateAsc";
+  groupToggle.classList.toggle("active", groupByDate && dateSort);
+  groupToggle.disabled = !dateSort;
+  groupToggle.title = !dateSort
+    ? "Date grouping (sort by date to use)"
+    : groupByDate
+      ? "Grouped by date — click to ungroup"
+      : "Group by date";
+}
 sortSelect.addEventListener("change", () => {
   sortMode = sortSelect.value as SortMode;
   localStorage.setItem(SORT_KEY, sortMode);
-  // The sort applies to whatever is shown: search results or the cached folder.
-  if (searchActive) void runSearch(searchInput.value);
-  else void refreshFromCache(true);
+  updateGroupUi(); // group availability depends on the sort
+  rerenderList();
+});
+filterSeg.addEventListener("click", (e) => {
+  const f = (e.target as HTMLElement).closest("button")?.dataset.filter as FilterMode | undefined;
+  if (!f || f === filterMode) return;
+  filterMode = f;
+  localStorage.setItem(FILTER_KEY, filterMode);
+  updateFilterUi();
+  rerenderList();
+});
+groupToggle.addEventListener("click", () => {
+  groupByDate = !groupByDate;
+  localStorage.setItem(GROUP_KEY, groupByDate ? "1" : "0");
+  updateGroupUi();
+  rerenderList();
 });
 
 // Search: debounce typing, submit immediately on Enter, clear on Escape.
@@ -3282,6 +3401,8 @@ resetReader();
 async function boot(): Promise<void> {
   applyThemePref(loadThemePref());
   sortSelect.value = sortMode;
+  updateFilterUi();
+  updateGroupUi();
   try {
     brandVersion.textContent = `v${await getVersion()}`;
   } catch {

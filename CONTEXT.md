@@ -78,6 +78,37 @@ Entra app registration (public, not secret):
 
 ## Progress log
 
+### 2026-06-23 — Outlook-style date sections + quick filters (v0.1.19)
+Frontend-only message-list upgrade (no backend/wire changes): the inbox now groups
+into **Outlook-style date sections** and gains **quick filters**, on top of the
+existing client-side sort.
+
+- **Date sections** (`src/main.ts`): when sorting by date (the default), the list is
+  grouped under sticky headers — **Today, Yesterday, This Week, Last Week, This Month,
+  Last Month**, then **"Month YYYY"** for older mail. `dateSectionLabel()` buckets a
+  message relative to now (week starts Monday); buckets are mutually exclusive and
+  consecutive in date order, so `renderListBody()` emits one header per run.
+  Verified deterministically (12-case bucketing + consecutive-no-repeats harness).
+  A **group-by-date toggle** (☰ in the toolbar) turns sections off; disabled for the
+  non-date sorts (Sender/Subject/Unread). Persisted in `localStorage` (`wattmail.group`).
+- **Quick filters** (`#filter-seg`): **All / Unread / Flagged**, client-side over the
+  loaded window, in both the folder view and search results (search header shows
+  "X of Y" when filtered). Persisted (`wattmail.filter`). The keyboard cursor (j/k)
+  skips section headers (not `.msg`); rows get `scroll-margin-top` so the sticky
+  header never hides the cursored row.
+- **Sort** unchanged (Newest/Oldest/Sender/Subject/Unread); sort/filter/group all
+  re-render from cache via a shared `rerenderList()` — no refetch.
+- Verified: `tsc` + `vite build` + `cargo check` + fmt clean; bucketing logic
+  unit-verified. Pure client-side rendering of already-cached data — none of the
+  v0.1.13/14 (Graph wire-type) live-run risk.
+
+> **NOTE — IMAP/OAuth work is parked.** The generic IMAP/SMTP backend +
+> Mailspring-style account setup + Gmail-sync fixes + OAuth credential injection
+> (the "IMAP / SMTP — design" section below, now *built*) live on branch
+> **`feature/imap-accounts`** (CI-green), deliberately kept off `main`/releases until
+> live-tested with a real app-password account. `main` is intentionally back at the
+> v0.1.18 base for this release. To resume: merge that branch, live-test, then ship.
+
 ### 2026-06-23 — Post-review fixes: Graph delta-expiry recovery + sync races (v0.1.18)
 Ran a verified multi-agent codebase review (status + a 6-dimension review with
 adversarial verification of every finding + feature-gap analysis + IMAP/SMTP
