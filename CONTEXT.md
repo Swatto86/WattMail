@@ -5,17 +5,26 @@
 > new milestone state, a decision made/reversed, or an open question resolved.
 > Keep newest progress entries at the top of the log.
 >
-> **Last updated:** 2026-06-23
+> **Last updated:** 2026-06-24
 
 ---
 
 ## Overview
 
-A personal, cross-platform (Windows / macOS / Linux) email client. Initial target:
-**Office 365 business mailboxes via the Microsoft Graph API** with OAuth 2.0. The
-transport sits behind a provider-agnostic `MailProvider` contract so IMAP/SMTP or
-other backends can be added later without touching the application or presentation
-layers.
+A personal email client. Initial target: **Office 365 business mailboxes via the
+Microsoft Graph API** with OAuth 2.0. The transport sits behind a provider-agnostic
+`MailProvider` contract; a generic **IMAP/SMTP** backend is in fact already built on
+branch `feature/imap-accounts` (parked off main — see the NOTE in the progress log).
+
+**Platform reality:** only **Windows** is shipped/proven (NSIS installer + signed
+auto-update). The code is cross-platform-capable (per-OS path + keychain abstraction)
+but macOS/Linux are compile-gated in CI only — never built into a bundle or run live.
+
+**Provider status (v0.1.19):** Office 365 = live/configured (real client+tenant ids in
+`accounts.rs`). Outlook.com + Gmail = code-complete but **gated off** by
+`REPLACE_WITH_…` placeholder creds (`is_provider_configured()` = false → filtered from
+the picker, rejected by `add_account`); a default build offers **only Office 365**.
+Generic IMAP/SMTP = **built but parked** on `feature/imap-accounts`.
 
 ## Tech stack
 
@@ -688,9 +697,10 @@ pending (needs a signed-in window).
 | — | Headers viewer — view & trace internet headers, auth (SPF/DKIM/DMARC) badges, forged-`To:` caution | ✅ done (v0.1.9–0.1.10) |
 | — | Quick wins — search, drafts, follow-up flags, cached folder sidebar, keyboard shortcuts | ✅ built (v0.1.11); live run pending |
 | — | Compose polish — resizable/maximizable window, sanitized rich-HTML paste, inline images (cid) | ✅ built (v0.1.12); live run pending |
+| — | Message list: Outlook-style date sections + quick filters (All/Unread/Flagged) + group-by-date toggle | ✅ built (v0.1.19); frontend-only |
 | — | Calendar tab (read agenda + accept/decline; `Calendars.ReadWrite`) | ⬜ backlog (roadmap big-bet, v0.3.0) |
 | — | Contacts / recipient autocomplete (`People.Read`/`Contacts.Read`) | ⬜ backlog (roadmap v0.2.0) |
-| — | Second provider (IMAP/SMTP) behind the contract | ⬜ backlog |
+| — | Generic IMAP/SMTP backend + Mailspring-style setup | 🟡 BUILT on branch `feature/imap-accounts` (CI-green); parked off main/releases pending a live app-password test |
 
 ---
 
@@ -701,7 +711,7 @@ pending (needs a signed-in window).
 | 06-15 | **Graph API first**, behind a provider-agnostic `MailProvider` trait | Fastest path to a working O365 client (conversations, delta sync, calendar/contacts free). Contract keeps IMAP/portability open. | Active |
 | 06-15 | **OAuth public client + PKCE + loopback** (`http://localhost`), single-tenant | Recommended desktop pattern; a distributed binary can't protect a secret. Single-tenant = simplest for own mailbox. | Active |
 | 06-15 | **Token exchange via raw form-posts**, isolated in `infrastructure/auth`, not the `oauth2` crate | Transparent, fewer moving parts, mirrors Mailspring's handshake; swappable later without touching callers. | Active |
-| 06-15 | **Sync = delta-query polling** (`/messages/delta` + persisted deltaLink) | Graph change-notification webhooks need a public HTTPS callback — impractical for a desktop app. | Active (to implement in M3) |
+| 06-15 | **Sync = delta-query polling** (`/messages/delta` + persisted deltaLink) | Graph change-notification webhooks need a public HTTPS callback — impractical for a desktop app. | Active (implemented, M3) |
 | 06-15 | **Persist only the refresh token, chunked across keyring entries** | Entra refresh tokens (~2.5–3.5 KB) exceed the Windows Credential Manager 2560-char limit; access tokens are short-lived → keep in memory. | Active |
 | 06-16 | **UI-first sequencing** (Tauri shell before sync engine) | Visible payoff + exercises the Tauri build pipeline early; the `MailProvider` seam makes the later cache swap invisible to the UI. | Active |
 | 06-16 | **Stack mirrors AllTheThings**: Vite/TS/Tailwind/DaisyUI, vanilla TS, window-hidden-until-painted | Proven fast-startup Tauri setup the user already likes. | Active |
@@ -745,8 +755,9 @@ pending (needs a signed-in window).
   **drafts**, a **resizable/maximizable** window, **sanitized rich-HTML paste** and **inline
   images** are all done — v0.1.11–0.1.12. Drafts deferral: file *and* inline-image attachments
   aren't saved on a draft yet; compose warns/blocks rather than dropping them silently.)
-- **Multi-account model** — domain currently assumes a single account; the SQLite cache is
-  single-account (one `cache.db`, no account column).
+- **Multi-account model** — ✓ resolved (v0.1.16/0.1.17): full per-account isolation —
+  each account has its own keyring namespace + `cache-{slug}-{id}.db`, behind the
+  `AccountManager` composition root, with legacy single-account adoption on first launch.
 - **Cache at rest** — content columns + sync-state values are AES-256-GCM encrypted (key in the OS
   keychain). Residual: `id`, `folder_id`, `received`, and `is_read` are plaintext (needed for
   sort/filter); whole-DB encryption would need SQLCipher (heavier Windows/OpenSSL build).
@@ -862,59 +873,14 @@ large-attachment upload sessions (L), snooze (L).
 
 ---
 
-## IMAP / SMTP — design (next major feature, build deferred)
+## IMAP / SMTP — built, parked on `feature/imap-accounts`
 
-Verdict: **feasible and additive.** The `MailProvider` trait already hosts a
-non-Graph hand-rolled-MIME backend (Gmail proves it). Per-method difficulty is mostly
-trivial/moderate; only `sync` is hard. Two real architectural departures:
+The generic IMAP/SMTP backend (Mailspring-style account setup, autodiscovery,
+`ProviderKind::Imap`, the credential-seam refactor, SMTP via `lettre`, MIME via
+`mail-parser`) is **fully built** but lives on branch **`feature/imap-accounts`**,
+deliberately kept off `main` until live-tested against a real app-password mailbox.
 
-1. **Credential seam (the one big change).** Everything resolves a provider via
-   `account.auth.access_token()` → `build_mail_provider(kind, token: String)`. IMAP
-   has no bearer token. `ManagedAccount` hard-bundles `auth: AuthService`
-   (accounts.rs:138). Refactor to a credential enum `OAuth(AuthService) |
-   Imap(ImapCredentials)` (or a `CredentialSource` trait). Critique re-sized this
-   **L → XL**: ripples into `open_account`, `adopt_legacy`, `remove_account` (calls
-   `auth.sign_out()`), and ~20 `active_provider` call-sites. Add a
-   `provider()`-style accessor on `ManagedAccount` so commands call one method and
-   the per-command-vs-pooled distinction is hidden.
-2. **Connection lifecycle.** Graph/Gmail build a fresh stateless provider per
-   command; IMAP wants a long-lived pooled TLS session cached on the account
-   (`Arc<Mutex<…>>`/pool, reconnect-on-drop). Biggest new infra and the likeliest
-   place to deadlock (guard across `.await`) or stall (one `Mutex<Session>`
-   serializes every command). Use ≥2 connections or a separate sync connection.
-
-**Crates** (stay on tokio + rustls, no OpenSSL): `async-imap` + `tokio-rustls` +
-`lettre` (SMTP) + `mail-parser` (inbound MIME). Reuse the existing hand-built MIME —
-promote `gmail::build_raw_message` to a shared `crates/infrastructure/src/mime.rs`.
-**Verify `cargo tree -d` shows a single rustls** (async-imap may pin its own rustls
-major vs reqwest's — the real TLS risk, not OpenSSL).
-
-**Critique corrections to bake in:**
-- `build_raw_message` emits **no `From:` header** (Gmail stamps it server-side; SMTP
-  won't) → shared `mime.rs` must add `From`/`Date`/`Message-ID`. "Promote, no
-  behaviour change" is false.
-- UIDVALIDITY change needs a new **`MailStore::clear_folder(folder_id)`** to purge the
-  old generation. "No schema change" is false.
-- App-passwords: Gmail/Yahoo/iCloud require app-specific passwords; **Outlook.com IMAP
-  needs OAuth → route those domains to the existing Graph backend, not IMAP.**
-- Adding IMAP makes the picker always show ≥2 options → today's "Office 365 → no
-  chooser" regresses for existing users unless IMAP is excluded from the auto-select count.
-- SMTP must use lettre `Tls::Required` (never opportunistic) so STARTTLS can't silently
-  downgrade to plaintext.
-- Deletion-detection via `UID SEARCH ALL` diff is O(mailbox) — run it on explicit
-  refresh / a longer cadence, not the 60s poll; prefer QRESYNC `VANISHED` when advertised.
-
-**Design specifics:** `ProviderKind::Imap` (tag/slug/label "imap"/"IMAP"); `ImapConfig`
-(`#[serde(default)] Option<ImapConfig>` on `AccountRecord`); password in keyring as
-`imap:{id}:password` (reuse the chunked `TokenStore` as a `PasswordStore`); composite
-message id `folder|uidvalidity|uid`; `SyncToken` = `UIDVALIDITY:UIDNEXT[:HIGHESTMODSEQ]`
-(CONDSTORE flag-delta, SEARCH-diff for deletions, full resync on UIDVALIDITY change);
-inbound = FETCH BODY[] → `mail-parser` → reuse `html::sanitize_email`; send = lettre;
-draft = IMAP APPEND to Drafts with `\Draft`; flags/move/delete = UID STORE / COPY+EXPUNGE
-(or UID MOVE on UIDPLUS/MOVE capability). Degrades cleanly: rules (trait default),
-server search (folder-scoped only), identity (synth display name from email local-part);
-header trace is actually *richer* than Graph. Add-account UI = a credentials **form**
-(email/password + Advanced host/port/security) with autodiscovery (static preset table
-Gmail/Yahoo/Fastmail/iCloud + Mozilla ISPDB fallback), new commands `add_imap_account` +
-`imap_autodiscover`. Realistic total effort: **XL, multi-session, needs live test
-against a real app-password account.**
+The full design + implementation notes — crate choices, the credential seam, the
+`UIDVALIDITY`/sync model, the SMTP path, and the adversarial-review fixes — live in
+**that branch's `CONTEXT.md`**, not duplicated here. To resume generic-IMAP support:
+merge the branch, live-test, then release.
