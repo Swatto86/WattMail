@@ -5,7 +5,7 @@
 > new milestone state, a decision made/reversed, or an open question resolved.
 > Keep newest progress entries at the top of the log.
 >
-> **Last updated:** 2026-06-20
+> **Last updated:** 2026-06-23
 
 ---
 
@@ -77,6 +77,39 @@ Entra app registration (public, not secret):
 ---
 
 ## Progress log
+
+### 2026-06-23 — Post-review fixes: Graph delta-expiry recovery + sync races (v0.1.18)
+Ran a verified multi-agent codebase review (status + a 6-dimension review with
+adversarial verification of every finding + feature-gap analysis + IMAP/SMTP
+design). Fixed the findings that survived verification **on the live Office 365
+path**, then cut v0.1.18. Sequencing chosen: fix shipping bugs first → release →
+then begin IMAP. The full review + IMAP design is captured under "Review findings
+(2026-06-23)" and "IMAP / SMTP — design" below.
+
+- **Graph `deltaLink` expiry (HTTP 410) now recovers** instead of breaking a
+  folder's sync *permanently*. Previously `GraphClient::sync` propagated the 410;
+  `application::sync_folder` bailed before persisting, leaving the dead cursor in
+  `sync_state`, so every later sync of that folder failed forever (silent under
+  the 60s auto-sync). Now: on a 410 while resuming from a stored cursor, discard
+  the dead cursor + partial accumulation and re-run a fresh full enumeration once
+  (a `recovered` flag prevents a loop; only fires when a stored token was used).
+  Converges via upsert-by-id. Mirrors Gmail's 404→`full_sync` fallback. (graph/mod.rs)
+- **Folder-switch render race** — `refreshFromCache` now snapshots the folder id
+  and bails before `renderInbox` if it changed during the in-flight cache read,
+  so folder A's rows can't paint under folder B's selection. Mirrors the existing
+  `openMessage`/search epoch guards. (main.ts)
+- **Dropped-sync race** — `syncFolder` no longer silently no-ops when a sync is
+  in flight; it sets `pendingSync` and re-runs once the current sync finishes, so
+  a freshly-selected folder still pulls server changes rather than waiting up to
+  60s for the next auto-sync tick. (main.ts)
+- **Production CSP tightened** — the Vite-HMR `ws://localhost:* http://localhost:*`
+  allowances moved to Tauri v2 `devCsp`; the shipped `connect-src` is now
+  `'self' ipc: http://ipc.localhost`. (tauri.conf.json)
+- **Verified:** `cargo fmt --check`, `clippy --all-targets -D warnings`,
+  `cargo test` (14/14), `tsc --noEmit`, `vite build`, and a full **release**
+  build all clean. Live click-through still pending (no signed-in window run this
+  session). **Toolchain is now present locally** (Rust 1.96.0 + Node 24) — the
+  historical IMAP blocker (no toolchain to regenerate `Cargo.lock`) is gone.
 
 ### 2026-06-22 — Compile/verify + provider gating + release (v0.1.17)
 First build of the v0.1.16/v0.1.17 work on a machine with a Rust toolchain (the
@@ -727,3 +760,130 @@ pending (needs a signed-in window).
 - **Release profile** lives at the workspace root (`[profile.release]`); member-crate
   profiles are ignored.
 - **`panic = "abort"`** in release — no test relies on unwinding.
+
+---
+
+## Review findings (2026-06-23, multi-agent + adversarially verified)
+
+Every finding below was verified against the code by an independent skeptic; several
+were **downgraded on inspection** (noted). The codebase is structurally sound
+(layering holds, no locks across `.await`, OAuth/PKCE textbook, both sanitizers
+solid). What's left, by priority:
+
+**Fixed in v0.1.18 (live Office 365 path):** Graph 410 recovery; the two
+folder-switch frontend races; prod CSP. See the v0.1.18 progress entry.
+
+**Deferred — latent until Gmail/Outlook OAuth creds are filled (fix BEFORE un-gating Gmail):**
+- **Gmail history sync advances the cursor past dropped pages → silent permanent
+  data loss.** `GmailHistoryResponse` doesn't deserialize/follow `nextPageToken`,
+  but `historyId` jumps to the latest, so any history beyond page 1 (a burst, or a
+  long offline gap) is lost forever. Same defect skips-but-counts-as-processed any
+  added message whose hydration fetch fails. Fix: page through `nextPageToken`
+  before adopting the final `historyId`; don't advance past changes not applied.
+  (gmail/mod.rs:452-482, 1079-1084) — **verified HIGH**.
+- **Gmail incremental sync ignores `labelsAdded`/`labelsRemoved`.** Read state
+  (UNREAD), flag (STARRED), and moves changed on another device never reach the
+  cache (`is_read`/`is_flagged` derive purely from labels at hydration). Stale
+  until a token expires (~days), corrupting unread badges/tray/chime. Fix:
+  deserialize + translate label history records into re-hydrated upserts /
+  folder-scoped removals. (gmail/mod.rs:457-472, 1086-1098) — **verified HIGH/MED**.
+
+**Pre-IMAP groundwork (do before the third backend):**
+- **Extract shared infra helpers** before IMAP triples the boilerplate: `check_status`
+  is byte-identical across graph/gmail, plus the bearer-verb wrappers and the
+  opaque-id `path_segment` URL builder → a `crates/infrastructure/src/http.rs`.
+  (NB: the address-extraction "duplication" is a false pair — Graph builds from
+  structured JSON, Gmail parses raw RFC5322; not shared.) — verified, downgraded to LOW.
+- **Add tests on the critical pure functions** (all offline): `sanitize_style`
+  allowlist (pass + url()/expression()/@import/javascript:/`/*` rejection),
+  `FieldCipher` round-trip + tamper/short-blob, `SqliteStore`
+  open→upsert→recent→count→migrate(version-bump drop), `build_raw_message` MIME
+  structure + inline-image Content-ID. Highest-value tests in the repo. — verified MED.
+
+**Lower priority / accepted for a single-user Windows app (verifiers downgraded HIGH→LOW):**
+- Image-proxy **SSRF** (no private-IP/loopback/redirect filter on `inline_remote_images`):
+  real but desktop-only, opt-in click, reaches only the user's own LAN. graph/mod.rs:907-960.
+- **Single shared AES cache key** across all per-account DBs (crypto.rs:14-16): the
+  "one key decrypts all" framing is an incoherent threat model (key + DBs sit behind
+  one OS user/keychain). Defense-in-depth only.
+- **No macOS/Linux bundle** anywhere (tauri.conf.json `targets:["nsis"]`,
+  Windows-only CI) + **Linux Secret Service hard-dep** + appindicator tray + autostart
+  `--hidden`/"Start with Windows" label: all real but **known deferrals / never run
+  live**. Honest fix = build the bundles OR soften the "cross-platform" claim in
+  README/CONTEXT (currently overstated). README also still advertises Outlook.com/Gmail
+  as available though both are gated off by placeholder creds.
+- Minor: Gmail `add_account` duplicate-account check-then-insert race (accounts.rs);
+  `save_folders` non-transactional DELETE+INSERT (store/mod.rs:299-318);
+  `check_new_mail` TOCTOU on `last_notified_at` (commands.rs:662-694);
+  `inline_remote_images` naive `src="…"` string-replace (graph/mod.rs:920-932);
+  `is_flagged` stored plaintext but undocumented; locale-fragile English folder-name
+  matching (main.ts + graph `inbox` literal); `checkNewMail` `currentFolderId!`
+  non-null assertion can run post-sign-out (main.ts:1870-1876); main.ts is a
+  3300-line monolith with the security-sensitive paste sanitizer buried in it.
+
+**Feature gaps (prioritized, none done):** *Now* — per-account signatures + templates
+(M); reply threading headers In-Reply-To/References (M, still broken — cheapest via
+Graph `createReply`); junk/block-sender (S, reuses rules + move). *Next* — unified
+inbox across accounts (L, registry already holds all accounts); recipient autocomplete
+(L, needs `People.Read`); bulk multi-select (M); undo-send (S, client-side). *Later* —
+conversation/threaded view (L, blocked on whole-folder server-side date sort),
+large-attachment upload sessions (L), snooze (L).
+
+---
+
+## IMAP / SMTP — design (next major feature, build deferred)
+
+Verdict: **feasible and additive.** The `MailProvider` trait already hosts a
+non-Graph hand-rolled-MIME backend (Gmail proves it). Per-method difficulty is mostly
+trivial/moderate; only `sync` is hard. Two real architectural departures:
+
+1. **Credential seam (the one big change).** Everything resolves a provider via
+   `account.auth.access_token()` → `build_mail_provider(kind, token: String)`. IMAP
+   has no bearer token. `ManagedAccount` hard-bundles `auth: AuthService`
+   (accounts.rs:138). Refactor to a credential enum `OAuth(AuthService) |
+   Imap(ImapCredentials)` (or a `CredentialSource` trait). Critique re-sized this
+   **L → XL**: ripples into `open_account`, `adopt_legacy`, `remove_account` (calls
+   `auth.sign_out()`), and ~20 `active_provider` call-sites. Add a
+   `provider()`-style accessor on `ManagedAccount` so commands call one method and
+   the per-command-vs-pooled distinction is hidden.
+2. **Connection lifecycle.** Graph/Gmail build a fresh stateless provider per
+   command; IMAP wants a long-lived pooled TLS session cached on the account
+   (`Arc<Mutex<…>>`/pool, reconnect-on-drop). Biggest new infra and the likeliest
+   place to deadlock (guard across `.await`) or stall (one `Mutex<Session>`
+   serializes every command). Use ≥2 connections or a separate sync connection.
+
+**Crates** (stay on tokio + rustls, no OpenSSL): `async-imap` + `tokio-rustls` +
+`lettre` (SMTP) + `mail-parser` (inbound MIME). Reuse the existing hand-built MIME —
+promote `gmail::build_raw_message` to a shared `crates/infrastructure/src/mime.rs`.
+**Verify `cargo tree -d` shows a single rustls** (async-imap may pin its own rustls
+major vs reqwest's — the real TLS risk, not OpenSSL).
+
+**Critique corrections to bake in:**
+- `build_raw_message` emits **no `From:` header** (Gmail stamps it server-side; SMTP
+  won't) → shared `mime.rs` must add `From`/`Date`/`Message-ID`. "Promote, no
+  behaviour change" is false.
+- UIDVALIDITY change needs a new **`MailStore::clear_folder(folder_id)`** to purge the
+  old generation. "No schema change" is false.
+- App-passwords: Gmail/Yahoo/iCloud require app-specific passwords; **Outlook.com IMAP
+  needs OAuth → route those domains to the existing Graph backend, not IMAP.**
+- Adding IMAP makes the picker always show ≥2 options → today's "Office 365 → no
+  chooser" regresses for existing users unless IMAP is excluded from the auto-select count.
+- SMTP must use lettre `Tls::Required` (never opportunistic) so STARTTLS can't silently
+  downgrade to plaintext.
+- Deletion-detection via `UID SEARCH ALL` diff is O(mailbox) — run it on explicit
+  refresh / a longer cadence, not the 60s poll; prefer QRESYNC `VANISHED` when advertised.
+
+**Design specifics:** `ProviderKind::Imap` (tag/slug/label "imap"/"IMAP"); `ImapConfig`
+(`#[serde(default)] Option<ImapConfig>` on `AccountRecord`); password in keyring as
+`imap:{id}:password` (reuse the chunked `TokenStore` as a `PasswordStore`); composite
+message id `folder|uidvalidity|uid`; `SyncToken` = `UIDVALIDITY:UIDNEXT[:HIGHESTMODSEQ]`
+(CONDSTORE flag-delta, SEARCH-diff for deletions, full resync on UIDVALIDITY change);
+inbound = FETCH BODY[] → `mail-parser` → reuse `html::sanitize_email`; send = lettre;
+draft = IMAP APPEND to Drafts with `\Draft`; flags/move/delete = UID STORE / COPY+EXPUNGE
+(or UID MOVE on UIDPLUS/MOVE capability). Degrades cleanly: rules (trait default),
+server search (folder-scoped only), identity (synth display name from email local-part);
+header trace is actually *richer* than Graph. Add-account UI = a credentials **form**
+(email/password + Advanced host/port/security) with autodiscovery (static preset table
+Gmail/Yahoo/Fastmail/iCloud + Mozilla ISPDB fallback), new commands `add_imap_account` +
+`imap_autodiscover`. Realistic total effort: **XL, multi-session, needs live test
+against a real app-password account.**
