@@ -341,15 +341,30 @@ impl MailProvider for GraphClient {
             Some(token) => token.as_str().to_string(),
             None => folder_delta_url(folder_id),
         };
+        // Graph expires a stored deltaLink after a period (and on certain mailbox
+        // changes), returning HTTP 410 Gone (`syncStateNotFound`/`resyncRequired`).
+        // When that happens while resuming from a stored cursor, discard the dead
+        // cursor and the partial accumulation and restart a fresh full enumeration
+        // once — the replay converges via upsert-by-id. Mirrors the Gmail backend's
+        // 404 -> full_sync fallback. A fresh enumeration (no stored token) that
+        // itself 410s is propagated; retrying it identically would loop.
+        let mut recovered = since.is_none();
 
         let mut changes = Vec::new();
         let delta_link = loop {
-            let page: DeltaResponse = self
-                .get(&url)
-                .await?
-                .json()
-                .await
-                .map_err(|e| MailError::Decode(e.to_string()))?;
+            let page: DeltaResponse = match self.get(&url).await {
+                Ok(response) => response
+                    .json()
+                    .await
+                    .map_err(|e| MailError::Decode(e.to_string()))?,
+                Err(MailError::Api { status: 410, .. }) if !recovered => {
+                    recovered = true;
+                    url = folder_delta_url(folder_id);
+                    changes.clear();
+                    continue;
+                }
+                Err(e) => return Err(e),
+            };
 
             for item in page.value {
                 let Some(id) = item.id else { continue };

@@ -1891,16 +1891,25 @@ async function checkNewMail(): Promise<void> {
 
 // ---- Actions ----
 let syncing = false;
+// Set when syncFolder is called while one is already in flight, so the request
+// isn't silently dropped: the in-flight sync re-runs once it finishes, picking
+// up whatever folder is current by then (e.g. after a quick folder switch).
+let pendingSync = false;
 
 // Render the current folder from the local SQLite cache — instant, offline-capable.
 // `preserveScroll` keeps the list position during a background refresh.
 async function refreshFromCache(preserveScroll = false): Promise<void> {
-  if (!currentFolderId) return;
+  const fid = currentFolderId;
+  if (!fid) return;
   const scroll = listEl.scrollTop;
   const inbox = await invoke<Inbox>("folder_from_cache", {
-    folderId: currentFolderId,
+    folderId: fid,
     top: loadedCount,
   });
+  // Bail if the folder changed (or we signed out) while the cache read was in
+  // flight — otherwise we'd paint this folder's rows under another folder's
+  // selection. Mirrors the openMessage / search epoch guards.
+  if (fid !== currentFolderId) return;
   showSignedIn();
   renderInbox(inbox);
   if (preserveScroll) listEl.scrollTop = scroll;
@@ -1930,7 +1939,13 @@ async function revertOptimisticAction(): Promise<void> {
 // Pull changes for the current folder into the cache, then re-render from it.
 // `quiet` (used by the auto-sync timer) skips the status churn and keeps scroll.
 async function syncFolder(quiet = false): Promise<void> {
-  if (syncing || !currentFolderId) return;
+  if (!currentFolderId) return;
+  if (syncing) {
+    // A sync is already running; remember the request so the (possibly
+    // newly-selected) folder is still pulled when it completes.
+    pendingSync = true;
+    return;
+  }
   syncing = true;
   if (!quiet) {
     refreshBtn.disabled = true;
@@ -1961,6 +1976,10 @@ async function syncFolder(quiet = false): Promise<void> {
   } finally {
     syncing = false;
     if (!quiet) refreshBtn.disabled = false;
+    if (pendingSync) {
+      pendingSync = false;
+      void syncFolder(quiet);
+    }
   }
 }
 
