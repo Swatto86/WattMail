@@ -4,7 +4,7 @@
 //! [`MailProvider`] backend at runtime.
 
 use serde::{Deserialize, Serialize};
-use wattmail_domain::MailProvider;
+use wattmail_domain::{CalendarProvider, MailProvider};
 
 use crate::gmail::GmailClient;
 use crate::graph::GraphClient;
@@ -67,6 +67,12 @@ impl ProviderKind {
             Self::Gmail => "Gmail",
         }
     }
+
+    /// Whether this provider exposes a calendar backend. Only the Microsoft Graph
+    /// backends (Office 365 / Outlook.com) do today; Gmail is mail-only here.
+    pub fn supports_calendar(&self) -> bool {
+        matches!(self, Self::Office365 | Self::OutlookConsumer)
+    }
 }
 
 /// Build the mail backend for `kind`, authenticated with `access_token`.
@@ -80,5 +86,20 @@ pub fn build_mail_provider(kind: ProviderKind, access_token: String) -> Box<dyn 
             Box::new(GraphClient::new(access_token))
         }
         ProviderKind::Gmail => Box::new(GmailClient::new(access_token)),
+    }
+}
+
+/// Build the calendar backend for `kind`, or `None` when the provider has no
+/// calendar (Gmail). Office 365 and Outlook.com both calendar over Microsoft
+/// Graph; the composition root injects this for the calendar commands.
+pub fn build_calendar_provider(
+    kind: ProviderKind,
+    access_token: String,
+) -> Option<Box<dyn CalendarProvider>> {
+    match kind {
+        ProviderKind::Office365 | ProviderKind::OutlookConsumer => {
+            Some(Box::new(GraphClient::new(access_token)))
+        }
+        ProviderKind::Gmail => None,
     }
 }

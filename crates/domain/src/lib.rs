@@ -388,6 +388,171 @@ pub struct SyncBatch {
     pub token: SyncToken,
 }
 
+// ============================================================================
+// Calendar
+// ============================================================================
+//
+// The calendar contract parallels [`MailProvider`]: a provider-agnostic seam so
+// the application/presentation layers stay ignorant of Microsoft Graph. Errors
+// reuse [`MailError`] — it is really a provider-transport error (auth / network /
+// API / decode / unsupported), all of which apply equally to calendar calls.
+
+/// A point in time for an event, exactly as the provider reports it: a local
+/// wall-clock timestamp (ISO-8601 *without* an offset) plus the time zone it is
+/// expressed in. When the view is requested in the user's own zone, callers can
+/// parse `date_time` as local time directly.
+///
+/// All-day events carry a date-only midnight `date_time` and must **never** be
+/// zone-shifted — doing so slides them onto the wrong day.
+#[derive(Debug, Clone)]
+pub struct EventDateTime {
+    /// ISO-8601 local wall-clock, e.g. `2026-06-24T09:00:00` (no trailing `Z`).
+    pub date_time: String,
+    /// The zone `date_time` is expressed in (IANA or Windows name).
+    pub time_zone: String,
+}
+
+/// An attendee's response to a meeting invitation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResponseStatus {
+    /// No response tracked (e.g. an appointment with no attendees).
+    None,
+    /// This person is the organizer.
+    Organizer,
+    TentativelyAccepted,
+    Accepted,
+    Declined,
+    /// Invited but has not yet responded.
+    NotResponded,
+}
+
+impl ResponseStatus {
+    /// Stable lowercase tag for the presentation layer (matches Graph's values).
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Organizer => "organizer",
+            Self::TentativelyAccepted => "tentativelyAccepted",
+            Self::Accepted => "accepted",
+            Self::Declined => "declined",
+            Self::NotResponded => "notResponded",
+        }
+    }
+
+    /// Parse a provider response string into a [`ResponseStatus`]; unknown values
+    /// (and an absent value) map to [`ResponseStatus::None`].
+    pub fn parse(raw: Option<&str>) -> Self {
+        match raw.unwrap_or("none") {
+            "organizer" => Self::Organizer,
+            "tentativelyAccepted" => Self::TentativelyAccepted,
+            "accepted" => Self::Accepted,
+            "declined" => Self::Declined,
+            "notResponded" => Self::NotResponded,
+            _ => Self::None,
+        }
+    }
+}
+
+/// One attendee of an event, with their current response.
+#[derive(Debug, Clone)]
+pub struct Attendee {
+    pub name: String,
+    pub email: String,
+    pub status: ResponseStatus,
+    /// True for a required attendee; false for optional/resource.
+    pub is_required: bool,
+}
+
+/// A calendar event occurrence as returned by a recurrence-expanded view. A
+/// recurring series appears as one [`CalendarEvent`] per occurrence in range.
+#[derive(Debug, Clone)]
+pub struct CalendarEvent {
+    pub id: String,
+    pub subject: String,
+    pub start: EventDateTime,
+    pub end: EventDateTime,
+    pub is_all_day: bool,
+    pub location: String,
+    pub organizer_name: String,
+    pub organizer_email: String,
+    pub attendees: Vec<Attendee>,
+    /// Sanitized HTML body, always safe to render in a sandboxed frame.
+    pub body_html: String,
+    pub is_cancelled: bool,
+    /// True when this is an occurrence/exception of a recurring series (so the UI
+    /// can show a recurrence glyph). Recurrence *editing* is out of scope.
+    pub is_recurring: bool,
+    /// Join URL for an online meeting (Teams, …), if any.
+    pub online_meeting_url: Option<String>,
+    /// The signed-in user's own response to this event.
+    pub response_status: ResponseStatus,
+    /// A deep link to open the event in Outlook on the web, if provided.
+    pub web_link: Option<String>,
+    /// True when the signed-in user organizes this event (can edit/delete it).
+    pub is_organizer: bool,
+}
+
+/// A new event to create on the user's default calendar.
+#[derive(Debug, Clone)]
+pub struct NewEvent {
+    pub subject: String,
+    pub start: EventDateTime,
+    pub end: EventDateTime,
+    pub is_all_day: bool,
+    pub location: String,
+    /// HTML body (may be empty). Sent verbatim; the provider stores it.
+    pub body_html: String,
+    /// Required attendee email addresses to invite.
+    pub attendees: Vec<String>,
+}
+
+/// A reply to a meeting invitation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InviteResponse {
+    Accept,
+    TentativelyAccept,
+    Decline,
+}
+
+/// Contract every calendar backend implements. Parallels [`MailProvider`]; the
+/// seam that keeps the application layer ignorant of provider specifics.
+#[async_trait]
+pub trait CalendarProvider: Send + Sync {
+    /// Events overlapping `[start, end)` — both **absolute ISO-8601 instants**
+    /// (with offset or `Z`) bounding the window — with recurrence expanded into
+    /// individual occurrences, sorted by start ascending and rendered in
+    /// `time_zone` (an IANA zone, which governs only how the returned events'
+    /// wall-clock times are expressed, not how the window bounds are parsed).
+    async fn calendar_view(
+        &self,
+        start: &str,
+        end: &str,
+        time_zone: &str,
+    ) -> Result<Vec<CalendarEvent>, MailError>;
+
+    /// Create `event` on the default calendar, with its times interpreted in
+    /// `time_zone`. Returns the created event (in `time_zone`).
+    async fn create_event(
+        &self,
+        event: &NewEvent,
+        time_zone: &str,
+    ) -> Result<CalendarEvent, MailError>;
+
+    /// Reply to a meeting invitation. `comment` is an optional note to the
+    /// organizer; `send_response` controls whether a reply email is sent.
+    async fn respond_to_event(
+        &self,
+        id: &str,
+        response: InviteResponse,
+        comment: Option<&str>,
+        send_response: bool,
+    ) -> Result<(), MailError>;
+
+    /// Delete an event (for a series occurrence, the provider decides scope). The
+    /// caller should only offer this for events the user organizes.
+    async fn delete_event(&self, id: &str) -> Result<(), MailError>;
+}
+
 /// Local persistence for the cached message list and sync state. Implemented by
 /// infrastructure (SQLite); the application orchestrates provider → store.
 #[async_trait]
@@ -418,4 +583,38 @@ pub trait MailStore: Send + Sync {
     async fn cached_folders(&self) -> Result<Vec<Folder>, MailError>;
     async fn load_state(&self, key: &str) -> Result<Option<String>, MailError>;
     async fn save_state(&self, key: &str, value: &str) -> Result<(), MailError>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn response_status_parses_and_round_trips_graph_values() {
+        for raw in [
+            "none",
+            "organizer",
+            "tentativelyAccepted",
+            "accepted",
+            "declined",
+            "notResponded",
+        ] {
+            assert_eq!(ResponseStatus::parse(Some(raw)).as_str(), raw);
+        }
+    }
+
+    #[test]
+    fn response_status_unknown_and_absent_map_to_none() {
+        assert_eq!(ResponseStatus::parse(None), ResponseStatus::None);
+        assert_eq!(ResponseStatus::parse(Some("")), ResponseStatus::None);
+        assert_eq!(ResponseStatus::parse(Some("bogus")), ResponseStatus::None);
+    }
+
+    #[test]
+    fn email_address_parse_rejects_garbage() {
+        assert!(EmailAddress::parse("a@b.com").is_ok());
+        assert!(EmailAddress::parse("nope").is_err());
+        assert!(EmailAddress::parse("@x").is_err());
+        assert!(EmailAddress::parse("x@").is_err());
+    }
 }

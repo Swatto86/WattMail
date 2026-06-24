@@ -133,6 +133,11 @@ pub fn run() {
             commands::create_message_rule,
             commands::update_message_rule,
             commands::delete_message_rule,
+            commands::account_supports_calendar,
+            commands::calendar_view,
+            commands::create_event,
+            commands::respond_to_event,
+            commands::delete_event,
         ])
         .run(tauri::generate_context!())
         .expect("error while running WattMail");

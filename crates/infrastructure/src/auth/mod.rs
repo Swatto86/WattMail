@@ -44,6 +44,9 @@ impl OAuthConfig {
                 "Mail.ReadWrite",
                 "Mail.Send",
                 "MailboxSettings.ReadWrite",
+                // ReadWrite from the start so creating/RSVPing events never
+                // triggers a second consent prompt. Self-consentable like Mail.*.
+                "Calendars.ReadWrite",
             ],
         )
     }
@@ -55,7 +58,13 @@ impl OAuthConfig {
         Self::microsoft(
             "consumers",
             client_id,
-            &["offline_access", "User.Read", "Mail.ReadWrite", "Mail.Send"],
+            &[
+                "offline_access",
+                "User.Read",
+                "Mail.ReadWrite",
+                "Mail.Send",
+                "Calendars.ReadWrite",
+            ],
         )
     }
 

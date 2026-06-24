@@ -87,6 +87,45 @@ Entra app registration (public, not secret):
 
 ## Progress log
 
+### 2026-06-24 — Calendar tab over Microsoft Graph (NOT yet released — live test pending)
+**The app's first multi-view feature.** Adds a Mail/Calendar view switch and a
+calendar tab with a rolling 7-day agenda, event detail pane, RSVP, and create-event.
+
+- **Architecture (mirrors `MailProvider`):** new `CalendarProvider` trait in `domain`
+  (`CalendarEvent`, `EventDateTime`, `Attendee`, `ResponseStatus`, `NewEvent`,
+  `InviteResponse`; reuses `MailError` as the shared provider error). Graph impl in a
+  new `crates/infrastructure/src/graph/calendar.rs` submodule (shares `GraphClient`'s
+  http/token/`check_status`/recipient helpers, exposed `pub(super)`). Thin application
+  use-cases; 5 Tauri commands (`account_supports_calendar`, `calendar_view`,
+  `create_event`, `respond_to_event`, `delete_event`) + DTOs. New `src/calendar.ts`
+  owns all calendar DOM so `main.ts` is barely touched (view-switch + capability gate).
+- **Reads:** `/me/calendarView` (NOT `/me/events` — only calendarView expands
+  recurrence), paginated via `@odata.nextLink` (cap 20 pages), `Prefer:
+  outlook.timezone="<IANA>"`. Create = `POST /me/events`; RSVP = `POST
+  /me/events/{id}/{accept|tentativelyAccept|decline}`; delete = `DELETE`.
+- **Scope:** added **`Calendars.ReadWrite`** to both Microsoft OAuth configs
+  (`auth/mod.rs`) — **existing users must sign out / in once** to re-consent. Request
+  ReadWrite from the start so create/RSVP never triggers a 2nd consent.
+- **Time zones (the trap):** events come back as local wall-clock with no offset (via
+  the Prefer header) and the frontend parses them as local. **calendarView *window
+  bounds* are different** — Graph interprets an offset-less bound as **UTC** and ignores
+  the Prefer header for it, so the frontend sends true instants (`Date.toISOString()`),
+  DST-safe. All-day events use exclusive next-midnight end and are never zone-shifted.
+- **Security:** event bodies are server-sanitized (`sanitize_email`) then rendered in a
+  sandboxed `allow-same-origin` (no-scripts) iframe; join/web/body links gated to
+  `http(s)` both client (`openExternal`) and server (`http_url`). All networking stays
+  in Rust; CSP unchanged. Gmail (mail-only) hides the Calendar tab.
+- **Process:** built compile-first, then a **6-lens adversarial review** (19 raised →
+  11 confirmed / 8 refuted; 4 lenses independently caught the UTC-bounds bug with Graph
+  docs cited — the project's classic "compile-green ≠ correct Graph wire" class), fixed
+  all 11, then a **fix-verification pass** (16/16 resolved, 0 regressions). Removed the
+  dead `calendars()`/`list_calendars` path (registered IPC nobody called).
+- **Verification level:** compile-verified only — `clippy --all-targets -D warnings`,
+  `cargo test --workspace` (30 tests, incl. new calendar decode/url/tz tests), `tsc` +
+  `vite build`. **NOT live-run verified.** Per the v0.1.13/14 lesson, do a live test
+  against a real mailbox (load agenda, open an event, RSVP, create an event, all-day +
+  recurring + a non-UTC/DST check) **before** bumping the version and tagging a release.
+
 ### 2026-06-24 — Post-review hardening of folder management (v0.1.24)
 Ran a verified 4-lens adversarial review of the v0.1.23 diff (Graph contract,
 frontend, wiring/layering, edge cases; every finding independently refuted-or-
@@ -860,7 +899,7 @@ pending (needs a signed-in window).
 | — | Quick wins — search, drafts, follow-up flags, cached folder sidebar, keyboard shortcuts | ✅ built (v0.1.11); live run pending |
 | — | Compose polish — resizable/maximizable window, sanitized rich-HTML paste, inline images (cid) | ✅ built (v0.1.12); live run pending |
 | — | Message list: Outlook-style date sections + quick filters (All/Unread/Flagged) + group-by-date toggle | ✅ built (v0.1.19); frontend-only |
-| — | Calendar tab (read agenda + accept/decline; `Calendars.ReadWrite`) | ⬜ backlog (roadmap big-bet, v0.3.0) |
+| — | Calendar tab (7-day agenda + create/RSVP/delete; `Calendars.ReadWrite`) | ✅ BUILT on main (CalendarProvider→Graph calendarView, multi-view nav); compile-verified + 2 adversarial-review passes; **live test pending before version bump/release** |
 | — | Contacts / recipient autocomplete (`People.Read`/`Contacts.Read`) | ⬜ backlog (roadmap v0.2.0) |
 | — | Generic IMAP/SMTP backend + Mailspring-style setup | 🟡 BUILT on branch `feature/imap-accounts` (CI-green); parked off main/releases pending a live app-password test |
 

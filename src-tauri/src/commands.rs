@@ -9,20 +9,23 @@ use tauri::{Manager, State};
 use crate::accounts::{AccountManager, AccountSummary, ManagedAccount};
 use crate::settings::{self, SettingsState};
 use wattmail_application::{
-    cached_folders as app_cached_folders, compose_forward, compose_reply,
-    create_folder as app_create_folder, delete_folder as app_delete_folder,
+    cached_folders as app_cached_folders, calendar_view as app_calendar_view, compose_forward,
+    compose_reply, create_event as app_create_event, create_folder as app_create_folder,
+    delete_event as app_delete_event, delete_folder as app_delete_folder,
     delete_message as app_delete_message, download_attachment,
     folder_from_cache as app_folder_from_cache, list_attachments, list_folders as app_list_folders,
     load_draft as app_load_draft, load_older as app_load_older, move_message as app_move_message,
-    read_headers, read_message, rename_folder as app_rename_folder, save_draft as app_save_draft,
+    read_headers, read_message, rename_folder as app_rename_folder,
+    respond_to_event as app_respond_to_event, save_draft as app_save_draft,
     search_messages as app_search_messages, send_draft as app_send_draft,
     send_message as app_send_message, set_flag as app_set_flag, set_read as app_set_read,
     sync_folder as app_sync_folder,
 };
 use wattmail_domain::{
-    Folder, MailProvider, MessageRule, MessageSummary, OutgoingAttachment, OutgoingMessage,
+    CalendarProvider, EventDateTime, Folder, InviteResponse, MailProvider, MessageRule,
+    MessageSummary, NewEvent, OutgoingAttachment, OutgoingMessage,
 };
-use wattmail_infrastructure::{build_mail_provider, ProviderKind};
+use wattmail_infrastructure::{build_calendar_provider, build_mail_provider, ProviderKind};
 
 /// Resolve the active account and a mail provider authenticated for it — the
 /// common preamble for every command that talks to the server. The provider is
@@ -38,6 +41,23 @@ async fn active_provider(
         .await
         .map_err(|e| e.to_string())?;
     let provider = build_mail_provider(account.record.provider, token);
+    Ok((account, provider))
+}
+
+/// Resolve the active account and a *calendar* provider for it. Errors when the
+/// active account's provider has no calendar backend (e.g. Gmail), so calendar
+/// commands degrade with a clear message instead of a generic failure.
+async fn active_calendar_provider(
+    accounts: &AccountManager,
+) -> Result<(Arc<ManagedAccount>, Box<dyn CalendarProvider>), String> {
+    let account = accounts.active()?;
+    let token = account
+        .auth
+        .access_token()
+        .await
+        .map_err(|e| e.to_string())?;
+    let provider = build_calendar_provider(account.record.provider, token)
+        .ok_or_else(|| "This account does not support calendar.".to_string())?;
     Ok((account, provider))
 }
 
@@ -838,6 +858,178 @@ pub async fn delete_message_rule(
     let (_account, provider) = active_provider(&accounts).await?;
     provider
         .delete_message_rule(&id)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+// ---- Calendar ----
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AttendeeDto {
+    pub name: String,
+    pub email: String,
+    /// Response tag: none | organizer | tentativelyAccepted | accepted | declined
+    /// | notResponded.
+    pub status: String,
+    pub is_required: bool,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CalendarEventDto {
+    pub id: String,
+    pub subject: String,
+    /// Local wall-clock `YYYY-MM-DDTHH:MM:SS` in `start_zone` — parse as local.
+    pub start: String,
+    pub end: String,
+    pub start_zone: String,
+    pub end_zone: String,
+    pub is_all_day: bool,
+    pub location: String,
+    pub organizer_name: String,
+    pub organizer_email: String,
+    pub attendees: Vec<AttendeeDto>,
+    pub body_html: String,
+    pub is_cancelled: bool,
+    pub is_recurring: bool,
+    pub online_meeting_url: Option<String>,
+    /// The signed-in user's own response tag (same vocabulary as attendee status).
+    pub response_status: String,
+    pub web_link: Option<String>,
+    pub is_organizer: bool,
+}
+
+fn calendar_event_dto(e: wattmail_domain::CalendarEvent) -> CalendarEventDto {
+    CalendarEventDto {
+        id: e.id,
+        subject: e.subject,
+        start: e.start.date_time,
+        end: e.end.date_time,
+        start_zone: e.start.time_zone,
+        end_zone: e.end.time_zone,
+        is_all_day: e.is_all_day,
+        location: e.location,
+        organizer_name: e.organizer_name,
+        organizer_email: e.organizer_email,
+        attendees: e
+            .attendees
+            .into_iter()
+            .map(|a| AttendeeDto {
+                name: a.name,
+                email: a.email,
+                status: a.status.as_str().to_string(),
+                is_required: a.is_required,
+            })
+            .collect(),
+        body_html: e.body_html,
+        is_cancelled: e.is_cancelled,
+        is_recurring: e.is_recurring,
+        online_meeting_url: e.online_meeting_url,
+        response_status: e.response_status.as_str().to_string(),
+        web_link: e.web_link,
+        is_organizer: e.is_organizer,
+    }
+}
+
+/// Whether the active account's provider has a calendar (so the UI can hide the
+/// Calendar tab for mail-only accounts). False when nothing is signed in.
+#[tauri::command]
+pub fn account_supports_calendar(accounts: State<'_, AccountManager>) -> bool {
+    accounts
+        .active()
+        .map(|a| a.record.provider.supports_calendar())
+        .unwrap_or(false)
+}
+
+/// Fetch the recurrence-expanded agenda for `[start, end)`, rendered in
+/// `time_zone`. `start`/`end` are absolute ISO-8601 instants (offset/`Z`)
+/// bounding the window; `time_zone` (IANA) only governs how the returned events'
+/// wall-clock times are expressed.
+#[tauri::command]
+pub async fn calendar_view(
+    accounts: State<'_, AccountManager>,
+    start: String,
+    end: String,
+    time_zone: String,
+) -> Result<Vec<CalendarEventDto>, String> {
+    let (_account, provider) = active_calendar_provider(&accounts).await?;
+    let events = app_calendar_view(&*provider, &start, &end, &time_zone)
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(events.into_iter().map(calendar_event_dto).collect())
+}
+
+/// A new event to create, from the compose form. Times are local wall-clock ISO
+/// strings interpreted in `time_zone`.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NewEventDto {
+    pub subject: String,
+    pub start: String,
+    pub end: String,
+    pub is_all_day: bool,
+    pub location: String,
+    pub body_html: String,
+    pub attendees: Vec<String>,
+}
+
+/// Create an event on the default calendar; returns the created event.
+#[tauri::command]
+pub async fn create_event(
+    accounts: State<'_, AccountManager>,
+    event: NewEventDto,
+    time_zone: String,
+) -> Result<CalendarEventDto, String> {
+    let (_account, provider) = active_calendar_provider(&accounts).await?;
+    let new_event = NewEvent {
+        subject: event.subject,
+        start: EventDateTime {
+            date_time: event.start,
+            time_zone: time_zone.clone(),
+        },
+        end: EventDateTime {
+            date_time: event.end,
+            time_zone: time_zone.clone(),
+        },
+        is_all_day: event.is_all_day,
+        location: event.location,
+        body_html: event.body_html,
+        attendees: event.attendees,
+    };
+    let created = app_create_event(&*provider, &new_event, &time_zone)
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(calendar_event_dto(created))
+}
+
+/// Reply to a meeting invitation. `response` is `accept` | `tentative` | `decline`.
+#[tauri::command]
+pub async fn respond_to_event(
+    accounts: State<'_, AccountManager>,
+    id: String,
+    response: String,
+    comment: Option<String>,
+    send_response: bool,
+) -> Result<(), String> {
+    let reply = match response.as_str() {
+        "accept" => InviteResponse::Accept,
+        "tentative" => InviteResponse::TentativelyAccept,
+        "decline" => InviteResponse::Decline,
+        other => return Err(format!("unknown response: {other}")),
+    };
+    let (_account, provider) = active_calendar_provider(&accounts).await?;
+    let comment = comment.filter(|c| !c.trim().is_empty());
+    app_respond_to_event(&*provider, &id, reply, comment.as_deref(), send_response)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Delete an event (the UI offers this only for events the user organizes).
+#[tauri::command]
+pub async fn delete_event(accounts: State<'_, AccountManager>, id: String) -> Result<(), String> {
+    let (_account, provider) = active_calendar_provider(&accounts).await?;
+    app_delete_event(&*provider, &id)
         .await
         .map_err(|e| e.to_string())
 }

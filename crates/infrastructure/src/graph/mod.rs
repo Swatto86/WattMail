@@ -1,4 +1,7 @@
-//! Microsoft Graph implementation of the domain [`MailProvider`] contract.
+//! Microsoft Graph implementation of the domain [`MailProvider`] (and
+//! [`wattmail_domain::CalendarProvider`], in [`calendar`]) contracts.
+
+mod calendar;
 
 use std::collections::HashSet;
 use std::sync::LazyLock;
@@ -11,7 +14,7 @@ use wattmail_domain::{
     MessageSummary, OutgoingAttachment, OutgoingMessage, SyncBatch, SyncToken, UserProfile,
 };
 
-const GRAPH_BASE: &str = "https://graph.microsoft.com/v1.0";
+pub(super) const GRAPH_BASE: &str = "https://graph.microsoft.com/v1.0";
 
 /// A Microsoft Graph mail backend, authenticated with a bearer access token.
 pub struct GraphClient {
@@ -25,6 +28,17 @@ impl GraphClient {
             http: reqwest::Client::new(),
             access_token: access_token.into(),
         }
+    }
+
+    /// The shared HTTP client, for sibling modules (e.g. [`calendar`]) that build
+    /// their own requests (custom headers like `Prefer`).
+    pub(super) fn http(&self) -> &reqwest::Client {
+        &self.http
+    }
+
+    /// The bearer access token, for sibling modules building their own requests.
+    pub(super) fn token(&self) -> &str {
+        &self.access_token
     }
 
     async fn get(&self, url: &str) -> Result<reqwest::Response, MailError> {
@@ -802,8 +816,8 @@ fn flag_is_flagged(flag: Option<&GraphFlag>) -> bool {
 
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct GraphRecipient {
-    email_address: GraphEmailAddress,
+pub(super) struct GraphRecipient {
+    pub(super) email_address: GraphEmailAddress,
 }
 
 #[derive(serde::Deserialize)]
@@ -896,7 +910,9 @@ impl DeltaItem {
 /// Map a Graph response to an error on non-success (401 → `NotAuthenticated`,
 /// other failures → `Api`). Returns the response unchanged on success, for
 /// callers that go on to read the body.
-async fn check_status(response: reqwest::Response) -> Result<reqwest::Response, MailError> {
+pub(super) async fn check_status(
+    response: reqwest::Response,
+) -> Result<reqwest::Response, MailError> {
     if response.status() == reqwest::StatusCode::UNAUTHORIZED {
         return Err(MailError::NotAuthenticated);
     }
@@ -1132,7 +1148,7 @@ async fn fetch_image_data_url(client: &reqwest::Client, url: &str) -> Option<Str
 }
 
 /// Format a Graph recipient as `Name <addr>`, `Name`, or `addr`.
-fn format_recipient(recipient: Option<GraphRecipient>) -> String {
+pub(super) fn format_recipient(recipient: Option<GraphRecipient>) -> String {
     recipient
         .map(|r| match (r.email_address.name, r.email_address.address) {
             (Some(name), Some(addr)) => format!("{name} <{addr}>"),
@@ -1145,9 +1161,9 @@ fn format_recipient(recipient: Option<GraphRecipient>) -> String {
 
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct GraphEmailAddress {
-    name: Option<String>,
-    address: Option<String>,
+pub(super) struct GraphEmailAddress {
+    pub(super) name: Option<String>,
+    pub(super) address: Option<String>,
 }
 
 // ---- Message rules (Graph messageRule) ----

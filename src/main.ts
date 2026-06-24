@@ -12,6 +12,7 @@ import {
   isEnabled as isAutostartEnabled,
 } from "@tauri-apps/plugin-autostart";
 import { isPermissionGranted, requestPermission, sendNotification } from "@tauri-apps/plugin-notification";
+import { initCalendar, loadCalendar, resetCalendar } from "./calendar";
 import "./styles.css";
 
 // ---- Backend DTOs (mirror src-tauri/src/commands.rs) ----
@@ -336,12 +337,16 @@ appRoot.innerHTML = /* html */ `
         <span class="brand-name">WattMail</span>
         <span id="brand-version" class="brand-version"></span>
       </div>
+      <div id="view-nav" class="view-nav hidden" role="group" aria-label="Switch view">
+        <button type="button" data-view="mail" class="active">Mail</button>
+        <button type="button" data-view="calendar" id="view-calendar-btn">Calendar</button>
+      </div>
       <button id="account" class="account-switch text-xs opacity-70 flex-1 hidden" title="Switch account" type="button"></button>
-      <div class="toolbar-search">
+      <div class="toolbar-search mail-only">
         <input id="search" class="input input-bordered input-xs" type="search" placeholder="Search mail…" autocomplete="off" />
         <button id="search-clear" class="search-clear hidden" type="button" title="Clear search">&times;</button>
       </div>
-      <div id="filter-seg" class="filter-seg" role="group" aria-label="Filter messages">
+      <div id="filter-seg" class="filter-seg mail-only" role="group" aria-label="Filter messages">
         <button type="button" data-filter="all" title="Show all">All</button>
         <button type="button" data-filter="unread" title="Unread only">Unread</button>
         <button type="button" data-filter="flagged" title="Flagged only">Flagged</button>
@@ -349,16 +354,16 @@ appRoot.innerHTML = /* html */ `
           <svg class="seg-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg>
         </button>
       </div>
-      <select id="sort" class="select select-bordered select-xs" title="Sort by">
+      <select id="sort" class="select select-bordered select-xs mail-only" title="Sort by">
         <option value="dateDesc">Newest</option>
         <option value="dateAsc">Oldest</option>
         <option value="sender">Sender</option>
         <option value="subject">Subject</option>
         <option value="unread">Unread first</option>
       </select>
-      <button id="group-toggle" class="btn btn-xs" type="button" title="Group by date">&#9776;</button>
-      <button id="compose" class="btn btn-xs btn-primary" title="Compose">&#9993; Compose</button>
-      <button id="refresh" class="btn btn-xs" title="Refresh">&#8635; Refresh</button>
+      <button id="group-toggle" class="btn btn-xs mail-only" type="button" title="Group by date">&#9776;</button>
+      <button id="compose" class="btn btn-xs btn-primary mail-only" title="Compose">&#9993; Compose</button>
+      <button id="refresh" class="btn btn-xs mail-only" title="Refresh">&#8635; Refresh</button>
       <button id="gear" class="btn btn-xs" title="Settings">&#9881;</button>
     </div>
 
@@ -374,6 +379,8 @@ appRoot.innerHTML = /* html */ `
       <div id="splitter" class="splitter" title="Drag to resize"></div>
       <div id="reader" class="flex-1 flex flex-col min-w-0"></div>
     </div>
+
+    <div id="calendar" class="calendar-view flex flex-col flex-1 min-h-0 hidden"></div>
 
     <div id="status" class="text-xs px-3 py-1 border-t border-base-300 bg-base-200 opacity-80"></div>
   </div>
@@ -547,6 +554,9 @@ const signinView = document.querySelector<HTMLDivElement>("#signin")!;
 const signinBtn = document.querySelector<HTMLButtonElement>("#signin-btn")!;
 const signinMsg = document.querySelector<HTMLDivElement>("#signin-msg")!;
 const mainView = document.querySelector<HTMLDivElement>("#main")!;
+const calendarHost = document.querySelector<HTMLDivElement>("#calendar")!;
+const viewNav = document.querySelector<HTMLDivElement>("#view-nav")!;
+const viewCalendarBtn = document.querySelector<HTMLButtonElement>("#view-calendar-btn")!;
 const foldersEl = document.querySelector<HTMLDivElement>("#folders")!;
 const listEl = document.querySelector<HTMLDivElement>("#list")!;
 const splitter = document.querySelector<HTMLDivElement>("#splitter")!;
@@ -625,13 +635,64 @@ let accountList: AccountSummary[] = [];
 // Reconciled against the rendered rows on every list re-render (see syncCursor).
 let cursorId: string | null = null;
 
+// Primary view (Mail vs Calendar) + sign-in / capability state. reflectView()
+// derives all toolbar/view visibility from these, so showSignedIn (called on
+// every cache refresh) stays a cheap, idempotent class toggle.
+type AppMode = "mail" | "calendar";
+let appMode: AppMode = "mail";
+let signedIn = false;
+let calendarSupported = false;
+let calendarInited = false;
+
+// Build the calendar module's DOM on first use only.
+function ensureCalendarInit(): void {
+  if (calendarInited) return;
+  initCalendar(calendarHost);
+  calendarInited = true;
+}
+
+// Enforce the current mode's visibility. Idempotent and network-free.
+function reflectView(): void {
+  const showMail = signedIn && appMode === "mail";
+  const showCal = signedIn && appMode === "calendar";
+  mainView.classList.toggle("hidden", !showMail);
+  calendarHost.classList.toggle("hidden", !showCal);
+  document
+    .querySelectorAll<HTMLElement>(".mail-only")
+    .forEach((el) => el.classList.toggle("hidden", !showMail));
+  viewNav
+    .querySelectorAll<HTMLButtonElement>("button[data-view]")
+    .forEach((b) => b.classList.toggle("active", b.dataset.view === appMode));
+  // Hide the Calendar tab for mail-only accounts (e.g. Gmail).
+  viewCalendarBtn.classList.toggle("hidden", !calendarSupported);
+}
+
+function switchView(mode: AppMode): void {
+  if (mode === appMode) return;
+  if (mode === "calendar" && !calendarSupported) return;
+  appMode = mode;
+  reflectView();
+  if (mode === "calendar") {
+    ensureCalendarInit();
+    void loadCalendar();
+  }
+}
+
+viewNav.addEventListener("click", (e) => {
+  const btn = (e.target as HTMLElement).closest<HTMLButtonElement>("button[data-view]");
+  if (btn) switchView(btn.dataset.view as AppMode);
+});
+
 function showSignedOut(): void {
+  signedIn = false;
+  appMode = "mail";
+  calendarSupported = false;
+  if (calendarInited) resetCalendar();
   signinView.classList.remove("hidden");
-  mainView.classList.add("hidden");
-  refreshBtn.classList.add("hidden");
-  composeBtn.classList.add("hidden");
+  viewNav.classList.add("hidden");
   accountEl.classList.add("hidden");
   accountEl.textContent = "";
+  reflectView();
   accountEmail = "";
   accountList = [];
   currentFolderId = null;
@@ -646,11 +707,26 @@ function showSignedOut(): void {
   statusEl.textContent = "Not signed in";
 }
 function showSignedIn(): void {
+  signedIn = true;
   signinView.classList.add("hidden");
-  mainView.classList.remove("hidden");
-  refreshBtn.classList.remove("hidden");
-  composeBtn.classList.remove("hidden");
   accountEl.classList.remove("hidden");
+  viewNav.classList.remove("hidden");
+  reflectView();
+}
+
+// Refresh the active account's calendar capability (whether its provider has a
+// calendar backend), updating the tab. If the calendar tab is open but the new
+// account is mail-only, fall back to mail.
+async function refreshCalendarCapability(): Promise<void> {
+  try {
+    calendarSupported = await invoke<boolean>("account_supports_calendar");
+  } catch {
+    calendarSupported = false;
+  }
+  if (!calendarSupported && appMode === "calendar") {
+    appMode = "mail";
+  }
+  reflectView();
 }
 
 function resetReader(): void {
@@ -2201,8 +2277,17 @@ async function loadActiveAccount(): Promise<void> {
   searchInput.value = "";
   setSearchClearVisible(false);
   cursorId = null;
+  // Drop the previous mailbox's agenda window/selection so it can't carry over.
+  if (calendarInited) resetCalendar();
   resetReader();
   showSignedIn();
+  await refreshCalendarCapability();
+  // If the calendar tab is showing (e.g. after switching to a calendar-capable
+  // account), refresh its contents for the new mailbox.
+  if (appMode === "calendar" && calendarSupported) {
+    ensureCalendarInit();
+    void loadCalendar();
+  }
   await loadFolders();
   await refreshFromCache().catch(() => {});
   await syncFolder();
@@ -3657,6 +3742,8 @@ void boot();
 // Pick up new mail in the current folder automatically (quietly, every 60s).
 const AUTO_SYNC_MS = 60_000;
 setInterval(() => {
+  // Only while the mail view is active: no point spending a Graph sync_folder
+  // call + mail-DOM rebuild on a hidden list while the calendar tab is open.
   // Don't clobber displayed search results with a background folder refresh.
-  if (currentFolderId && !searchActive) void syncFolder(true);
+  if (appMode === "mail" && currentFolderId && !searchActive) void syncFolder(true);
 }, AUTO_SYNC_MS);

@@ -4,8 +4,9 @@
 //! composition root.
 
 use wattmail_domain::{
-    Attachment, DraftPrefill, Folder, MailError, MailProvider, MailStore, MessageBody,
-    MessageChange, MessageHeader, MessageSummary, OutgoingMessage, SyncToken, UserProfile,
+    Attachment, CalendarEvent, CalendarProvider, DraftPrefill, Folder, InviteResponse, MailError,
+    MailProvider, MailStore, MessageBody, MessageChange, MessageHeader, MessageSummary, NewEvent,
+    OutgoingMessage, SyncToken, UserProfile,
 };
 
 const ACCOUNT_NAME_KEY: &str = "account.displayName";
@@ -314,6 +315,49 @@ pub async fn download_attachment(
     attachment_id: &str,
 ) -> Result<Vec<u8>, MailError> {
     provider.attachment_bytes(message_id, attachment_id).await
+}
+
+// ---- Calendar use-cases ----
+//
+// Thin orchestration over the [`CalendarProvider`] contract, mirroring the mail
+// pass-throughs above. Calendar reads are live (no local cache in this MVP).
+
+/// Fetch the recurrence-expanded agenda for `[start, end)`, rendered in
+/// `time_zone` (an IANA zone). `start`/`end` are absolute ISO-8601 instants.
+pub async fn calendar_view(
+    provider: &dyn CalendarProvider,
+    start: &str,
+    end: &str,
+    time_zone: &str,
+) -> Result<Vec<CalendarEvent>, MailError> {
+    provider.calendar_view(start, end, time_zone).await
+}
+
+/// Create an event on the default calendar, interpreting its times in `time_zone`.
+pub async fn create_event(
+    provider: &dyn CalendarProvider,
+    event: &NewEvent,
+    time_zone: &str,
+) -> Result<CalendarEvent, MailError> {
+    provider.create_event(event, time_zone).await
+}
+
+/// Reply to a meeting invitation (accept / tentative / decline).
+pub async fn respond_to_event(
+    provider: &dyn CalendarProvider,
+    id: &str,
+    response: InviteResponse,
+    comment: Option<&str>,
+    send_response: bool,
+) -> Result<(), MailError> {
+    provider
+        .respond_to_event(id, response, comment, send_response)
+        .await
+}
+
+/// Delete an event (offer only for events the user organizes).
+pub async fn delete_event(provider: &dyn CalendarProvider, id: &str) -> Result<(), MailError> {
+    provider.delete_event(id).await
 }
 
 /// A pre-filled compose form (recipients, subject, quoted body) for a reply or forward.
