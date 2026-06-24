@@ -87,6 +87,40 @@ Entra app registration (public, not secret):
 
 ## Progress log
 
+### 2026-06-24 — Post-review hardening of folder management (v0.1.24)
+Ran a verified 4-lens adversarial review of the v0.1.23 diff (Graph contract,
+frontend, wiring/layering, edge cases; every finding independently refuted-or-
+confirmed). **Graph contract came back clean** — endpoints/payloads correct and
+`Mail.ReadWrite` does authorize folder create/rename/delete (no scope gap). 6 of 8
+findings confirmed; the two real footguns + two cheap polish items fixed here:
+
+- **Keyboard shortcuts no longer fire behind the folder menu (was: medium).** The
+  global shortcut handler suspended itself only for the message menu
+  (`!ctxMenu…hidden`); the folder menu was missing from the guard, so with it open
+  `#` would delete the cursored message, `c` open compose, etc. Extended the guard to
+  cover `folderMenu` too (main.ts).
+- **Well-known folders can't be renamed/deleted from the menu (was: medium).** Graph
+  *allows* renaming Inbox/Drafts/Sent via `displayName`, which would silently break
+  the app's name-based detection (tray unread count, outgoing-column rendering, draft
+  resume). `showFolderMenu` now withholds Rename/Delete for a `PROTECTED_FOLDER_NAMES`
+  set (inbox/drafts/sent items/sent/outbox/deleted items/junk email/archive/
+  conversation history); New folder / New subfolder still offered (main.ts).
+- **Deleted folder's cached messages are purged (was: low leak).** New
+  `MailStore::forget_folder(folder_id)` (`DELETE FROM messages WHERE folder_id`),
+  called from the `delete_folder` use-case after the provider delete succeeds —
+  mirrors the provider-then-store write-through of `delete_message`/`move_message`.
+- **Duplicate-name error is now readable (was: low UX).** A Graph 409 maps to
+  `A folder named "X" already exists here.` instead of dumping raw JSON (main.ts).
+- **Accepted (low, self-healing), documented not fixed:** a deleted/renamed folder can
+  momentarily reappear from cache *only if* the immediate post-mutation `list_folders`
+  refresh also fails (rare; replace-all write-through heals it on the next refresh);
+  the deleted folder's `delta:{id}` token row is left in `sync_state` (inert — folder
+  ids are immutable, never re-read); descendant folders of a deleted parent aren't
+  cache-purged. The Gmail "offers unsupported folder ops" finding was **refuted** —
+  unreachable (Gmail gated off main).
+- **Verified:** clippy `--all-targets -D warnings`, fmt, `cargo test --workspace`
+  (19 infra + 2 desktop-lib), `npm run build` all clean. Still not exercised live.
+
 ### 2026-06-24 — Right-click folder management: add / rename / delete (v0.1.23)
 The folder sidebar now has a custom right-click context menu for managing folders,
 mirroring the message-row menu pattern exactly (same `.ctx-*` classes — no new CSS).

@@ -193,6 +193,25 @@ function isOutgoingFolder(name: string): boolean {
 function isDraftsFolder(name: string): boolean {
   return name.toLowerCase() === "drafts";
 }
+// Well-known system folders. Rename/Delete are withheld for these: Graph rejects
+// deleting them anyway, and — critically — the app identifies Inbox/Drafts/Sent by
+// displayName (tray unread count, outgoing-column rendering, draft resume), so a
+// rename would silently break that detection. Matched by name to stay consistent
+// with the app's existing English-mailbox special-casing.
+const PROTECTED_FOLDER_NAMES = new Set([
+  "inbox",
+  "drafts",
+  "sent items",
+  "sent",
+  "outbox",
+  "deleted items",
+  "junk email",
+  "archive",
+  "conversation history",
+]);
+function isProtectedFolder(name: string): boolean {
+  return PROTECTED_FOLDER_NAMES.has(name.toLowerCase());
+}
 function currentFolderIsDrafts(): boolean {
   const folder = folders.find((f) => f.id === currentFolderId);
   return !!folder && isDraftsFolder(folder.name);
@@ -3095,12 +3114,17 @@ function showFolderMenu(x: number, y: number, fid: string | null): void {
     { act: "newFolder", label: "New folder…" },
   ];
   if (fid) {
-    items.push(
-      { act: "newSubfolder", label: "New subfolder…" },
-      "sep",
-      { act: "renameFolder", label: "Rename…" },
-      { act: "deleteFolder", label: "Delete folder", danger: true },
-    );
+    items.push({ act: "newSubfolder", label: "New subfolder…" });
+    // Rename/Delete only for non-system folders — renaming Inbox/Drafts/Sent
+    // would silently break the app's name-based folder detection.
+    const target = folders.find((f) => f.id === fid);
+    if (target && !isProtectedFolder(target.name)) {
+      items.push(
+        "sep",
+        { act: "renameFolder", label: "Rename…" },
+        { act: "deleteFolder", label: "Delete folder", danger: true },
+      );
+    }
   }
   folderMenu.innerHTML = items
     .map((it) =>
@@ -3155,6 +3179,14 @@ document.addEventListener("keydown", (e) => {
 });
 window.addEventListener("blur", hideFolderMenu);
 
+// Turn a folder-operation error into a readable status line. Graph rejects a
+// duplicate name with a 409 whose raw body would otherwise dump JSON at the user.
+function folderErrorText(action: string, name: string, e: unknown): string {
+  const raw = String(e);
+  if (/already exist/i.test(raw)) return `A folder named "${name}" already exists here.`;
+  return `Could not ${action} folder: ${raw}`;
+}
+
 async function createFolder(parentId: string | null): Promise<void> {
   const name = window.prompt(parentId ? "New subfolder name:" : "New folder name:");
   if (name === null) return;
@@ -3164,7 +3196,7 @@ async function createFolder(parentId: string | null): Promise<void> {
     await invoke("create_folder", { name: trimmed, parentId });
     await loadFolders();
   } catch (e) {
-    statusEl.textContent = `Could not create folder: ${e}`;
+    statusEl.textContent = folderErrorText("create", trimmed, e);
   }
 }
 
@@ -3178,7 +3210,7 @@ async function renameFolder(id: string): Promise<void> {
     await invoke("rename_folder", { id, name: trimmed });
     await loadFolders();
   } catch (e) {
-    statusEl.textContent = `Could not rename folder: ${e}`;
+    statusEl.textContent = folderErrorText("rename", trimmed, e);
   }
 }
 
@@ -3468,9 +3500,9 @@ document.addEventListener("keydown", (e) => {
   if (mainView.classList.contains("hidden")) return;
   if (e.ctrlKey || e.metaKey || e.altKey) return;
   if (isTypingTarget() || aModalIsOpen()) return;
-  // The context menu owns the keyboard while open (its own Escape closes it);
-  // don't fire list actions behind it.
-  if (!ctxMenu.classList.contains("hidden")) return;
+  // A context menu owns the keyboard while open (its own Escape closes it);
+  // don't fire list actions behind it. Covers both the message and folder menus.
+  if (!ctxMenu.classList.contains("hidden") || !folderMenu.classList.contains("hidden")) return;
 
   // "/" focuses search regardless of the cursor; it's the one binding that
   // deliberately moves focus into a text field.

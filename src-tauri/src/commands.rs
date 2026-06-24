@@ -395,8 +395,8 @@ pub async fn rename_folder(
 /// folders (Inbox, Sent Items, …); that error is surfaced to the caller.
 #[tauri::command]
 pub async fn delete_folder(accounts: State<'_, AccountManager>, id: String) -> Result<(), String> {
-    let (_account, provider) = active_provider(&accounts).await?;
-    app_delete_folder(&*provider, &id)
+    let (account, provider) = active_provider(&accounts).await?;
+    app_delete_folder(&*provider, &account.store, &id)
         .await
         .map_err(|e| e.to_string())
 }

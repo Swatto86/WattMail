@@ -80,9 +80,17 @@ pub async fn rename_folder(
     provider.rename_folder(id, name).await
 }
 
-/// Delete a mail folder and its contents.
-pub async fn delete_folder(provider: &dyn MailProvider, id: &str) -> Result<(), MailError> {
-    provider.delete_folder(id).await
+/// Delete a mail folder and its contents, then drop the folder's cached messages
+/// so they don't linger orphaned (the sidebar is refreshed separately via
+/// [`list_folders`]). Mirrors the provider-then-store write-through of
+/// [`delete_message`] / [`move_message`].
+pub async fn delete_folder(
+    provider: &dyn MailProvider,
+    store: &dyn MailStore,
+    id: &str,
+) -> Result<(), MailError> {
+    provider.delete_folder(id).await?;
+    store.forget_folder(id).await
 }
 
 /// Fetch a single message with its sanitized body.

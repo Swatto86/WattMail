@@ -222,6 +222,15 @@ impl MailStore for SqliteStore {
         .await
     }
 
+    async fn forget_folder(&self, folder_id: &str) -> Result<(), MailError> {
+        let folder_id = folder_id.to_string();
+        self.run(move |conn| {
+            conn.execute("DELETE FROM messages WHERE folder_id = ?1", [folder_id])?;
+            Ok(())
+        })
+        .await
+    }
+
     async fn recent(&self, folder_id: &str, top: u32) -> Result<Vec<MessageSummary>, MailError> {
         let folder_id = folder_id.to_string();
         let mut rows = self

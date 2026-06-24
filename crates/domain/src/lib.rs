@@ -398,6 +398,9 @@ pub trait MailStore: Send + Sync {
         messages: Vec<MessageSummary>,
     ) -> Result<(), MailError>;
     async fn remove_message(&self, id: &str) -> Result<(), MailError>;
+    /// Drop all cached messages for a folder (used when the folder itself is
+    /// deleted, so its rows don't linger orphaned in the cache).
+    async fn forget_folder(&self, folder_id: &str) -> Result<(), MailError>;
     /// The most recent `top` messages in a folder, newest first.
     async fn recent(&self, folder_id: &str, top: u32) -> Result<Vec<MessageSummary>, MailError>;
     /// The oldest cached received timestamp in a folder (ignoring rows with no
