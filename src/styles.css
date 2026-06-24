@@ -182,6 +182,17 @@ body,
   line-height: 1;
   opacity: 1;
 }
+/* Attachment indicator — a paperclip sat with the date/flag cluster. Inherits the
+   dimmed meta colour (currentColor) so it reads as a subtle glance-able marker. */
+.msg-attach {
+  display: inline-flex;
+  align-items: center;
+  line-height: 1;
+}
+.msg-attach-icon {
+  width: 12px;
+  height: 12px;
+}
 .msg-subject {
   font-size: 13px;
   overflow: hidden;
@@ -241,6 +252,14 @@ body,
 .filter-seg button.active {
   color: oklch(var(--pc));
   background: oklch(var(--p));
+}
+/* Paperclip icon in the "with attachments" filter button — sized to match the
+   text segments and centred; stroke follows the button's currentColor (so it
+   turns the active colour when selected). */
+.filter-seg .seg-icon {
+  width: 13px;
+  height: 13px;
+  vertical-align: middle;
 }
 /* Group-by-date toggle pressed state. */
 #group-toggle.active {

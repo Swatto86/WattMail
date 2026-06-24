@@ -1,6 +1,6 @@
 [package]
 name = "wattmail-desktop"
-version = "0.1.21"
+version = "0.1.22"
 description = "WattMail desktop client"
 edition.workspace = true
 license.workspace = true

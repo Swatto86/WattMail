@@ -37,6 +37,7 @@ interface Message {
   preview: string;
   isRead: boolean;
   isFlagged: boolean;
+  hasAttachments: boolean;
 }
 interface Inbox {
   account: Account | null;
@@ -225,11 +226,11 @@ function sortMessages(messages: Message[]): Message[] {
 }
 
 // ---- Quick filters (client-side, over the loaded window) ----
-type FilterMode = "all" | "unread" | "flagged";
+type FilterMode = "all" | "unread" | "flagged" | "attachments";
 const FILTER_KEY = "wattmail.filter";
 function loadFilterMode(): FilterMode {
   const v = localStorage.getItem(FILTER_KEY);
-  return v === "unread" || v === "flagged" ? v : "all";
+  return v === "unread" || v === "flagged" || v === "attachments" ? v : "all";
 }
 let filterMode: FilterMode = loadFilterMode();
 
@@ -239,6 +240,8 @@ function applyFilter(messages: Message[]): Message[] {
       return messages.filter((m) => !m.isRead);
     case "flagged":
       return messages.filter((m) => m.isFlagged);
+    case "attachments":
+      return messages.filter((m) => m.hasAttachments);
     default:
       return messages;
   }
@@ -323,6 +326,9 @@ appRoot.innerHTML = /* html */ `
         <button type="button" data-filter="all" title="Show all">All</button>
         <button type="button" data-filter="unread" title="Unread only">Unread</button>
         <button type="button" data-filter="flagged" title="Flagged only">Flagged</button>
+        <button type="button" data-filter="attachments" title="With attachments only" aria-label="With attachments only">
+          <svg class="seg-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg>
+        </button>
       </div>
       <select id="sort" class="select select-bordered select-xs" title="Sort by">
         <option value="dateDesc">Newest</option>
@@ -642,6 +648,9 @@ function messageRowHtml(m: Message, showRecipient: boolean): string {
   const flagged = m.isFlagged ? " flagged" : "";
   const dot = m.isRead ? "" : `<span class="dot"></span>`;
   const flag = m.isFlagged ? `<span class="msg-flag" title="Flagged for follow-up">&#9873;</span>` : "";
+  const attach = m.hasAttachments
+    ? `<span class="msg-attach" title="Has attachments" aria-label="Has attachments"><svg class="msg-attach-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg></span>`
+    : "";
   const who = showRecipient ? `To: ${esc(m.to)}` : esc(senderName(m.from));
   const whoTitle = showRecipient ? esc(m.to) : esc(m.from);
   return `
@@ -650,7 +659,7 @@ function messageRowHtml(m: Message, showRecipient: boolean): string {
           <div class="msg-main">
             <div class="msg-top">
               <span class="msg-from" title="${whoTitle}">${who}</span>
-              <span class="msg-date">${flag}${esc(fmtDate(m.received))}</span>
+              <span class="msg-date">${attach}${flag}${esc(fmtDate(m.received))}</span>
             </div>
             <div class="msg-subject" title="${esc(m.subject)}">${esc(m.subject)}</div>
             <div class="msg-preview">${esc(m.preview)}</div>

@@ -3,9 +3,9 @@
 //! `rusqlite` is synchronous, so each operation runs on a blocking thread
 //! (`spawn_blocking`). Content columns (subject, sender, recipients, preview) and
 //! all `sync_state` values are encrypted at rest (see [`crate::crypto`]); the
-//! opaque message id, `folder_id`, `received`, and `is_read` stay plaintext so
-//! the cache can still sort and filter. Encrypt/decrypt happen around the SQL,
-//! off the blocking thread.
+//! opaque message id, `folder_id`, `received`, and the boolean flags (`is_read`,
+//! `is_flagged`, `has_attachments`) stay plaintext so the cache can still sort and
+//! filter. Encrypt/decrypt happen around the SQL, off the blocking thread.
 
 use std::path::Path;
 use std::sync::{Arc, Mutex};
@@ -20,23 +20,26 @@ use crate::crypto::FieldCipher;
 /// (re-derivable from the server), so a mismatch drops and rebuilds — which also
 /// re-encrypts everything under the current key.
 ///
-/// v6 carries no schema change: it forces a one-time rebuild to discard rows
-/// corrupted by the pre-fix delta sync, which overwrote cached message content
-/// with `(no subject)`/`(unknown)`/empty-date placeholders when Graph reported a
-/// flags-only change. A full re-enumeration restores the real content.
-const SCHEMA_VERSION: i64 = 6;
+/// v6 forced a one-time rebuild to discard rows corrupted by the pre-fix delta
+/// sync, which overwrote cached message content with `(no subject)`/`(unknown)`/
+/// empty-date placeholders when Graph reported a flags-only change.
+///
+/// v7 adds the `has_attachments` column (the message-list attachment indicator);
+/// the rebuild repopulates it from the next sync.
+const SCHEMA_VERSION: i64 = 7;
 
 const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS messages (
-    id         TEXT PRIMARY KEY,
-    folder_id  TEXT NOT NULL,
-    subject    TEXT NOT NULL,
-    sender     TEXT NOT NULL,
-    recipients TEXT NOT NULL,
-    received   TEXT NOT NULL,
-    preview    TEXT NOT NULL,
-    is_read    INTEGER NOT NULL,
-    is_flagged INTEGER NOT NULL DEFAULT 0
+    id              TEXT PRIMARY KEY,
+    folder_id       TEXT NOT NULL,
+    subject         TEXT NOT NULL,
+    sender          TEXT NOT NULL,
+    recipients      TEXT NOT NULL,
+    received        TEXT NOT NULL,
+    preview         TEXT NOT NULL,
+    is_read         INTEGER NOT NULL,
+    is_flagged      INTEGER NOT NULL DEFAULT 0,
+    has_attachments INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_messages_folder_received ON messages(folder_id, received DESC);
 CREATE TABLE IF NOT EXISTS sync_state (
@@ -69,6 +72,7 @@ struct EncryptedRow {
     preview: String,
     is_read: i64,
     is_flagged: i64,
+    has_attachments: i64,
 }
 
 /// An encrypted folder row, ready to insert (built off the blocking thread).
@@ -171,22 +175,24 @@ impl MailStore for SqliteStore {
                 preview: self.cipher.encrypt(&m.preview),
                 is_read: i64::from(m.is_read),
                 is_flagged: i64::from(m.is_flagged),
+                has_attachments: i64::from(m.has_attachments),
             })
             .collect();
 
         self.run(move |conn| {
             let mut stmt = conn.prepare(
-                "INSERT INTO messages (id, folder_id, subject, sender, recipients, received, preview, is_read, is_flagged)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+                "INSERT INTO messages (id, folder_id, subject, sender, recipients, received, preview, is_read, is_flagged, has_attachments)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
                  ON CONFLICT(id) DO UPDATE SET
-                     folder_id  = excluded.folder_id,
-                     subject    = excluded.subject,
-                     sender     = excluded.sender,
-                     recipients = excluded.recipients,
-                     received   = excluded.received,
-                     preview    = excluded.preview,
-                     is_read    = excluded.is_read,
-                     is_flagged = excluded.is_flagged",
+                     folder_id       = excluded.folder_id,
+                     subject         = excluded.subject,
+                     sender          = excluded.sender,
+                     recipients      = excluded.recipients,
+                     received        = excluded.received,
+                     preview         = excluded.preview,
+                     is_read         = excluded.is_read,
+                     is_flagged      = excluded.is_flagged,
+                     has_attachments = excluded.has_attachments",
             )?;
             for r in &rows {
                 stmt.execute(rusqlite::params![
@@ -199,6 +205,7 @@ impl MailStore for SqliteStore {
                     r.preview,
                     r.is_read,
                     r.is_flagged,
+                    r.has_attachments,
                 ])?;
             }
             Ok(())
@@ -220,7 +227,7 @@ impl MailStore for SqliteStore {
         let mut rows = self
             .run(move |conn| {
                 let mut stmt = conn.prepare(
-                    "SELECT id, subject, sender, recipients, received, preview, is_read, is_flagged
+                    "SELECT id, subject, sender, recipients, received, preview, is_read, is_flagged, has_attachments
                      FROM messages WHERE folder_id = ?1 ORDER BY received DESC LIMIT ?2",
                 )?;
                 let rows = stmt.query_map(rusqlite::params![folder_id, top], |row| {
@@ -233,6 +240,7 @@ impl MailStore for SqliteStore {
                         preview: row.get(5)?, // encrypted
                         is_read: row.get::<_, i64>(6)? != 0,
                         is_flagged: row.get::<_, i64>(7)? != 0,
+                        has_attachments: row.get::<_, i64>(8)? != 0,
                     })
                 })?;
                 rows.collect::<rusqlite::Result<Vec<_>>>()

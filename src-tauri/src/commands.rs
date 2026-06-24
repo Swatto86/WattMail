@@ -58,6 +58,7 @@ pub struct MessageDto {
     pub preview: String,
     pub is_read: bool,
     pub is_flagged: bool,
+    pub has_attachments: bool,
 }
 
 #[derive(Serialize)]
@@ -79,6 +80,7 @@ fn message_dto(m: MessageSummary) -> MessageDto {
         preview: m.preview,
         is_read: m.is_read,
         is_flagged: m.is_flagged,
+        has_attachments: m.has_attachments,
     }
 }
 

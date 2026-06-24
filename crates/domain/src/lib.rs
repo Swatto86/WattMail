@@ -95,6 +95,10 @@ pub struct MessageSummary {
     pub is_read: bool,
     /// True if the message carries an Outlook follow-up flag.
     pub is_flagged: bool,
+    /// True if the message has at least one non-inline attachment (Graph's
+    /// `hasAttachments` already excludes inline images), so the list can show an
+    /// attachment indicator without fetching each message's attachment list.
+    pub has_attachments: bool,
 }
 
 /// A single message with its full, render-ready body.

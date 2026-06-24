@@ -87,6 +87,35 @@ Entra app registration (public, not secret):
 
 ## Progress log
 
+### 2026-06-24 — Attachment indicator + "has attachments" filter (v0.1.22)
+A new quick filter and a per-row paperclip indicator so attachments are visible at
+a glance. Plumbs a `has_attachments` boolean through every layer, mirroring
+`is_flagged` exactly.
+
+- **Signal = Graph `hasAttachments`, verified clean.** Checked live: of the 40
+  newest Inbox messages only 2 reported `hasAttachments=true` — exactly the two with
+  real attachments (a PDF receipt, a CV `.docx`), both non-inline; every newsletter
+  with inline images reported `false`. So Graph's `hasAttachments` excludes inline
+  images (matching the reader's non-inline attachment list), making the indicator
+  accurate, not noisy. No per-message attachment fetch needed.
+- **Plumbing (mirrors `is_flagged`):** `MessageSummary.has_attachments` (domain);
+  `hasAttachments` added to all four Graph `$select` strings (list/search/delta/
+  fetch_older) + `GraphMessage`/`DeltaItem` decode + the delta upsert and
+  `From<GraphMessage>`; cache **schema 6 → 7** (new `has_attachments` column, plaintext
+  for filtering, disposable-rebuild repopulates it); `MessageDto.has_attachments`;
+  frontend `Message.hasAttachments`. A flags-only delta (read/flag toggle) still goes
+  through `FlagsChanged` (column-only update), so it never resets `has_attachments`.
+- **UI:** a paperclip (inline SVG, `currentColor`) sits in the row's date/flag cluster
+  when `hasAttachments`; a 4th segmented-filter button ("with attachments", paperclip
+  icon, `data-filter="attachments"`) joins All/Unread/Flagged — client-side over the
+  loaded window like the others, persisted in `localStorage`, and applies to search
+  results too. Gmail (parked/gated) sets `has_attachments=false` for now (MIME-part
+  detection deferred until it's un-parked).
+- **Verified:** clippy `--all-targets -D warnings`, 19 infra tests, fmt, `npm run build`
+  all clean; Graph `hasAttachments` semantics confirmed read-only against the live
+  mailbox; adversarial multi-lens review of the diff. End-to-end click-through in a
+  running build not yet done.
+
 ### 2026-06-24 — On-demand backfill of older mail (v0.1.21)
 Fixed "Outlook shows far more mail than WattMail." Verified against the live mailbox:
 the Inbox has **10,262** messages server-side but WattMail cached only **64**.

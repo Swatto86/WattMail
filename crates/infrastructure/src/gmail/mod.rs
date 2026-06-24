@@ -677,6 +677,10 @@ fn summary_from_message(message: GmailMessage) -> MessageSummary {
         preview: message.snippet.clone().unwrap_or_default(),
         is_read: !label_ids.iter().any(|l| l == "UNREAD"),
         is_flagged: label_ids.iter().any(|l| l == "STARRED"),
+        // Detecting non-inline attachments means walking the MIME parts (filename
+        // set, not inline); deferred until Gmail is un-parked and live-tested, so
+        // the indicator is simply off for Gmail rather than noisy/unverified.
+        has_attachments: false,
     }
 }
 

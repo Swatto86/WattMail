@@ -128,7 +128,7 @@ impl MailProvider for GraphClient {
         let url = format!(
             "{GRAPH_BASE}/me/messages\
              ?$top={top}\
-             &$select=id,subject,from,toRecipients,receivedDateTime,bodyPreview,isRead,flag\
+             &$select=id,subject,from,toRecipients,receivedDateTime,bodyPreview,isRead,flag,hasAttachments\
              &$orderby=receivedDateTime desc"
         );
         let body: GraphMessages = self
@@ -160,7 +160,7 @@ impl MailProvider for GraphClient {
                 ("$search", search_value.as_str()),
                 (
                     "$select",
-                    "id,subject,from,toRecipients,receivedDateTime,bodyPreview,isRead,flag",
+                    "id,subject,from,toRecipients,receivedDateTime,bodyPreview,isRead,flag,hasAttachments",
                 ),
                 ("$top", &top.to_string()),
             ])
@@ -203,7 +203,7 @@ impl MailProvider for GraphClient {
                 ("$top", top.as_str()),
                 (
                     "$select",
-                    "id,subject,from,toRecipients,receivedDateTime,bodyPreview,isRead,flag",
+                    "id,subject,from,toRecipients,receivedDateTime,bodyPreview,isRead,flag,hasAttachments",
                 ),
             ])
             .send()
@@ -428,6 +428,7 @@ impl MailProvider for GraphClient {
                         preview: item.body_preview.unwrap_or_default(),
                         is_read: item.is_read.unwrap_or(false),
                         is_flagged: flag_is_flagged(item.flag.as_ref()),
+                        has_attachments: item.has_attachments.unwrap_or(false),
                     }));
                 }
             }
@@ -709,6 +710,8 @@ struct GraphMessage {
     body_preview: Option<String>,
     is_read: bool,
     flag: Option<GraphFlag>,
+    #[serde(default)]
+    has_attachments: bool,
 }
 
 /// The `flag` property of a message; `flagStatus` is one of `notFlagged`,
@@ -802,6 +805,7 @@ struct DeltaItem {
     body_preview: Option<String>,
     is_read: Option<bool>,
     flag: Option<GraphFlag>,
+    has_attachments: Option<bool>,
     #[serde(rename = "@removed")]
     removed: Option<serde_json::Value>,
 }
@@ -855,7 +859,7 @@ fn folder_delta_url(folder_id: &str) -> String {
         segments.push("delta");
     }
     url.set_query(Some(
-        "$select=id,subject,from,toRecipients,receivedDateTime,bodyPreview,isRead,flag&$top=50",
+        "$select=id,subject,from,toRecipients,receivedDateTime,bodyPreview,isRead,flag,hasAttachments&$top=50",
     ));
     url.into()
 }
@@ -1183,6 +1187,7 @@ impl From<GraphMessage> for MessageSummary {
             preview: m.body_preview.unwrap_or_default(),
             is_read: m.is_read,
             is_flagged: flag_is_flagged(m.flag.as_ref()),
+            has_attachments: m.has_attachments,
         }
     }
 }
