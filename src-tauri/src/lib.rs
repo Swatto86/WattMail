@@ -102,6 +102,7 @@ pub fn run() {
             commands::remove_account,
             commands::list_folders,
             commands::folder_from_cache,
+            commands::load_older,
             commands::sync_folder,
             commands::search_messages,
             commands::load_message,

@@ -262,6 +262,21 @@ impl MailStore for SqliteStore {
         Ok(total.max(0) as u32)
     }
 
+    async fn oldest_received(&self, folder_id: &str) -> Result<Option<String>, MailError> {
+        let folder_id = folder_id.to_string();
+        self.run(move |conn| {
+            // `received` is plaintext ISO-8601, so MIN orders chronologically.
+            // Exclude dateless rows ('') — they sort before any real date and
+            // would otherwise anchor backfill at the wrong place.
+            conn.query_row(
+                "SELECT MIN(received) FROM messages WHERE folder_id = ?1 AND received <> ''",
+                [folder_id],
+                |row| row.get::<_, Option<String>>(0),
+            )
+        })
+        .await
+    }
+
     async fn set_read(&self, id: &str, read: bool) -> Result<(), MailError> {
         let id = id.to_string();
         self.run(move |conn| {

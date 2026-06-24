@@ -87,6 +87,34 @@ Entra app registration (public, not secret):
 
 ## Progress log
 
+### 2026-06-24 — On-demand backfill of older mail (v0.1.21)
+Fixed "Outlook shows far more mail than WattMail." Verified against the live mailbox:
+the Inbox has **10,262** messages server-side but WattMail cached only **64**.
+
+- **Root cause (a long-standing wrong assumption):** WattMail populates each folder
+  *only* from Graph's `/messages/delta`, and that query's initial sync returns just
+  **`$top` of the most-recent messages, then issues a `deltaLink` and stops** — it does
+  **not** enumerate the whole folder. The delta URL hard-codes `$top=50`, so each folder
+  only ever cached ~50 recent messages (Inbox had 64). **Proven empirically:** `$top=50`
+  delta → exactly 50 returned; `$top=500` → 500; both reach `deltaLink`. The regular
+  `/messages` endpoint *does* page the full folder (paged it past 750, back to January).
+  This **supersedes the v0.1.5 note** ("the cache was never capped … delta pages the
+  whole folder; 50 is just a read-side window") — that was wrong; 50 was a real sync cap.
+- **Fix — on-demand server backfill (no schema change).** New
+  `MailProvider::fetch_older(folder_id, before, limit)` (default returns none; Graph
+  impl GETs `/me/mailFolders/{id}/messages?$filter=receivedDateTime lt {before}
+  &$orderby=receivedDateTime desc&$top=…` — the regular endpoint, which reaches history
+  the delta window can't). New `MailStore::oldest_received` anchors it; application
+  `load_older` = oldest → fetch_older → upsert; command `load_older` backfills a page
+  then returns the grown cache window. Frontend "Load more" now widens from cache while
+  rows remain, then backfills older history from the server (preserving scroll), until a
+  backfill returns nothing (`reachedOldest`) — so you can page back through the entire
+  folder. `lt {oldest}` paging verified live: 0 overlap with the cached window, no gap.
+- **Verified:** new `graph::tests` for path-encoding (19 infra tests green), clippy
+  `--all-targets -D warnings`, fmt, `npm run build` all clean, and the exact `fetch_older`
+  Graph query exercised read-only against the live mailbox. End-to-end click-through in a
+  running build not yet done (backend wire query is the verified-risky part).
+
 ### 2026-06-24 — Fix delta sync clobbering cached mail with placeholders (v0.1.20)
 Diagnosed and fixed the **"(unknown) / (no subject) / UNKNOWN DATE"** rows that
 appeared at the bottom of folder lists. They were **not** non-mail or stale items —
@@ -515,6 +543,9 @@ pending (needs a signed-in window).
   reader-pane right-click.
 
 ### 2026-06-16 — Message list paging ("Load more") (v0.1.5)
+> **⚠️ Correction (2026-06-24, v0.1.21):** the "never capped" claim below is WRONG.
+> Graph's `/messages/delta` stops after ~`$top` of the most-recent messages, so `$top=50`
+> *was* a real sync cap (~50 cached per folder). v0.1.21 adds on-demand server backfill.
 - **Clarified:** the cache was never capped — delta sync already pages the **whole** folder into
   SQLite (follows `@odata.nextLink` to the `deltaLink`; `$top=50` is just the Graph page size). The
   50-message limit was purely a **read/display** cap (`store.recent(… LIMIT top)` with a fixed

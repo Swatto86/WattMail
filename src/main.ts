@@ -102,11 +102,18 @@ interface NewMailBatch {
   newestSubject: string;
 }
 
-// The whole folder is cached locally; the list reads a growing window of it.
-// "Load more" grows the window by PAGE_SIZE; switching folders resets it.
+// The delta sync caches only a bounded recent window of each folder. The list
+// reads a growing window of the cache; "Load more" grows it by PAGE_SIZE and,
+// once the cache is exhausted, backfills older history from the server. Switching
+// folders resets both the window and the "reached the folder's start" flag.
 const PAGE_SIZE = 50;
 let loadedCount = PAGE_SIZE;
 let currentTotal = 0;
+// Set once a server backfill returns nothing older — the folder's start is cached
+// and "Load more" should stop offering. Reset on every folder switch.
+let reachedOldest = false;
+// Guards against overlapping backfills from rapid "Load more" clicks.
+let backfilling = false;
 
 // ---- Theme (also applied pre-paint in index.html; this keeps it in sync) ----
 type ThemePref = "business" | "corporate" | "system";
@@ -667,10 +674,17 @@ function renderInbox(inbox: Inbox): void {
   // Quick-filter then sort the loaded window; grouping happens in renderListBody.
   const visible = sortMessages(applyFilter(inbox.messages));
 
-  const remaining = inbox.total - inbox.messages.length;
+  // Rows cached but not yet in the window can be shown instantly; once those run
+  // out, "Load more" backfills older history from the server until its start is
+  // reached (`reachedOldest`).
+  const cachedRemaining = inbox.total - inbox.messages.length;
+  const label =
+    cachedRemaining > 0
+      ? `Load ${Math.min(cachedRemaining, PAGE_SIZE)} more (${cachedRemaining} older)`
+      : "Load older messages";
   const more =
-    remaining > 0
-      ? `<button class="load-more" data-role="load-more">Load ${Math.min(remaining, PAGE_SIZE)} more (${remaining} older)</button>`
+    cachedRemaining > 0 || !reachedOldest
+      ? `<button class="load-more" data-role="load-more">${esc(label)}</button>`
       : "";
 
   if (visible.length === 0) {
@@ -1942,6 +1956,7 @@ async function selectFolder(id: string): Promise<void> {
   }
   currentFolderId = id;
   loadedCount = PAGE_SIZE; // start each folder at the first page
+  reachedOldest = false; // re-enable server backfill for the new folder
   renderFolders();
   await refreshFromCache().catch(() => {});
   await syncFolder();
@@ -1997,6 +2012,31 @@ async function refreshFromCache(preserveScroll = false): Promise<void> {
   showSignedIn();
   renderInbox(inbox);
   if (preserveScroll) listEl.scrollTop = scroll;
+}
+
+// Pull a page of older messages from the server into the cache, then re-render
+// the grown window. Used by "Load more" once the cached window is exhausted, so
+// the user can page back through the whole folder rather than only the recent
+// slice the delta sync keeps. Scroll is preserved so new rows append below.
+async function backfillOlder(): Promise<void> {
+  const fid = currentFolderId;
+  if (!fid || backfilling) return;
+  backfilling = true;
+  const scroll = listEl.scrollTop;
+  const before = currentTotal;
+  try {
+    const inbox = await invoke<Inbox>("load_older", { folderId: fid, top: loadedCount });
+    if (fid !== currentFolderId) return; // folder switched mid-flight
+    if (inbox.total <= before) reachedOldest = true; // server had nothing older
+    renderInbox(inbox);
+    listEl.scrollTop = scroll;
+  } catch {
+    // Offline or fetch failed — undo the optimistic window growth so the button
+    // stays and the user can retry.
+    loadedCount = Math.max(PAGE_SIZE, loadedCount - PAGE_SIZE);
+  } finally {
+    backfilling = false;
+  }
 }
 
 // Reconcile the visible list after a row action (read/flag/delete/move). While a
@@ -2127,6 +2167,7 @@ async function loadActiveAccount(): Promise<void> {
   currentFolderId = null;
   folders = [];
   loadedCount = PAGE_SIZE;
+  reachedOldest = false;
   searchActive = false;
   searchSeq++;
   searchInput.value = "";
@@ -2851,8 +2892,11 @@ foldersEl.addEventListener("click", (e) => {
 listEl.addEventListener("click", (e) => {
   const target = e.target as HTMLElement;
   if (target.closest(".load-more")) {
-    loadedCount += PAGE_SIZE; // grow the window, then re-read from cache
-    void refreshFromCache(true);
+    loadedCount += PAGE_SIZE;
+    // Widen from cache when it still holds unshown rows; otherwise pull older
+    // history from the server.
+    if (loadedCount <= currentTotal) void refreshFromCache(true);
+    else void backfillOlder();
     return;
   }
   const row = target.closest<HTMLElement>(".msg");

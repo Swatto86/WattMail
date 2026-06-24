@@ -12,10 +12,11 @@ use wattmail_application::{
     cached_folders as app_cached_folders, compose_forward, compose_reply,
     delete_message as app_delete_message, download_attachment,
     folder_from_cache as app_folder_from_cache, list_attachments, list_folders as app_list_folders,
-    load_draft as app_load_draft, move_message as app_move_message, read_headers, read_message,
-    save_draft as app_save_draft, search_messages as app_search_messages,
-    send_draft as app_send_draft, send_message as app_send_message, set_flag as app_set_flag,
-    set_read as app_set_read, sync_folder as app_sync_folder,
+    load_draft as app_load_draft, load_older as app_load_older, move_message as app_move_message,
+    read_headers, read_message, save_draft as app_save_draft,
+    search_messages as app_search_messages, send_draft as app_send_draft,
+    send_message as app_send_message, set_flag as app_set_flag, set_read as app_set_read,
+    sync_folder as app_sync_folder,
 };
 use wattmail_domain::{
     Folder, MailProvider, MessageRule, MessageSummary, OutgoingAttachment, OutgoingMessage,
@@ -175,6 +176,38 @@ pub async fn folder_from_cache(
     top: u32,
 ) -> Result<InboxDto, String> {
     let account = accounts.active()?;
+    let cached = app_folder_from_cache(&account.store, &folder_id, top)
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(InboxDto {
+        account: cached.account.map(|a| AccountDto {
+            display_name: a.display_name,
+            email: a.email,
+        }),
+        messages: cached.messages.into_iter().map(message_dto).collect(),
+        total: cached.total,
+    })
+}
+
+/// Number of older messages a single backfill pulls — matches the frontend's
+/// `PAGE_SIZE` so one "Load more" click yields one page of history.
+const BACKFILL_PAGE: u32 = 50;
+
+/// Backfill a page of older messages for `folder_id` from the server (the delta
+/// sync only caches a bounded recent window), then return the folder's cache
+/// window grown to `top`. A no-op when offline or already at the folder's start —
+/// the returned `total` simply won't have grown, which the UI reads as "no more".
+#[tauri::command]
+pub async fn load_older(
+    accounts: State<'_, AccountManager>,
+    folder_id: String,
+    top: u32,
+) -> Result<InboxDto, String> {
+    let (account, provider) = active_provider(&accounts).await?;
+    app_load_older(&*provider, &account.store, &folder_id, BACKFILL_PAGE)
+        .await
+        .map_err(|e| e.to_string())?;
+
     let cached = app_folder_from_cache(&account.store, &folder_id, top)
         .await
         .map_err(|e| e.to_string())?;

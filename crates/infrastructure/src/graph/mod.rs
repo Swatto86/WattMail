@@ -182,6 +182,42 @@ impl MailProvider for GraphClient {
         Ok(messages)
     }
 
+    async fn fetch_older(
+        &self,
+        folder_id: &str,
+        before: &str,
+        limit: u32,
+    ) -> Result<Vec<MessageSummary>, MailError> {
+        // The regular `/messages` endpoint (unlike `/messages/delta`) pages the
+        // full folder, so it reaches history older than the delta window. Pull
+        // the next `limit` messages strictly older than `before`, newest first.
+        let filter = format!("receivedDateTime lt {before}");
+        let top = limit.to_string();
+        let response = self
+            .http
+            .get(folder_messages_url(folder_id))
+            .bearer_auth(&self.access_token)
+            .query(&[
+                ("$filter", filter.as_str()),
+                ("$orderby", "receivedDateTime desc"),
+                ("$top", top.as_str()),
+                (
+                    "$select",
+                    "id,subject,from,toRecipients,receivedDateTime,bodyPreview,isRead,flag",
+                ),
+            ])
+            .send()
+            .await
+            .map_err(|e| MailError::Network(e.to_string()))?;
+
+        let body: GraphMessages = check_status(response)
+            .await?
+            .json()
+            .await
+            .map_err(|e| MailError::Decode(e.to_string()))?;
+        Ok(body.value.into_iter().map(MessageSummary::from).collect())
+    }
+
     async fn message(&self, id: &str, allow_images: bool) -> Result<MessageBody, MailError> {
         let mut url = message_endpoint(id);
         url.set_query(Some(
@@ -824,6 +860,18 @@ fn folder_delta_url(folder_id: &str) -> String {
     url.into()
 }
 
+/// Build the `/me/mailFolders/{folder_id}/messages` endpoint (no query), with the
+/// opaque folder id encoded as path segments. Callers append `$filter`/`$top` etc.
+fn folder_messages_url(folder_id: &str) -> String {
+    let mut url = url::Url::parse(&format!("{GRAPH_BASE}/me/mailFolders")).expect("valid base");
+    {
+        let mut segments = url.path_segments_mut().expect("base URL is a proper path");
+        segments.push(folder_id);
+        segments.push("messages");
+    }
+    url.into()
+}
+
 #[derive(serde::Deserialize)]
 struct GraphFolders {
     value: Vec<GraphFolder>,
@@ -1186,5 +1234,17 @@ mod tests {
             serde_json::from_str(r#"{"id":"AAA","@removed":{"reason":"deleted"}}"#)
                 .expect("parses");
         assert!(item.removed.is_some());
+    }
+
+    #[test]
+    fn folder_messages_url_encodes_opaque_id_as_a_path_segment() {
+        // Real folder ids are base64 and contain '/', '+', '=' — the '/' must be
+        // percent-encoded so the id stays one path segment under .../mailFolders,
+        // and the path must end at /messages with no query attached.
+        let url = folder_messages_url("AB/cd+ef=");
+        assert!(url.starts_with(&format!("{GRAPH_BASE}/me/mailFolders/")));
+        assert!(url.ends_with("/messages"));
+        assert!(url.contains("%2F")); // '/' encoded, not splitting the segment
+        assert!(!url.contains('?'));
     }
 }

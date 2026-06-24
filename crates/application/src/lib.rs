@@ -209,6 +209,28 @@ pub async fn folder_from_cache(
     })
 }
 
+/// Backfill older history for `folder_id`: fetch up to `limit` messages from the
+/// server older than the oldest one cached, and persist them. The delta sync only
+/// caches a bounded recent window, so this is how the UI reaches the rest of a
+/// large folder. Returns the number of messages added (0 once the folder's start
+/// is reached, or when nothing is cached yet to anchor from).
+pub async fn load_older(
+    provider: &dyn MailProvider,
+    store: &dyn MailStore,
+    folder_id: &str,
+    limit: u32,
+) -> Result<u32, MailError> {
+    let Some(before) = store.oldest_received(folder_id).await? else {
+        return Ok(0);
+    };
+    let older = provider.fetch_older(folder_id, &before, limit).await?;
+    let added = older.len() as u32;
+    if !older.is_empty() {
+        store.upsert_messages(folder_id, older).await?;
+    }
+    Ok(added)
+}
+
 /// Send a message.
 pub async fn send_message(
     provider: &dyn MailProvider,

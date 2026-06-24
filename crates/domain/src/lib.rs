@@ -219,6 +219,19 @@ pub trait MailProvider: Send + Sync {
     /// `query`, newest first.
     async fn search(&self, query: &str, top: u32) -> Result<Vec<MessageSummary>, MailError>;
 
+    /// Fetch up to `limit` messages in `folder_id` strictly older than `before`
+    /// (an ISO-8601 received timestamp), newest first — backfilling history that
+    /// the bounded delta sync window doesn't reach. The default returns nothing:
+    /// a provider that can't page history simply offers no backfill.
+    async fn fetch_older(
+        &self,
+        _folder_id: &str,
+        _before: &str,
+        _limit: u32,
+    ) -> Result<Vec<MessageSummary>, MailError> {
+        Ok(Vec::new())
+    }
+
     /// A single message with its sanitized, render-ready body. `allow_images`
     /// keeps remote images instead of stripping them.
     async fn message(&self, id: &str, allow_images: bool) -> Result<MessageBody, MailError>;
@@ -361,6 +374,10 @@ pub trait MailStore: Send + Sync {
     async fn remove_message(&self, id: &str) -> Result<(), MailError>;
     /// The most recent `top` messages in a folder, newest first.
     async fn recent(&self, folder_id: &str, top: u32) -> Result<Vec<MessageSummary>, MailError>;
+    /// The oldest cached received timestamp in a folder (ignoring rows with no
+    /// date), or `None` if the folder has no dated messages cached — the anchor
+    /// for backfilling older history.
+    async fn oldest_received(&self, folder_id: &str) -> Result<Option<String>, MailError>;
     /// Total number of cached messages in a folder (the full folder is cached;
     /// `recent` only returns a window of it).
     async fn count(&self, folder_id: &str) -> Result<u32, MailError>;
