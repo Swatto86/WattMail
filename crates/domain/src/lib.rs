@@ -328,6 +328,17 @@ impl SyncToken {
 #[derive(Debug, Clone)]
 pub enum MessageChange {
     Upserted(MessageSummary),
+    /// A content-less property change. A delta feed can report that a message's
+    /// flags changed (e.g. read/unread) by sending only the id and the changed
+    /// scalar fields, with no subject, sender, or date. Such a change must be
+    /// applied as a targeted flag update so the cached content is preserved
+    /// rather than overwritten with placeholders. Fields absent from the
+    /// notification are `None` and left untouched.
+    FlagsChanged {
+        id: String,
+        is_read: Option<bool>,
+        is_flagged: Option<bool>,
+    },
     Removed(String),
 }
 

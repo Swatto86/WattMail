@@ -367,9 +367,21 @@ impl MailProvider for GraphClient {
             };
 
             for item in page.value {
-                let Some(id) = item.id else { continue };
+                let Some(id) = item.id.clone() else { continue };
                 if item.removed.is_some() {
                     changes.push(MessageChange::Removed(id));
+                } else if item.is_flags_only_change() {
+                    // Graph's delta feed reports a flag change (e.g. a message
+                    // marked read) by returning just the id and the changed
+                    // scalar fields — no subject, sender, or date, even though
+                    // `$select` requests them. Upserting it would overwrite the
+                    // cached content with `(no subject)`/`(unknown)`/empty-date
+                    // placeholders, so apply it as a targeted flag update.
+                    changes.push(MessageChange::FlagsChanged {
+                        id,
+                        is_read: item.is_read,
+                        is_flagged: item.flag.as_ref().map(|f| flag_is_flagged(Some(f))),
+                    });
                 } else {
                     changes.push(MessageChange::Upserted(MessageSummary {
                         id,
@@ -758,6 +770,19 @@ struct DeltaItem {
     removed: Option<serde_json::Value>,
 }
 
+impl DeltaItem {
+    /// True when the item carries no message content — the shape of a delta
+    /// *property change* notification (Graph sends only the id plus the changed
+    /// scalar fields, such as `isRead`). Distinguished from a real message,
+    /// which always carries at least a subject, sender, date, or preview.
+    fn is_flags_only_change(&self) -> bool {
+        self.subject.is_none()
+            && self.from.is_none()
+            && self.received_date_time.is_none()
+            && self.body_preview.is_none()
+    }
+}
+
 /// Map a Graph response to an error on non-success (401 → `NotAuthenticated`,
 /// other failures → `Api`). Returns the response unchanged on success, for
 /// callers that go on to read the body.
@@ -1111,5 +1136,55 @@ impl From<GraphMessage> for MessageSummary {
             is_read: m.is_read,
             is_flagged: flag_is_flagged(m.flag.as_ref()),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn flags_only_delta_notification_is_not_a_content_upsert() {
+        // The shape Graph's delta feed returns when a message is marked read:
+        // the id plus the changed scalar, with no subject/sender/date/preview.
+        let item: DeltaItem =
+            serde_json::from_str(r#"{"id":"AAA","isRead":true}"#).expect("parses");
+        assert!(item.is_flags_only_change());
+        assert_eq!(item.is_read, Some(true));
+        assert!(item.removed.is_none());
+    }
+
+    #[test]
+    fn full_message_delta_item_is_a_content_upsert() {
+        let item: DeltaItem = serde_json::from_str(
+            r#"{
+                "id":"AAA",
+                "subject":"Hello",
+                "from":{"emailAddress":{"name":"A","address":"a@x.io"}},
+                "receivedDateTime":"2026-06-18T06:28:03Z",
+                "bodyPreview":"hi there",
+                "isRead":false
+            }"#,
+        )
+        .expect("parses");
+        assert!(!item.is_flags_only_change());
+    }
+
+    #[test]
+    fn an_item_with_only_a_date_is_treated_as_content() {
+        // Guard the discriminator: any single content field present (here just
+        // the date) keeps the item on the upsert path, never the flags path.
+        let item: DeltaItem =
+            serde_json::from_str(r#"{"id":"AAA","receivedDateTime":"2026-06-18T06:28:03Z"}"#)
+                .expect("parses");
+        assert!(!item.is_flags_only_change());
+    }
+
+    #[test]
+    fn removed_tombstone_parses_with_removed_set() {
+        let item: DeltaItem =
+            serde_json::from_str(r#"{"id":"AAA","@removed":{"reason":"deleted"}}"#)
+                .expect("parses");
+        assert!(item.removed.is_some());
     }
 }

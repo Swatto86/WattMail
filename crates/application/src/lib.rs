@@ -161,6 +161,20 @@ pub async fn sync_folder(
     for change in batch.changes {
         match change {
             MessageChange::Upserted(message) => upserts.push(message),
+            MessageChange::FlagsChanged {
+                id,
+                is_read,
+                is_flagged,
+            } => {
+                // Update only the flags the notification carried; a missing row
+                // (message never fully cached) is a no-op until the next upsert.
+                if let Some(read) = is_read {
+                    store.set_read(&id, read).await?;
+                }
+                if let Some(flagged) = is_flagged {
+                    store.set_flag(&id, flagged).await?;
+                }
+            }
             MessageChange::Removed(id) => store.remove_message(&id).await?,
         }
     }

@@ -20,7 +20,7 @@ branch `feature/imap-accounts` (parked off main — see the NOTE in the progress
 auto-update). The code is cross-platform-capable (per-OS path + keychain abstraction)
 but macOS/Linux are compile-gated in CI only — never built into a bundle or run live.
 
-**Provider status (v0.1.19):** Office 365 = live/configured (real client+tenant ids in
+**Provider status (v0.1.20):** Office 365 = live/configured (real client+tenant ids in
 `accounts.rs`). Outlook.com + Gmail = code-complete but **gated off** by
 `REPLACE_WITH_…` placeholder creds (`is_provider_configured()` = false → filtered from
 the picker, rejected by `add_account`); a default build offers **only Office 365**.
@@ -86,6 +86,42 @@ Entra app registration (public, not secret):
 ---
 
 ## Progress log
+
+### 2026-06-24 — Fix delta sync clobbering cached mail with placeholders (v0.1.20)
+Diagnosed and fixed the **"(unknown) / (no subject) / UNKNOWN DATE"** rows that
+appeared at the bottom of folder lists. They were **not** non-mail or stale items —
+each was a real, intact message on the server (confirmed by a read-only Graph `GET`:
+e.g. a phantom row decoded to *"8 new Technical Services Consultant jobs"* from
+`info@jobs.totaljobsmail.com`, received 18 Jun). The live cache held 24 such rows
+across 4 folders, all with identical encrypted field lengths — i.e. all overwritten
+with the same `(no subject)` / `(unknown)` / empty-date fallbacks.
+
+- **Root cause — Graph delta *partial-property* clobber.** Microsoft Graph's
+  `/messages/delta` feed reports a flag change (e.g. a message marked read) by
+  returning **only the id plus the changed scalar** — no `subject`/`from`/
+  `receivedDateTime`/`bodyPreview`, even though `$select` requests them. `DeltaItem`
+  has all-`Option` fields, so such a notification deserialized cleanly and
+  `GraphClient::sync` pushed it as a full `Upserted`, whose `unwrap_or` fallbacks
+  then **overwrote the cached row's real content** with placeholders (empty
+  `received` → JS `new Date("")` = NaN → the "Unknown date" section). The non-delta
+  list/search paths can't hit this — `GraphMessage::is_read` is a required `bool`,
+  so they only parse full message objects.
+- **Fix — discriminate the notification from a real message.** New
+  `DeltaItem::is_flags_only_change()` (no subject/from/date/preview) routes these to
+  a new `MessageChange::FlagsChanged { id, is_read, is_flagged }` variant;
+  `application::sync_folder` applies only the present flags via the existing
+  column-only `store.set_read`/`set_flag` (a no-op if the row isn't cached), so
+  cached content is **preserved, never overwritten**. Real messages (any content
+  field present) still take the `Upserted` path unchanged. Removed-tombstone
+  handling (`@removed`) is untouched.
+- **Heal — schema bump 5 → 6** (no schema change): forces the disposable cache to
+  drop-and-rebuild once on next launch, discarding the already-corrupted rows; the
+  full re-enumeration re-fetches their real content. Gmail is unaffected (its History
+  sync re-fetches each changed message in full) and is gated off on `main` anyway.
+- **Verified:** 4 new `graph::tests` (partial vs full vs date-only vs tombstone) +
+  full suite 18/18 green; `cargo clippy --all-targets -D warnings` clean. Diagnosis
+  grounded in the live cache (`%LOCALAPPDATA%\WattMail\cache.db`) + a read-only Graph
+  round-trip, not inference.
 
 ### 2026-06-23 — Outlook-style date sections + quick filters (v0.1.19)
 Frontend-only message-list upgrade (no backend/wire changes): the inbox now groups

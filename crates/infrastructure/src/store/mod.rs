@@ -19,7 +19,12 @@ use crate::crypto::FieldCipher;
 /// Bumped whenever the schema or on-disk format changes. The cache is disposable
 /// (re-derivable from the server), so a mismatch drops and rebuilds — which also
 /// re-encrypts everything under the current key.
-const SCHEMA_VERSION: i64 = 5;
+///
+/// v6 carries no schema change: it forces a one-time rebuild to discard rows
+/// corrupted by the pre-fix delta sync, which overwrote cached message content
+/// with `(no subject)`/`(unknown)`/empty-date placeholders when Graph reported a
+/// flags-only change. A full re-enumeration restores the real content.
+const SCHEMA_VERSION: i64 = 6;
 
 const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS messages (
