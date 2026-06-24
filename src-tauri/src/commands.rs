@@ -10,10 +10,11 @@ use crate::accounts::{AccountManager, AccountSummary, ManagedAccount};
 use crate::settings::{self, SettingsState};
 use wattmail_application::{
     cached_folders as app_cached_folders, compose_forward, compose_reply,
+    create_folder as app_create_folder, delete_folder as app_delete_folder,
     delete_message as app_delete_message, download_attachment,
     folder_from_cache as app_folder_from_cache, list_attachments, list_folders as app_list_folders,
     load_draft as app_load_draft, load_older as app_load_older, move_message as app_move_message,
-    read_headers, read_message, save_draft as app_save_draft,
+    read_headers, read_message, rename_folder as app_rename_folder, save_draft as app_save_draft,
     search_messages as app_search_messages, send_draft as app_send_draft,
     send_message as app_send_message, set_flag as app_set_flag, set_read as app_set_read,
     sync_folder as app_sync_folder,
@@ -358,6 +359,44 @@ pub async fn move_message(
 ) -> Result<(), String> {
     let (account, provider) = active_provider(&accounts).await?;
     app_move_message(&*provider, &account.store, &id, &destination_folder_id)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Create a mail folder. With `parent_id` set, it's created as a subfolder of
+/// that folder; otherwise at the top level. The frontend re-lists folders after.
+#[tauri::command]
+pub async fn create_folder(
+    accounts: State<'_, AccountManager>,
+    name: String,
+    parent_id: Option<String>,
+) -> Result<FolderDto, String> {
+    let (_account, provider) = active_provider(&accounts).await?;
+    let folder = app_create_folder(&*provider, &name, parent_id.as_deref())
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(folder_dto(folder))
+}
+
+/// Rename a mail folder.
+#[tauri::command]
+pub async fn rename_folder(
+    accounts: State<'_, AccountManager>,
+    id: String,
+    name: String,
+) -> Result<(), String> {
+    let (_account, provider) = active_provider(&accounts).await?;
+    app_rename_folder(&*provider, &id, &name)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Delete a mail folder and its contents. Graph rejects deleting well-known
+/// folders (Inbox, Sent Items, …); that error is surfaced to the caller.
+#[tauri::command]
+pub async fn delete_folder(accounts: State<'_, AccountManager>, id: String) -> Result<(), String> {
+    let (_account, provider) = active_provider(&accounts).await?;
+    app_delete_folder(&*provider, &id)
         .await
         .map_err(|e| e.to_string())
 }

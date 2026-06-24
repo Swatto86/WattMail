@@ -259,6 +259,28 @@ pub trait MailProvider: Send + Sync {
     /// The user's mail folders.
     async fn folders(&self) -> Result<Vec<Folder>, MailError>;
 
+    /// Create a mail folder named `name`. When `parent_id` is `Some`, the folder
+    /// is created as a child of that folder; otherwise at the top level. Returns
+    /// the created folder. Providers without folder management inherit the default
+    /// `Unsupported`.
+    async fn create_folder(
+        &self,
+        _name: &str,
+        _parent_id: Option<&str>,
+    ) -> Result<Folder, MailError> {
+        Err(MailError::Unsupported)
+    }
+
+    /// Rename a mail folder. Default: `Unsupported`.
+    async fn rename_folder(&self, _id: &str, _name: &str) -> Result<(), MailError> {
+        Err(MailError::Unsupported)
+    }
+
+    /// Delete a mail folder and its contents. Default: `Unsupported`.
+    async fn delete_folder(&self, _id: &str) -> Result<(), MailError> {
+        Err(MailError::Unsupported)
+    }
+
     /// Pull incremental changes for `folder_id` since `since` (`None` = full
     /// initial sync), returning the changes plus an opaque token to resume from.
     async fn sync(

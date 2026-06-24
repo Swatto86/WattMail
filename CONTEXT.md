@@ -87,6 +87,38 @@ Entra app registration (public, not secret):
 
 ## Progress log
 
+### 2026-06-24 — Right-click folder management: add / rename / delete (v0.1.23)
+The folder sidebar now has a custom right-click context menu for managing folders,
+mirroring the message-row menu pattern exactly (same `.ctx-*` classes — no new CSS).
+
+- **Menu:** right-click a folder → **New folder… / New subfolder… / Rename… /
+  Delete folder**; right-click empty sidebar space → just **New folder…**. Reuses the
+  message menu's viewport-clamped placement and the click-away / Escape / blur dismiss;
+  the folder and message menus cross-hide so only one is ever open.
+- **Backend (defaulted trait methods, Graph-only impl).** `MailProvider::create_folder
+  (name, parent_id) / rename_folder(id, name) / delete_folder(id)`, all defaulting to
+  `Unsupported` so Gmail/IMAP (parked/gated) compile unchanged. Graph impl:
+  `POST /me/mailFolders` (top level) or `…/{parent}/childFolders` (subfolder) with
+  `{displayName}`; `PATCH /me/mailFolders/{id} {displayName}`; `DELETE /me/mailFolders/
+  {id}`. New `folder_endpoint(id)` URL helper mirrors `message_endpoint` (opaque id as a
+  path segment). Application use-cases `create_folder`/`rename_folder`/`delete_folder`
+  are thin provider passthroughs; commands of the same names wired in `lib.rs`.
+- **Frontend flow.** `window.prompt` for the name (same idiom as compose's link prompt),
+  `window.confirm` before delete. After any mutation the sidebar refreshes via the
+  existing `loadFolders()` (live list → write-through cache → re-render), which also
+  recomputes folder depths. Deleting the open folder falls back to Inbox/first and loads
+  it. Errors surface in the status line.
+- **Notes / deferrals (deliberate):** Graph rejects deleting well-known folders (Inbox,
+  Sent Items, …) with an error that surfaces to the status line — no client-side guard
+  (no reliable well-known flag in the default `$select`). A deleted folder's orphaned
+  cached message rows + delta token remain in SQLite but are unreachable (no sidebar
+  button) and clear on the next disposable-cache rebuild. Gmail returns `Unsupported`.
+- **Verified:** clippy `--all-targets -D warnings`, fmt, full `cargo test --workspace`
+  (19 infra + 2 desktop-lib), and `npm run build` (tsc + vite) all clean. Folder
+  create/rename/delete are **write** Graph calls, so not exercised live (can't safely
+  test deletion against the real mailbox); the URL-building mirrors tested helpers.
+  End-to-end click-through in a running build pending.
+
 ### 2026-06-24 — Attachment indicator + "has attachments" filter (v0.1.22)
 A new quick filter and a per-row paperclip indicator so attachments are visible at
 a glance. Plumbs a `has_attachments` boolean through every layer, mirroring

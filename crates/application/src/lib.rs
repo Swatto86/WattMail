@@ -60,6 +60,31 @@ pub async fn cached_folders(store: &dyn MailStore) -> Result<Vec<Folder>, MailEr
     store.cached_folders().await
 }
 
+/// Create a mail folder (top level, or a child of `parent_id`). The caller
+/// refreshes the sidebar via [`list_folders`] afterwards, which re-caches the
+/// updated tree write-through.
+pub async fn create_folder(
+    provider: &dyn MailProvider,
+    name: &str,
+    parent_id: Option<&str>,
+) -> Result<Folder, MailError> {
+    provider.create_folder(name, parent_id).await
+}
+
+/// Rename a mail folder.
+pub async fn rename_folder(
+    provider: &dyn MailProvider,
+    id: &str,
+    name: &str,
+) -> Result<(), MailError> {
+    provider.rename_folder(id, name).await
+}
+
+/// Delete a mail folder and its contents.
+pub async fn delete_folder(provider: &dyn MailProvider, id: &str) -> Result<(), MailError> {
+    provider.delete_folder(id).await
+}
+
 /// Fetch a single message with its sanitized body.
 pub async fn read_message(
     provider: &dyn MailProvider,

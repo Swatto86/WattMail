@@ -366,6 +366,76 @@ impl MailProvider for GraphClient {
         Ok(())
     }
 
+    async fn create_folder(
+        &self,
+        name: &str,
+        parent_id: Option<&str>,
+    ) -> Result<Folder, MailError> {
+        // POST /me/mailFolders (top level) or
+        // POST /me/mailFolders/{parent}/childFolders (subfolder).
+        let url = match parent_id {
+            None => format!("{GRAPH_BASE}/me/mailFolders"),
+            Some(parent) => {
+                let mut url =
+                    url::Url::parse(&format!("{GRAPH_BASE}/me/mailFolders")).expect("valid base");
+                {
+                    let mut segments = url.path_segments_mut().expect("base URL is a proper path");
+                    segments.push(parent);
+                    segments.push("childFolders");
+                }
+                url.into()
+            }
+        };
+        let response = self
+            .http
+            .post(&url)
+            .bearer_auth(&self.access_token)
+            .json(&serde_json::json!({ "displayName": name }))
+            .send()
+            .await
+            .map_err(|e| MailError::Network(e.to_string()))?;
+        let created: GraphFolder = check_status(response)
+            .await?
+            .json()
+            .await
+            .map_err(|e| MailError::Decode(e.to_string()))?;
+        // `depth` is recomputed by the next full `folders()` walk; the value here
+        // only matters until the caller refreshes the sidebar.
+        Ok(Folder {
+            id: created.id,
+            name: created.display_name.unwrap_or_else(|| name.to_string()),
+            unread_count: created.unread_item_count.unwrap_or(0),
+            depth: 0,
+        })
+    }
+
+    async fn rename_folder(&self, id: &str, name: &str) -> Result<(), MailError> {
+        let response = self
+            .http
+            .patch(folder_endpoint(id).as_str())
+            .bearer_auth(&self.access_token)
+            .json(&serde_json::json!({ "displayName": name }))
+            .send()
+            .await
+            .map_err(|e| MailError::Network(e.to_string()))?;
+        check_status(response).await?;
+        Ok(())
+    }
+
+    async fn delete_folder(&self, id: &str) -> Result<(), MailError> {
+        // DELETE /me/mailFolders/{id} — Graph rejects deleting well-known folders
+        // (Inbox, Sent Items, …) with an error, which surfaces to the caller.
+        let response = self
+            .http
+            .delete(folder_endpoint(id).as_str())
+            .bearer_auth(&self.access_token)
+            .send()
+            .await
+            .map_err(|e| MailError::Network(e.to_string()))?;
+        check_status(response).await?;
+        Ok(())
+    }
+
     async fn sync(
         &self,
         folder_id: &str,
@@ -842,6 +912,16 @@ async fn check_status(response: reqwest::Response) -> Result<reqwest::Response, 
 /// path segment (it may contain `/`, `+`, `=`).
 fn message_endpoint(id: &str) -> url::Url {
     let mut url = url::Url::parse(&format!("{GRAPH_BASE}/me/messages")).expect("valid base");
+    url.path_segments_mut()
+        .expect("base URL is a proper path")
+        .push(id);
+    url
+}
+
+/// Build the `/me/mailFolders/{id}` endpoint with the opaque folder id safely
+/// encoded as a path segment.
+fn folder_endpoint(id: &str) -> url::Url {
+    let mut url = url::Url::parse(&format!("{GRAPH_BASE}/me/mailFolders")).expect("valid base");
     url.path_segments_mut()
         .expect("base URL is a proper path")
         .push(id);

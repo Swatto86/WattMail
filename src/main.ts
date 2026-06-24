@@ -2998,6 +2998,7 @@ listEl.addEventListener("contextmenu", (e) => {
   const row = (e.target as HTMLElement).closest<HTMLElement>(".msg");
   if (!row?.dataset.id) return; // off a row: leave the default menu
   e.preventDefault();
+  hideFolderMenu(); // never leave the folder menu open alongside this one
   showCtxMenu(
     e.clientX,
     e.clientY,
@@ -3072,6 +3073,141 @@ document.addEventListener("keydown", (e) => {
 });
 window.addEventListener("blur", hideCtxMenu);
 listEl.addEventListener("scroll", hideCtxMenu);
+
+// ---- Folder right-click context menu (create / rename / delete) ----
+const folderMenu = document.createElement("div");
+folderMenu.className = "ctx-menu hidden";
+folderMenu.setAttribute("role", "menu");
+document.body.appendChild(folderMenu);
+// The right-clicked folder's id, or null when the click was on empty sidebar
+// space (only "New folder…" applies then).
+let folderMenuTargetId: string | null = null;
+
+function hideFolderMenu(): void {
+  folderMenu.classList.add("hidden");
+  folderMenuTargetId = null;
+}
+
+function showFolderMenu(x: number, y: number, fid: string | null): void {
+  hideCtxMenu(); // never leave the message menu open alongside this one
+  folderMenuTargetId = fid;
+  const items: Array<{ act: string; label: string; danger?: boolean } | "sep"> = [
+    { act: "newFolder", label: "New folder…" },
+  ];
+  if (fid) {
+    items.push(
+      { act: "newSubfolder", label: "New subfolder…" },
+      "sep",
+      { act: "renameFolder", label: "Rename…" },
+      { act: "deleteFolder", label: "Delete folder", danger: true },
+    );
+  }
+  folderMenu.innerHTML = items
+    .map((it) =>
+      it === "sep"
+        ? `<div class="ctx-sep"></div>`
+        : `<button class="ctx-item${it.danger ? " ctx-danger" : ""}" data-act="${it.act}">${it.label}</button>`,
+    )
+    .join("");
+  folderMenu.classList.remove("hidden");
+  // Position at the click point, clamped inside the viewport.
+  folderMenu.style.left = "0";
+  folderMenu.style.top = "0";
+  const left = Math.max(4, Math.min(x, window.innerWidth - folderMenu.offsetWidth - 4));
+  const top = Math.max(4, Math.min(y, window.innerHeight - folderMenu.offsetHeight - 4));
+  folderMenu.style.left = `${left}px`;
+  folderMenu.style.top = `${top}px`;
+}
+
+foldersEl.addEventListener("contextmenu", (e) => {
+  e.preventDefault();
+  const btn = (e.target as HTMLElement).closest<HTMLElement>(".folder");
+  showFolderMenu(e.clientX, e.clientY, btn?.dataset.fid ?? null);
+});
+
+folderMenu.addEventListener("click", (e) => {
+  e.stopPropagation();
+  const item = (e.target as HTMLElement).closest<HTMLElement>(".ctx-item");
+  if (!item) return;
+  const fid = folderMenuTargetId;
+  hideFolderMenu();
+  switch (item.dataset.act) {
+    case "newFolder":
+      void createFolder(null);
+      break;
+    case "newSubfolder":
+      if (fid) void createFolder(fid);
+      break;
+    case "renameFolder":
+      if (fid) void renameFolder(fid);
+      break;
+    case "deleteFolder":
+      if (fid) void deleteFolder(fid);
+      break;
+  }
+});
+
+document.addEventListener("click", (e) => {
+  if (!folderMenu.contains(e.target as Node)) hideFolderMenu();
+});
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape") hideFolderMenu();
+});
+window.addEventListener("blur", hideFolderMenu);
+
+async function createFolder(parentId: string | null): Promise<void> {
+  const name = window.prompt(parentId ? "New subfolder name:" : "New folder name:");
+  if (name === null) return;
+  const trimmed = name.trim();
+  if (!trimmed) return;
+  try {
+    await invoke("create_folder", { name: trimmed, parentId });
+    await loadFolders();
+  } catch (e) {
+    statusEl.textContent = `Could not create folder: ${e}`;
+  }
+}
+
+async function renameFolder(id: string): Promise<void> {
+  const current = folders.find((f) => f.id === id);
+  const name = window.prompt("Rename folder:", current?.name ?? "");
+  if (name === null) return;
+  const trimmed = name.trim();
+  if (!trimmed || trimmed === current?.name) return;
+  try {
+    await invoke("rename_folder", { id, name: trimmed });
+    await loadFolders();
+  } catch (e) {
+    statusEl.textContent = `Could not rename folder: ${e}`;
+  }
+}
+
+async function deleteFolder(id: string): Promise<void> {
+  const target = folders.find((f) => f.id === id);
+  const ok = window.confirm(
+    `Delete folder "${target?.name ?? ""}" and everything in it? This cannot be undone.`,
+  );
+  if (!ok) return;
+  try {
+    await invoke("delete_folder", { id });
+    if (currentFolderId === id) {
+      // The open folder is gone — fall back to Inbox (or the first folder) and
+      // load it, since loadFolders() only repaints the sidebar.
+      currentFolderId = null;
+      await loadFolders();
+      if (currentFolderId) {
+        loadedCount = PAGE_SIZE;
+        reachedOldest = false;
+        await refreshFromCache().catch(() => {});
+        await syncFolder();
+      }
+    } else {
+      await loadFolders();
+    }
+  } catch (e) {
+    statusEl.textContent = `Could not delete folder: ${e}`;
+  }
+}
 refreshBtn.addEventListener("click", () => {
   if (searchActive) exitSearch(); // Refresh leaves search and reloads the folder
   void syncFolder();
