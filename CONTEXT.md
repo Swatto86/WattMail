@@ -26,6 +26,13 @@ but macOS/Linux are compile-gated in CI only — never built into a bundle or ru
 the picker, rejected by `add_account`); a default build offers **only Office 365**.
 Generic IMAP/SMTP = **built but parked** on `feature/imap-accounts`.
 
+**Release policy (2026-06-25):** personal, single-user tool — **release once CI is
+green** (frontend build + `cargo fmt --check` + `clippy --all-targets -D warnings` +
+`cargo test --workspace` + full `tauri build`); **no manual install or live-run test
+gate before tagging**. Any live exercise happens *after* release (release-then-test).
+Earlier log entries that say "live test pending before release" / "the usual
+test-then-release" describe the *prior* policy, now retired.
+
 ## Tech stack
 
 | Area | Choice |
@@ -111,13 +118,14 @@ main.ts), which both over- and under-blocked:
   to a readable "system folder" line.
 - **Verification level:** compile-verified — fmt, `clippy --all-targets -D warnings`,
   `cargo test --workspace` (34 tests, incl. new `FolderRole` round-trip + `$batch`
-  decode tests), `tsc` + `vite build`. **Not yet live-run verified** against a real
-  mailbox (can't auth to Graph here) — the `$batch` wire shape and whether the user's
-  "Sent" is genuinely a custom (deletable) folder are unconfirmed. Pushed to `main`
-  (CI runs the full `tauri build`); **release tag held pending the live test**
-  (right-click "Sent" → Delete appears & works; Sync Issues no longer raw-errors).
-  Both outcomes degrade gracefully (a secretly-distinguished "Sent" now shows the
-  friendly message instead of raw JSON).
+  decode tests), `tsc` + `vite build`. **Not live-run verified** against a real mailbox
+  (can't auth to Graph here) — the `$batch` wire shape and whether the user's "Sent" is
+  genuinely a custom (deletable) folder are unconfirmed. **Released as v0.2.2
+  (release-then-test)** under the new no-test-gate-before-release policy. Live pass to
+  run from the installer: right-click "Sent" → Delete appears & works; Sync Issues no
+  longer raw-errors. Both outcomes degrade gracefully (a secretly-distinguished "Sent"
+  now shows the friendly message instead of raw JSON); if the `$batch` shape is wrong,
+  folders simply carry no role (sidebar still renders) — cut a fix release if so.
 
 ### 2026-06-25 — About dialog (v0.2.1)
 Frontend-only. Adds the **About dialog** (desktop-capability checklist item): app
