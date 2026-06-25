@@ -21,9 +21,9 @@
 
 use base64::Engine;
 use wattmail_domain::{
-    Attachment, DraftPrefill, EmailAddress, Folder, MailError, MailProvider, MessageBody,
-    MessageChange, MessageHeader, MessageSummary, OutgoingAttachment, OutgoingMessage, SyncBatch,
-    SyncToken, UserProfile,
+    Attachment, DraftPrefill, EmailAddress, Folder, FolderRole, MailError, MailProvider,
+    MessageBody, MessageChange, MessageHeader, MessageSummary, OutgoingAttachment, OutgoingMessage,
+    SyncBatch, SyncToken, UserProfile,
 };
 
 /// Gmail REST API base for the authenticated user ("me").
@@ -258,6 +258,7 @@ impl MailProvider for GmailClient {
             };
 
             result.push(Folder {
+                role: gmail_role(&label.id),
                 id: label.id,
                 name,
                 unread_count,
@@ -658,6 +659,20 @@ fn friendly_label_name(id: &str, name: Option<&str>) -> String {
         "IMPORTANT" => "Important".to_string(),
         _ => name.unwrap_or(id).to_string(),
     }
+}
+
+/// Map a Gmail system-label id to its [`FolderRole`] (server truth for Gmail's
+/// distinguished labels); user labels and unmapped system labels carry no role.
+/// Drives the same outgoing-column / protection logic as the Graph backend.
+fn gmail_role(label_id: &str) -> Option<FolderRole> {
+    Some(match label_id {
+        "INBOX" => FolderRole::Inbox,
+        "SENT" => FolderRole::SentItems,
+        "DRAFT" => FolderRole::Drafts,
+        "TRASH" => FolderRole::DeletedItems,
+        "SPAM" => FolderRole::JunkEmail,
+        _ => return None,
+    })
 }
 
 /// Build a [`MessageSummary`] from a metadata-format Gmail message.

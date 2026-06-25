@@ -12,7 +12,7 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use rusqlite::{Connection, OptionalExtension};
-use wattmail_domain::{Folder, MailError, MailStore, MessageSummary};
+use wattmail_domain::{Folder, FolderRole, MailError, MailStore, MessageSummary};
 
 use crate::crypto::FieldCipher;
 
@@ -26,7 +26,10 @@ use crate::crypto::FieldCipher;
 ///
 /// v7 adds the `has_attachments` column (the message-list attachment indicator);
 /// the rebuild repopulates it from the next sync.
-const SCHEMA_VERSION: i64 = 7;
+///
+/// v8 adds the folder `role` column (well-known/distinguished-folder tag, server
+/// truth); the rebuild repopulates it from the next folder list.
+const SCHEMA_VERSION: i64 = 8;
 
 const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS messages (
@@ -51,7 +54,8 @@ CREATE TABLE IF NOT EXISTS folders (
     name         TEXT NOT NULL,
     unread_count INTEGER NOT NULL,
     depth        INTEGER NOT NULL,
-    position     INTEGER NOT NULL
+    position     INTEGER NOT NULL,
+    role         TEXT
 );
 ";
 
@@ -82,6 +86,9 @@ struct EncryptedFolderRow {
     unread_count: i64,
     depth: i64,
     position: i64,
+    /// Well-known-folder tag ([`FolderRole::as_str`]), or `None` for a user
+    /// folder. Not sensitive (a folder type, not content), so stored plaintext.
+    role: Option<String>,
 }
 
 impl SqliteStore {
@@ -320,7 +327,7 @@ impl MailStore for SqliteStore {
 
     async fn save_folders(&self, folders: Vec<Folder>) -> Result<(), MailError> {
         // Encrypt folder names (content) before the blocking thread; ids, counts,
-        // depth, and position stay plaintext for ordering and display.
+        // depth, position, and role stay plaintext for ordering and display.
         let rows: Vec<EncryptedFolderRow> = folders
             .iter()
             .enumerate()
@@ -330,6 +337,7 @@ impl MailStore for SqliteStore {
                 unread_count: i64::from(f.unread_count),
                 depth: i64::from(f.depth),
                 position: position as i64,
+                role: f.role.map(|r| r.as_str().to_string()),
             })
             .collect();
 
@@ -338,8 +346,8 @@ impl MailStore for SqliteStore {
             // in order. position preserves the sidebar's tree order on read-back.
             conn.execute("DELETE FROM folders", [])?;
             let mut stmt = conn.prepare(
-                "INSERT INTO folders (id, name, unread_count, depth, position)
-                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                "INSERT INTO folders (id, name, unread_count, depth, position, role)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
             )?;
             for r in &rows {
                 stmt.execute(rusqlite::params![
@@ -348,6 +356,7 @@ impl MailStore for SqliteStore {
                     r.unread_count,
                     r.depth,
                     r.position,
+                    r.role,
                 ])?;
             }
             Ok(())
@@ -359,7 +368,7 @@ impl MailStore for SqliteStore {
         let mut folders = self
             .run(move |conn| {
                 let mut stmt = conn.prepare(
-                    "SELECT id, name, unread_count, depth
+                    "SELECT id, name, unread_count, depth, role
                      FROM folders ORDER BY position ASC",
                 )?;
                 let rows = stmt.query_map([], |row| {
@@ -368,6 +377,10 @@ impl MailStore for SqliteStore {
                         name: row.get(1)?, // encrypted
                         unread_count: row.get::<_, i64>(2)?.max(0) as u32,
                         depth: row.get::<_, i64>(3)?.max(0) as u32,
+                        role: row
+                            .get::<_, Option<String>>(4)?
+                            .as_deref()
+                            .and_then(FolderRole::parse),
                     })
                 })?;
                 rows.collect::<rusqlite::Result<Vec<_>>>()

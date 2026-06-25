@@ -60,6 +60,10 @@ interface FolderInfo {
   name: string;
   unreadCount: number;
   depth: number;
+  // Well-known-folder tag ("inbox", "sentitems", "syncissues", …) when the
+  // provider identifies this as a distinguished/system folder; null for an
+  // ordinary user folder. Server truth — never inferred from the display name.
+  role: string | null;
 }
 interface ComposeData {
   to: string[];
@@ -184,38 +188,50 @@ function senderName(from: string): string {
   const name = lt > 0 ? from.slice(0, lt).trim() : from.trim();
   return name || from;
 }
-// Outgoing folders show the recipient ("To: …") rather than the sender.
-function isOutgoingFolder(name: string): boolean {
-  const n = name.toLowerCase();
+// Outgoing folders show the recipient ("To: …") rather than the sender. Decided
+// by the provider's well-known role first (server truth); the name check is only
+// a fallback for a role-less folder (e.g. a backend that doesn't report roles).
+function isOutgoingFolder(f: FolderInfo): boolean {
+  if (f.role) return f.role === "sentitems" || f.role === "drafts" || f.role === "outbox";
+  const n = f.name.toLowerCase();
   return n === "sent items" || n === "sent" || n === "drafts" || n === "outbox";
 }
 // The Drafts folder: clicking a row resumes editing in compose, not the reader.
-// (Matched by displayName, consistent with the app's other folder special-casing.)
-function isDraftsFolder(name: string): boolean {
-  return name.toLowerCase() === "drafts";
+// Role-first, with a display-name fallback.
+function isDraftsFolder(f: FolderInfo): boolean {
+  return f.role ? f.role === "drafts" : f.name.toLowerCase() === "drafts";
 }
-// Well-known system folders. Rename/Delete are withheld for these: Graph rejects
-// deleting them anyway, and — critically — the app identifies Inbox/Drafts/Sent by
-// displayName (tray unread count, outgoing-column rendering, draft resume), so a
-// rename would silently break that detection. Matched by name to stay consistent
-// with the app's existing English-mailbox special-casing.
+// Fallback floor of system-folder display names, used only when a folder carries
+// no provider role (offline cache before the first live list, or a backend that
+// doesn't report roles). Note: "sent" is deliberately absent — a user folder
+// literally named "Sent" (distinct from the real "Sent Items") is an ordinary,
+// deletable folder, and the role check below handles the genuine distinguished
+// sent folder whatever its localized name.
 const PROTECTED_FOLDER_NAMES = new Set([
   "inbox",
   "drafts",
   "sent items",
-  "sent",
   "outbox",
   "deleted items",
   "junk email",
   "archive",
   "conversation history",
+  "sync issues",
+  "conflicts",
+  "local failures",
+  "server failures",
 ]);
-function isProtectedFolder(name: string): boolean {
-  return PROTECTED_FOLDER_NAMES.has(name.toLowerCase());
+// A folder is protected from rename/delete when the provider identifies it as a
+// distinguished/system folder (server truth) — or, lacking a role, when its name
+// matches the fallback floor above. Renaming/deleting a system folder is rejected
+// by the provider anyway, and renaming one the app keys off (Inbox/Drafts/Sent)
+// would silently break role detection.
+function isProtectedFolder(f: FolderInfo): boolean {
+  return f.role != null || PROTECTED_FOLDER_NAMES.has(f.name.toLowerCase());
 }
 function currentFolderIsDrafts(): boolean {
   const folder = folders.find((f) => f.id === currentFolderId);
-  return !!folder && isDraftsFolder(folder.name);
+  return !!folder && isDraftsFolder(folder);
 }
 
 // ---- Sort (client-side, over the loaded window) ----
@@ -809,7 +825,7 @@ function renderInbox(inbox: Inbox): void {
   currentTotal = inbox.total;
 
   const folder = folders.find((f) => f.id === currentFolderId);
-  const showRecipient = !!folder && isOutgoingFolder(folder.name);
+  const showRecipient = !!folder && isOutgoingFolder(folder);
 
   // Quick-filter then sort the loaded window; grouping happens in renderListBody.
   const visible = sortMessages(applyFilter(inbox.messages));
@@ -2985,7 +3001,7 @@ function parseAddresses(value: string): string[] {
 // Pull the Drafts folder's cache up to date so the list reflects a just
 // saved/sent draft. No-op if Drafts isn't loaded; never throws.
 async function syncDraftsFolder(): Promise<void> {
-  const drafts = folders.find((f) => isDraftsFolder(f.name));
+  const drafts = folders.find((f) => isDraftsFolder(f));
   if (!drafts) return;
   try {
     await invoke("sync_folder", { folderId: drafts.id });
@@ -3293,10 +3309,12 @@ function showFolderMenu(x: number, y: number, fid: string | null): void {
   ];
   if (fid) {
     items.push({ act: "newSubfolder", label: "New subfolder…" });
-    // Rename/Delete only for non-system folders — renaming Inbox/Drafts/Sent
-    // would silently break the app's name-based folder detection.
+    // Rename/Delete only for non-system folders — the provider rejects mutating
+    // distinguished folders, and renaming one the app keys off would break role
+    // detection. A custom folder (e.g. one named "Sent") carries no role and is
+    // freely renamable/deletable.
     const target = folders.find((f) => f.id === fid);
-    if (target && !isProtectedFolder(target.name)) {
+    if (target && !isProtectedFolder(target)) {
       items.push(
         "sep",
         { act: "renameFolder", label: "Rename…" },
@@ -3362,6 +3380,13 @@ window.addEventListener("blur", hideFolderMenu);
 function folderErrorText(action: string, name: string, e: unknown): string {
   const raw = String(e);
   if (/already exist/i.test(raw)) return `A folder named "${name}" already exists here.`;
+  // The provider rejects renaming/deleting distinguished (system) folders with a
+  // raw API payload — surface a readable line instead. Protection normally hides
+  // the action for these, so this is the defense-in-depth path (e.g. a system
+  // folder with no well-known role, like RSS Feeds).
+  if (/DistinguishedFolder|cannot be deleted/i.test(raw)) {
+    return `"${name}" is a system folder and can't be ${action}d.`;
+  }
   return `Could not ${action} folder: ${raw}`;
 }
 
@@ -3415,7 +3440,7 @@ async function deleteFolder(id: string): Promise<void> {
       await loadFolders();
     }
   } catch (e) {
-    statusEl.textContent = `Could not delete folder: ${e}`;
+    statusEl.textContent = folderErrorText("delete", target?.name ?? "That folder", e);
   }
 }
 refreshBtn.addEventListener("click", () => {

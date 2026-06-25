@@ -3,15 +3,16 @@
 
 mod calendar;
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::LazyLock;
 
 use async_trait::async_trait;
 use base64::Engine;
 use wattmail_domain::{
-    Attachment, DraftPrefill, EmailAddress, Folder, MailError, MailProvider, MessageBody,
-    MessageChange, MessageHeader, MessageRule, MessageRuleActions, MessageRuleConditions,
-    MessageSummary, OutgoingAttachment, OutgoingMessage, SyncBatch, SyncToken, UserProfile,
+    Attachment, DraftPrefill, EmailAddress, Folder, FolderRole, MailError, MailProvider,
+    MessageBody, MessageChange, MessageHeader, MessageRule, MessageRuleActions,
+    MessageRuleConditions, MessageSummary, OutgoingAttachment, OutgoingMessage, SyncBatch,
+    SyncToken, UserProfile,
 };
 
 pub(super) const GRAPH_BASE: &str = "https://graph.microsoft.com/v1.0";
@@ -89,7 +90,110 @@ impl GraphClient {
             .map_err(|e| MailError::Decode(e.to_string()))?;
         Ok(body.value)
     }
+
+    /// Depth-first walk of the folder tree (children follow their parent), each
+    /// annotated with its nesting depth for indented display. Folders come back
+    /// role-less; [`folders`](Self::folders) fills in distinguished-folder roles.
+    async fn walk_folder_tree(&self) -> Result<Vec<Folder>, MailError> {
+        let mut result = Vec::new();
+        let top = self.fetch_child_folders(None).await?;
+        let mut stack: Vec<(GraphFolder, u32)> = top.into_iter().rev().map(|f| (f, 0)).collect();
+
+        while let Some((folder, depth)) = stack.pop() {
+            let has_children = folder.child_folder_count.unwrap_or(0) > 0;
+            let id = folder.id.clone();
+            result.push(Folder {
+                id: folder.id,
+                name: folder
+                    .display_name
+                    .unwrap_or_else(|| "(folder)".to_string()),
+                unread_count: folder.unread_item_count.unwrap_or(0),
+                depth,
+                role: None,
+            });
+            if has_children {
+                let children = self.fetch_child_folders(Some(&id)).await?;
+                for child in children.into_iter().rev() {
+                    stack.push((child, depth + 1));
+                }
+            }
+        }
+        Ok(result)
+    }
+
+    /// Resolve each well-known folder name to the concrete folder id it maps to
+    /// in this mailbox, returning an `id -> role` map. One Graph `$batch`
+    /// round-trip. This is the server-truth seam that lets the app protect (and
+    /// special-case) distinguished folders by id rather than by guessing from a
+    /// localized display name — so a user folder named "Sent" stays an ordinary,
+    /// deletable folder while the real `sentitems` is identified whatever its
+    /// name. Names the mailbox doesn't provision come back non-200 and are
+    /// omitted.
+    async fn well_known_roles(&self) -> Result<HashMap<String, FolderRole>, MailError> {
+        let requests: Vec<serde_json::Value> = WELL_KNOWN_FOLDER_NAMES
+            .iter()
+            .map(|name| {
+                serde_json::json!({
+                    "id": name,
+                    "method": "GET",
+                    "url": format!("/me/mailFolders/{name}?$select=id"),
+                })
+            })
+            .collect();
+
+        let response = self
+            .http
+            .post(format!("{GRAPH_BASE}/$batch"))
+            .bearer_auth(&self.access_token)
+            .json(&serde_json::json!({ "requests": requests }))
+            .send()
+            .await
+            .map_err(|e| MailError::Network(e.to_string()))?;
+        let batch: GraphBatchResponse = check_status(response)
+            .await?
+            .json()
+            .await
+            .map_err(|e| MailError::Decode(e.to_string()))?;
+        Ok(roles_from_batch(batch))
+    }
 }
+
+/// Build the `folder id -> role` map from a `$batch` response. Each successful
+/// sub-response carries the concrete id a well-known name resolved to; non-200
+/// sub-responses (e.g. 404 for an unprovisioned Archive) carry an error body
+/// with no folder id and are skipped. Pure, so the mapping is unit-tested.
+fn roles_from_batch(batch: GraphBatchResponse) -> HashMap<String, FolderRole> {
+    let mut roles = HashMap::new();
+    for sub in batch.responses {
+        if sub.status == 200 {
+            if let (Some(role), Some(id)) =
+                (FolderRole::parse(&sub.id), sub.body.and_then(|b| b.id))
+            {
+                roles.insert(id, role);
+            }
+        }
+    }
+    roles
+}
+
+/// Graph's canonical well-known (distinguished) folder names WattMail resolves
+/// to [`FolderRole`]s. These match [`FolderRole::as_str`]; resolving each to its
+/// concrete folder id is what makes protection server-truth rather than a guess
+/// from the display name.
+const WELL_KNOWN_FOLDER_NAMES: [&str; 12] = [
+    "inbox",
+    "drafts",
+    "sentitems",
+    "deleteditems",
+    "junkemail",
+    "outbox",
+    "archive",
+    "conversationhistory",
+    "syncissues",
+    "conflicts",
+    "localfailures",
+    "serverfailures",
+];
 
 #[async_trait]
 impl MailProvider for GraphClient {
@@ -111,31 +215,15 @@ impl MailProvider for GraphClient {
     }
 
     async fn folders(&self) -> Result<Vec<Folder>, MailError> {
-        // Depth-first walk of the folder tree so children follow their parent,
-        // each annotated with its nesting depth for indented display.
-        let mut result = Vec::new();
-        let top = self.fetch_child_folders(None).await?;
-        let mut stack: Vec<(GraphFolder, u32)> = top.into_iter().rev().map(|f| (f, 0)).collect();
-
-        while let Some((folder, depth)) = stack.pop() {
-            let has_children = folder.child_folder_count.unwrap_or(0) > 0;
-            let id = folder.id.clone();
-            result.push(Folder {
-                id: folder.id,
-                name: folder
-                    .display_name
-                    .unwrap_or_else(|| "(folder)".to_string()),
-                unread_count: folder.unread_item_count.unwrap_or(0),
-                depth,
-            });
-            if has_children {
-                let children = self.fetch_child_folders(Some(&id)).await?;
-                for child in children.into_iter().rev() {
-                    stack.push((child, depth + 1));
-                }
-            }
+        let mut tree = self.walk_folder_tree().await?;
+        // Tag distinguished folders from server truth. Best-effort: a failed
+        // role lookup must not break the sidebar — folders then carry no role and
+        // the presentation layer falls back to its name-based protection floor.
+        let roles = self.well_known_roles().await.unwrap_or_default();
+        for folder in &mut tree {
+            folder.role = roles.get(&folder.id).copied();
         }
-        Ok(result)
+        Ok(tree)
     }
 
     async fn list_recent(&self, top: u32) -> Result<Vec<MessageSummary>, MailError> {
@@ -420,6 +508,8 @@ impl MailProvider for GraphClient {
             name: created.display_name.unwrap_or_else(|| name.to_string()),
             unread_count: created.unread_item_count.unwrap_or(0),
             depth: 0,
+            // A freshly created folder is always an ordinary user folder.
+            role: None,
         })
     }
 
@@ -986,6 +1076,30 @@ struct GraphFolder {
     child_folder_count: Option<u32>,
 }
 
+/// The envelope of a Graph `$batch` response: one entry per sub-request, matched
+/// back to its request by `id` (response order is not guaranteed).
+#[derive(serde::Deserialize)]
+struct GraphBatchResponse {
+    responses: Vec<GraphBatchSubResponse>,
+}
+
+#[derive(serde::Deserialize)]
+struct GraphBatchSubResponse {
+    /// Echoes the sub-request id we set (a well-known folder name).
+    id: String,
+    status: u16,
+    /// The folder resource for a 200; an error object (carrying no folder `id`)
+    /// otherwise — unknown fields are ignored, so both shapes decode.
+    #[serde(default)]
+    body: Option<GraphBatchFolderBody>,
+}
+
+#[derive(serde::Deserialize)]
+struct GraphBatchFolderBody {
+    #[serde(default)]
+    id: Option<String>,
+}
+
 /// Build the Graph message body for a draft create/update: subject, HTML body,
 /// and recipients only. Attachments are out of MVP scope for drafts.
 fn draft_body_json(message: &OutgoingMessage) -> serde_json::Value {
@@ -1335,6 +1449,32 @@ mod tests {
             serde_json::from_str(r#"{"id":"AAA","@removed":{"reason":"deleted"}}"#)
                 .expect("parses");
         assert!(item.removed.is_some());
+    }
+
+    #[test]
+    fn batch_response_maps_well_known_ids_to_roles_and_skips_failures() {
+        // A realistic `$batch` reply: Inbox/Sent Items resolve (200, with the
+        // concrete folder id), Archive is unprovisioned (404), and Sync Issues
+        // resolves. Responses arrive out of order, as Graph permits.
+        let batch: GraphBatchResponse = serde_json::from_str(
+            r#"{
+                "responses": [
+                    {"id":"sentitems","status":200,"body":{"id":"FOLDER_SENT","@odata.context":"x"}},
+                    {"id":"archive","status":404,"body":{"error":{"code":"ErrorItemNotFound"}}},
+                    {"id":"inbox","status":200,"body":{"id":"FOLDER_INBOX"}},
+                    {"id":"syncissues","status":200,"body":{"id":"FOLDER_SYNC"}}
+                ]
+            }"#,
+        )
+        .expect("parses");
+
+        let roles = roles_from_batch(batch);
+        assert_eq!(roles.get("FOLDER_INBOX"), Some(&FolderRole::Inbox));
+        assert_eq!(roles.get("FOLDER_SENT"), Some(&FolderRole::SentItems));
+        assert_eq!(roles.get("FOLDER_SYNC"), Some(&FolderRole::SyncIssues));
+        // The 404 (Archive) contributed nothing — only resolved folders are kept.
+        assert_eq!(roles.len(), 3);
+        assert!(!roles.values().any(|r| *r == FolderRole::Archive));
     }
 
     #[test]

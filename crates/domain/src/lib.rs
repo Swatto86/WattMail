@@ -197,6 +197,82 @@ pub enum MailError {
     Unsupported,
 }
 
+/// The well-known role of a mail folder, as reported by the *provider's*
+/// distinguished-folder mapping — never inferred from the display name.
+///
+/// This is server truth. A custom folder a user happens to name "Sent" carries
+/// no role and is therefore an ordinary, deletable folder, while the genuine
+/// distinguished folder is identified by the provider whatever its localized
+/// name. The lowercase tags ([`FolderRole::as_str`]) mirror Microsoft Graph's
+/// well-known folder names, so they double as the wire/persistence form.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FolderRole {
+    Inbox,
+    Drafts,
+    SentItems,
+    DeletedItems,
+    JunkEmail,
+    Outbox,
+    Archive,
+    ConversationHistory,
+    /// Outlook's sync-logging root (`Sync Issues`) and its children
+    /// [`Conflicts`](Self::Conflicts), [`LocalFailures`](Self::LocalFailures),
+    /// and [`ServerFailures`](Self::ServerFailures). All distinguished — the
+    /// provider rejects deleting them.
+    SyncIssues,
+    Conflicts,
+    LocalFailures,
+    ServerFailures,
+}
+
+impl FolderRole {
+    /// Stable lowercase tag, mirroring Graph's well-known folder names. Shared
+    /// with the presentation layer and used as the local-cache persistence form.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Inbox => "inbox",
+            Self::Drafts => "drafts",
+            Self::SentItems => "sentitems",
+            Self::DeletedItems => "deleteditems",
+            Self::JunkEmail => "junkemail",
+            Self::Outbox => "outbox",
+            Self::Archive => "archive",
+            Self::ConversationHistory => "conversationhistory",
+            Self::SyncIssues => "syncissues",
+            Self::Conflicts => "conflicts",
+            Self::LocalFailures => "localfailures",
+            Self::ServerFailures => "serverfailures",
+        }
+    }
+
+    /// Parse a well-known-name tag (as produced by [`as_str`](Self::as_str), and
+    /// matching Graph's well-known folder names) back into a role; unknown tags
+    /// map to `None` so an ordinary folder stays role-less.
+    pub fn parse(raw: &str) -> Option<Self> {
+        Some(match raw {
+            "inbox" => Self::Inbox,
+            "drafts" => Self::Drafts,
+            "sentitems" => Self::SentItems,
+            "deleteditems" => Self::DeletedItems,
+            "junkemail" => Self::JunkEmail,
+            "outbox" => Self::Outbox,
+            "archive" => Self::Archive,
+            "conversationhistory" => Self::ConversationHistory,
+            "syncissues" => Self::SyncIssues,
+            "conflicts" => Self::Conflicts,
+            "localfailures" => Self::LocalFailures,
+            "serverfailures" => Self::ServerFailures,
+            _ => return None,
+        })
+    }
+
+    /// True for folders whose messages are outgoing — the list shows the
+    /// recipient ("To: …") rather than the sender: Sent Items, Drafts, Outbox.
+    pub fn is_outgoing(&self) -> bool {
+        matches!(self, Self::SentItems | Self::Drafts | Self::Outbox)
+    }
+}
+
 /// A mail folder (Inbox, Sent Items, a custom folder, …).
 #[derive(Debug, Clone)]
 pub struct Folder {
@@ -205,6 +281,11 @@ pub struct Folder {
     pub unread_count: u32,
     /// Nesting depth in the folder tree (0 = top level).
     pub depth: u32,
+    /// The folder's well-known role if the provider identifies it as a
+    /// distinguished/system folder; `None` for an ordinary user folder. Drives
+    /// delete/rename protection and outgoing-column / draft-resume special-casing
+    /// by server truth rather than by matching the English display name.
+    pub role: Option<FolderRole>,
 }
 
 /// Contract every mail backend (Graph, IMAP, …) implements.
@@ -608,6 +689,56 @@ mod tests {
         assert_eq!(ResponseStatus::parse(None), ResponseStatus::None);
         assert_eq!(ResponseStatus::parse(Some("")), ResponseStatus::None);
         assert_eq!(ResponseStatus::parse(Some("bogus")), ResponseStatus::None);
+    }
+
+    #[test]
+    fn folder_role_round_trips_its_tag() {
+        for role in [
+            FolderRole::Inbox,
+            FolderRole::Drafts,
+            FolderRole::SentItems,
+            FolderRole::DeletedItems,
+            FolderRole::JunkEmail,
+            FolderRole::Outbox,
+            FolderRole::Archive,
+            FolderRole::ConversationHistory,
+            FolderRole::SyncIssues,
+            FolderRole::Conflicts,
+            FolderRole::LocalFailures,
+            FolderRole::ServerFailures,
+        ] {
+            assert_eq!(FolderRole::parse(role.as_str()), Some(role));
+        }
+    }
+
+    #[test]
+    fn folder_role_parse_rejects_unknown_and_custom_names() {
+        // A user folder literally named "Sent" must not resolve to a role — that
+        // is the whole point: distinction is by server truth, not display name.
+        assert_eq!(FolderRole::parse("sent"), None);
+        assert_eq!(FolderRole::parse("Sent Items"), None); // not the lowercase tag
+        assert_eq!(FolderRole::parse(""), None);
+        assert_eq!(FolderRole::parse("rssfeeds"), None);
+    }
+
+    #[test]
+    fn folder_role_is_outgoing_covers_only_outgoing_folders() {
+        for role in [
+            FolderRole::SentItems,
+            FolderRole::Drafts,
+            FolderRole::Outbox,
+        ] {
+            assert!(role.is_outgoing(), "{} should be outgoing", role.as_str());
+        }
+        for role in [
+            FolderRole::Inbox,
+            FolderRole::DeletedItems,
+            FolderRole::JunkEmail,
+            FolderRole::Archive,
+            FolderRole::SyncIssues,
+        ] {
+            assert!(!role.is_outgoing(), "{} is not outgoing", role.as_str());
+        }
     }
 
     #[test]

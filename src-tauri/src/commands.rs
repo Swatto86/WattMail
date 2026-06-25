@@ -112,6 +112,11 @@ pub struct FolderDto {
     pub name: String,
     pub unread_count: u32,
     pub depth: u32,
+    /// Well-known-folder tag (`inbox`, `sentitems`, `syncissues`, …) when the
+    /// provider identifies this as a distinguished/system folder; `None` for an
+    /// ordinary user folder. The frontend uses it — not the display name — to
+    /// decide delete/rename protection and the outgoing-column special-casing.
+    pub role: Option<String>,
 }
 
 fn folder_dto(f: Folder) -> FolderDto {
@@ -120,6 +125,7 @@ fn folder_dto(f: Folder) -> FolderDto {
         name: f.name,
         unread_count: f.unread_count,
         depth: f.depth,
+        role: f.role.map(|r| r.as_str().to_string()),
     }
 }
 
