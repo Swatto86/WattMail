@@ -87,6 +87,38 @@ Entra app registration (public, not secret):
 
 ## Progress log
 
+### 2026-06-25 — Distinguished-folder detection by Graph well-known name, not display name (v0.2.2)
+Fixes two folder bugs that shared one root cause — folder *role* was guessed from
+the **English display name** (`PROTECTED_FOLDER_NAMES` / `isOutgoingFolder` in
+main.ts), which both over- and under-blocked:
+- A custom folder literally named **"Sent"** (distinct from the real "Sent Items")
+  was treated as protected, so its right-click **Delete** was withheld.
+- Exchange system folders **not** in the hardcoded English set — the **Sync Issues**
+  family (Sync Issues / Conflicts / Local Failures / Server Failures), RSS Feeds —
+  were offered a Delete that Graph always rejects with a raw
+  `ErrorDeleteDistinguishedFolder` 400, dumped verbatim to the status line. This is
+  the footgun the v0.1.23 notes flagged as "no reliable well-known flag in the
+  default `$select`" — now resolved.
+- **Fix (server truth).** New `FolderRole` enum + `Folder.role` in `domain`. The
+  Graph backend resolves the well-known distinguished-folder names to their concrete
+  ids in **one `$batch` round-trip** (`well_known_roles()` → pure, unit-tested
+  `roles_from_batch()`), tagging each folder by **id**, not name. Best-effort: a
+  `$batch` failure degrades to a role-less list (sidebar still renders). Gmail maps
+  its system labels to roles too. Role persisted in the SQLite cache (**schema v8**,
+  drop-and-rebuild). `FolderDto.role` carries it to the frontend, where protection /
+  outgoing-column / draft-resume now key off the role; the English-name set remains
+  only as an **offline fallback floor**, with **"sent" removed**. Delete errors map
+  to a readable "system folder" line.
+- **Verification level:** compile-verified — fmt, `clippy --all-targets -D warnings`,
+  `cargo test --workspace` (34 tests, incl. new `FolderRole` round-trip + `$batch`
+  decode tests), `tsc` + `vite build`. **Not yet live-run verified** against a real
+  mailbox (can't auth to Graph here) — the `$batch` wire shape and whether the user's
+  "Sent" is genuinely a custom (deletable) folder are unconfirmed. Pushed to `main`
+  (CI runs the full `tauri build`); **release tag held pending the live test**
+  (right-click "Sent" → Delete appears & works; Sync Issues no longer raw-errors).
+  Both outcomes degrade gracefully (a secretly-distinguished "Sent" now shows the
+  friendly message instead of raw JSON).
+
 ### 2026-06-25 — About dialog (v0.2.1)
 Frontend-only. Adds the **About dialog** (desktop-capability checklist item): app
 name, **version read from the build** (`getVersion()`, not hard-coded), description,
