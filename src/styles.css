@@ -52,6 +52,11 @@ body,
   flex-shrink: 0;
   padding: 2px 6px;
   color: oklch(var(--bc));
+  cursor: pointer;
+  border-radius: 6px;
+}
+.toolbar-brand:hover {
+  background: oklch(var(--bc) / 0.06);
 }
 .brand-name {
   font-size: 14px;
@@ -1463,4 +1468,59 @@ body,
   margin-top: 8px;
   font-size: 13px;
   resize: vertical;
+}
+
+/* ============================================================================
+   About dialog
+   ============================================================================ */
+.about-panel {
+  width: 380px;
+}
+.about-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+.about-name {
+  font-size: 20px;
+  font-weight: 700;
+  color: oklch(var(--bc));
+}
+.about-version {
+  font-size: 12px;
+  opacity: 0.6;
+  font-family: ui-monospace, "Cascadia Code", monospace;
+}
+.about-desc {
+  margin: 8px 0 14px;
+  font-size: 13px;
+  color: oklch(var(--bc) / 0.7);
+}
+.about-rows {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.about-row {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  font-size: 13px;
+}
+.about-key {
+  flex-shrink: 0;
+  width: 84px;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  color: oklch(var(--bc) / 0.5);
+}
+.about-link {
+  color: oklch(var(--p));
+  cursor: pointer;
+  text-decoration: none;
+  word-break: break-all;
+}
+.about-link:hover {
+  text-decoration: underline;
 }

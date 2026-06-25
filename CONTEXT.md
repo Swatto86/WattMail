@@ -87,6 +87,20 @@ Entra app registration (public, not secret):
 
 ## Progress log
 
+### 2026-06-25 — About dialog (v0.2.1)
+Frontend-only. Adds the **About dialog** (desktop-capability checklist item): app
+name, **version read from the build** (`getVersion()`, not hard-coded), description,
+**Developer = Swatto**, **Licence = MIT**, a **github.com/Swatto86/WattMail** source
+link (opens in the system browser via `openUrl` on a hard-coded `REPO_URL`), and a
+**Check for updates** button reusing the existing updater (`check()` + the banner/
+install flow; reports up-to-date / available / offline). Two entry points: an
+"About…" row in Settings and clicking the toolbar **WattMail** brand. Wired into the
+Esc stack + `aModalIsOpen` shortcut guard; backdrop-click closes; `oklch()` DaisyUI
+tokens. `openAbout()` closes Settings first so About never stacks on it (review-found:
+otherwise the update banner stays hidden behind Settings). Reviewed (2-lens adversarial
++ per-finding verify): integration clean, 1 medium UX finding fixed. Rolled into the
+v0.2.1 release alongside the calendar so there's one build to test.
+
 ### 2026-06-25 — Calendar tab over Microsoft Graph (v0.2.0 — released for live testing)
 **The app's first multi-view feature.** Adds a Mail/Calendar view switch and a
 calendar tab with a rolling 7-day agenda, event detail pane, RSVP, and create-event.

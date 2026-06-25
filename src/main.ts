@@ -412,6 +412,10 @@ appRoot.innerHTML = /* html */ `
         <span>Inbox rules<br /><span class="hint">Server-side rules that move or mark messages on arrival</span></span>
         <button id="rules-btn" class="btn btn-sm">Rules&hellip;</button>
       </div>
+      <div class="settings-row">
+        <span>About<br /><span class="hint">Version, developer, source, and updates</span></span>
+        <button id="about-btn" class="btn btn-sm">About&hellip;</button>
+      </div>
       <div class="settings-row settings-accounts">
         <div class="settings-accounts-head">
           <span>Accounts<br /><span class="hint">Switch, add, or remove mailboxes</span></span>
@@ -421,6 +425,30 @@ appRoot.innerHTML = /* html */ `
       </div>
       <div id="settings-msg" class="settings-msg"></div>
       <div class="settings-actions"><button id="settings-close" class="btn btn-sm">Close</button></div>
+    </div>
+  </div>
+
+  <div id="about-overlay" class="overlay hidden">
+    <div class="settings-panel about-panel">
+      <div class="about-head">
+        <div class="about-name">WattMail</div>
+        <div id="about-version" class="about-version"></div>
+      </div>
+      <div class="about-desc">A personal desktop email client for Office 365.</div>
+      <div class="about-rows">
+        <div class="about-row"><span class="about-key">Developer</span><span>Swatto</span></div>
+        <div class="about-row"><span class="about-key">Licence</span><span>MIT</span></div>
+        <div class="about-row">
+          <span class="about-key">Source</span>
+          <a href="#" id="about-repo" class="about-link" title="Open the GitHub repository in your browser">github.com/Swatto86/WattMail</a>
+        </div>
+      </div>
+      <div id="about-msg" class="settings-msg"></div>
+      <div class="settings-actions" style="gap: 8px">
+        <button id="about-updates" class="btn btn-sm">Check for updates</button>
+        <span style="flex: 1"></span>
+        <button id="about-close" class="btn btn-sm">Close</button>
+      </div>
     </div>
   </div>
 
@@ -538,7 +566,15 @@ appRoot.innerHTML = /* html */ `
 `;
 
 const accountEl = document.querySelector<HTMLButtonElement>("#account")!;
+const brand = document.querySelector<HTMLDivElement>(".toolbar-brand")!;
 const brandVersion = document.querySelector<HTMLSpanElement>("#brand-version")!;
+const aboutBtn = document.querySelector<HTMLButtonElement>("#about-btn")!;
+const aboutOverlay = document.querySelector<HTMLDivElement>("#about-overlay")!;
+const aboutVersion = document.querySelector<HTMLDivElement>("#about-version")!;
+const aboutRepo = document.querySelector<HTMLAnchorElement>("#about-repo")!;
+const aboutUpdatesBtn = document.querySelector<HTMLButtonElement>("#about-updates")!;
+const aboutCloseBtn = document.querySelector<HTMLButtonElement>("#about-close")!;
+const aboutMsg = document.querySelector<HTMLDivElement>("#about-msg")!;
 const refreshBtn = document.querySelector<HTMLButtonElement>("#refresh")!;
 const gear = document.querySelector<HTMLButtonElement>("#gear")!;
 const sortSelect = document.querySelector<HTMLSelectElement>("#sort")!;
@@ -2476,6 +2512,63 @@ function closeSettings(): void {
   settingsOverlay.classList.add("hidden");
 }
 
+// ---- About ----
+const REPO_URL = "https://github.com/Swatto86/WattMail";
+
+async function openAbout(): Promise<void> {
+  // Close Settings first so About is never stacked on top of it — otherwise the
+  // update banner (which sits behind both overlays) would stay hidden after the
+  // user closes only About. About is reachable from the toolbar brand regardless.
+  closeSettings();
+  aboutMsg.textContent = "";
+  // Version comes from the build (tauri.conf.json), never hard-coded.
+  try {
+    aboutVersion.textContent = `v${await getVersion()}`;
+  } catch {
+    aboutVersion.textContent = "";
+  }
+  aboutOverlay.classList.remove("hidden");
+}
+function closeAbout(): void {
+  aboutOverlay.classList.add("hidden");
+}
+
+// Explicit "check for updates" from the About dialog: unlike the silent
+// launch check, it always reports a result. A found update reuses the existing
+// banner + install flow.
+async function aboutCheckUpdates(): Promise<void> {
+  aboutUpdatesBtn.disabled = true;
+  aboutMsg.textContent = "Checking for updates…";
+  try {
+    const update = await check();
+    if (update) {
+      pendingUpdate = update;
+      updateText.textContent = `WattMail ${update.version} is available.`;
+      updateBanner.classList.remove("hidden");
+      aboutMsg.textContent = `Version ${update.version} is available — close this dialog and use the update banner at the top to install it.`;
+    } else {
+      const current = await getVersion().catch(() => "");
+      aboutMsg.textContent = current ? `You're up to date (v${current}).` : "You're up to date.";
+    }
+  } catch {
+    aboutMsg.textContent = "Couldn't check for updates — you may be offline.";
+  } finally {
+    aboutUpdatesBtn.disabled = false;
+  }
+}
+
+aboutBtn.addEventListener("click", () => void openAbout());
+brand.addEventListener("click", () => void openAbout());
+aboutCloseBtn.addEventListener("click", closeAbout);
+aboutUpdatesBtn.addEventListener("click", () => void aboutCheckUpdates());
+aboutRepo.addEventListener("click", (e) => {
+  e.preventDefault();
+  void openUrl(REPO_URL);
+});
+aboutOverlay.addEventListener("click", (e) => {
+  if (e.target === aboutOverlay) closeAbout();
+});
+
 // ---- Paste sanitizer (SECURITY-CRITICAL) ----
 // Pasted/dropped content can originate from a hostile web page, so it is parsed
 // into a detached document and rebuilt against an allow-list — never inserted
@@ -3541,6 +3634,7 @@ document.addEventListener("keydown", (e) => {
     else closeRules();
   }
   else if (!headersOverlay.classList.contains("hidden")) closeHeaders();
+  else if (!aboutOverlay.classList.contains("hidden")) closeAbout();
   else if (!settingsOverlay.classList.contains("hidden")) closeSettings();
   else if (!composeOverlay.classList.contains("hidden")) closeCompose();
 });
@@ -3567,6 +3661,7 @@ function aModalIsOpen(): boolean {
   return (
     !composeOverlay.classList.contains("hidden") ||
     !settingsOverlay.classList.contains("hidden") ||
+    !aboutOverlay.classList.contains("hidden") ||
     !headersOverlay.classList.contains("hidden") ||
     !rulesOverlay.classList.contains("hidden") ||
     !shortcutsOverlay.classList.contains("hidden")
