@@ -5,7 +5,7 @@
 > new milestone state, a decision made/reversed, or an open question resolved.
 > Keep newest progress entries at the top of the log.
 >
-> **Last updated:** 2026-06-24
+> **Last updated:** 2026-06-25
 
 ---
 
@@ -87,7 +87,7 @@ Entra app registration (public, not secret):
 
 ## Progress log
 
-### 2026-06-24 — Calendar tab over Microsoft Graph (NOT yet released — live test pending)
+### 2026-06-25 — Calendar tab over Microsoft Graph (v0.2.0 — released for live testing)
 **The app's first multi-view feature.** Adds a Mail/Calendar view switch and a
 calendar tab with a rolling 7-day agenda, event detail pane, RSVP, and create-event.
 
@@ -120,11 +120,15 @@ calendar tab with a rolling 7-day agenda, event detail pane, RSVP, and create-ev
   docs cited — the project's classic "compile-green ≠ correct Graph wire" class), fixed
   all 11, then a **fix-verification pass** (16/16 resolved, 0 regressions). Removed the
   dead `calendars()`/`list_calendars` path (registered IPC nobody called).
-- **Verification level:** compile-verified only — `clippy --all-targets -D warnings`,
+- **Verification level:** compile-verified — `clippy --all-targets -D warnings`,
   `cargo test --workspace` (30 tests, incl. new calendar decode/url/tz tests), `tsc` +
-  `vite build`. **NOT live-run verified.** Per the v0.1.13/14 lesson, do a live test
-  against a real mailbox (load agenda, open an event, RSVP, create an event, all-day +
-  recurring + a non-UTC/DST check) **before** bumping the version and tagging a release.
+  `vite build`, and the **full `tauri build` (CI, windows-latest)** + cross-check matrix.
+  Deliberately **released as v0.2.0 for the user to live-test via the published
+  installer** (release-then-test, by request) rather than the usual test-then-release —
+  the Graph calendar wire code is **not yet live-run verified**. First live pass to run:
+  sign out/in (grant `Calendars.ReadWrite`), load agenda, open an event, RSVP, create a
+  timed + all-day event, eyeball a recurring series and a non-UTC/BST moment. If a wire
+  bug surfaces (the v0.1.13/14 class), cut a fix release.
 
 ### 2026-06-24 — Post-review hardening of folder management (v0.1.24)
 Ran a verified 4-lens adversarial review of the v0.1.23 diff (Graph contract,
