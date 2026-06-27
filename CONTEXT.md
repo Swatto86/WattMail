@@ -5,7 +5,7 @@
 > new milestone state, a decision made/reversed, or an open question resolved.
 > Keep newest progress entries at the top of the log.
 >
-> **Last updated:** 2026-06-25
+> **Last updated:** 2026-06-27
 
 ---
 
@@ -93,6 +93,42 @@ Entra app registration (public, not secret):
 ---
 
 ## Progress log
+
+### 2026-06-27 — Native-feel UI polish: no webview context menu, in-app dialogs (v0.2.3)
+Frontend-only. Removes the two remaining "this is a web page" tells so the app
+reads as a native desktop client.
+
+- **Native context menu suppressed everywhere.** A single global
+  `contextmenu` handler (`main.ts`) `preventDefault()`s the webview's built-in
+  menu (Reload / Back / Inspect / …) across the whole UI, including inside the
+  sandboxed reading-pane iframe (`wireFrameLinks`). The existing bespoke menus
+  (message rows, folders, reading-pane links) are untouched — the global handler
+  bails for those regions so they still own their right-click.
+- **Custom edit menu replaces the lost native one.** So suppression doesn't
+  cripple text editing, editable fields (compose body + all inputs) get a
+  themed **Cut / Copy / Paste / Select all** menu, and any other text selection
+  (incl. the reading pane) gets **Copy**. Paste is **plain-text only** via
+  `navigator.clipboard.readText()` — the rich, sanitized paste path stays on the
+  editor's own `paste` event (Ctrl+V), so a right-click paste can never inject
+  unsanitized markup. Built on the shared `.ctx-menu` styles; the menu cross-hides
+  with the message/folder/link menus.
+- **In-app dialogs replace `window.alert/confirm/prompt`.** The native ones
+  render as OS dialogs whose title is the webview origin ("tauri…") — the
+  "popups still say tauri" the user reported. New self-contained `src/dialog.ts`
+  (`showAlert` / `showConfirm` / `showPrompt`, async, themed `.overlay` /
+  `.settings-panel`) replaces all five call sites: folder create / rename /
+  delete (`main.ts`), compose insert-link, and calendar delete-event
+  (`calendar.ts`). Esc cancels, Enter confirms, backdrop-click cancels; wired
+  into `aModalIsOpen()` so shortcuts suspend while one is open. The insert-link
+  prompt snapshots/restores the editor selection across the focus change so
+  `execCommand("createLink")` still applies.
+- **Verification level:** compile-verified — `tsc --noEmit` + `vite build` clean;
+  no Rust touched (CI runs fmt / clippy / test / full `tauri build`). **Not
+  live-run verified** — clipboard `readText()` permission and the iframe
+  selection-copy path are the parts to eyeball in a running build. Released as
+  v0.2.3 (release-then-test). Live pass: right-click anywhere → no webpage menu;
+  right-click an input → Cut/Copy/Paste works; create/rename/delete a folder and
+  the insert-link prompt show in-app dialogs (no "tauri" OS popup).
 
 ### 2026-06-25 — Distinguished-folder detection by Graph well-known name, not display name (v0.2.2)
 Fixes two folder bugs that shared one root cause — folder *role* was guessed from

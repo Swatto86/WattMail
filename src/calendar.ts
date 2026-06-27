@@ -11,6 +11,7 @@
 
 import { invoke } from "@tauri-apps/api/core";
 import { openUrl } from "@tauri-apps/plugin-opener";
+import { showConfirm } from "./dialog";
 
 interface Attendee {
   name: string;
@@ -556,9 +557,11 @@ async function respond(id: string, response: string): Promise<void> {
 }
 
 async function deleteEvent(ev: CalendarEvent): Promise<void> {
-  if (!window.confirm(`Delete "${ev.subject}"? This cancels the event for all attendees.`)) {
-    return;
-  }
+  const ok = await showConfirm(
+    `Delete "${ev.subject}"? This cancels the event for all attendees.`,
+    { title: "Delete event", okLabel: "Delete", danger: true },
+  );
+  if (!ok) return;
   const msg = detailEl.querySelector<HTMLDivElement>("#cal-detail-msg");
   if (msg) msg.textContent = "Deleting…";
   try {

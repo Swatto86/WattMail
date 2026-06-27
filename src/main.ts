@@ -13,6 +13,7 @@ import {
 } from "@tauri-apps/plugin-autostart";
 import { isPermissionGranted, requestPermission, sendNotification } from "@tauri-apps/plugin-notification";
 import { initCalendar, loadCalendar, resetCalendar } from "./calendar";
+import { showConfirm, showPrompt, isDialogOpen } from "./dialog";
 import "./styles.css";
 
 // ---- Backend DTOs (mirror src-tauri/src/commands.rs) ----
@@ -1152,12 +1153,20 @@ function wireFrameLinks(frame: HTMLIFrameElement): void {
     if (/^https?:\/\//i.test(href)) void openUrl(href);
   });
   doc.addEventListener("contextmenu", (ev) => {
-    const anchor = (ev.target as HTMLElement | null)?.closest?.("a");
-    if (!anchor) return; // off a link: leave the default menu
-    const href = anchor.getAttribute("href") ?? "";
-    if (!href) return;
+    // Never show the webview's native menu inside the reading pane either.
     ev.preventDefault();
-    showLinkContextMenu(ev.clientX, ev.clientY, href, frame);
+    const anchor = (ev.target as HTMLElement | null)?.closest?.("a");
+    const href = anchor?.getAttribute("href") ?? "";
+    if (href) {
+      showLinkContextMenu(ev.clientX, ev.clientY, href, frame);
+      return;
+    }
+    // Off a link: offer Copy for any selected body text. The selection lives in
+    // the iframe's own window; map the click point into the parent viewport.
+    const selected = frame.contentWindow?.getSelection()?.toString() ?? "";
+    if (!selected) return;
+    const rect = frame.getBoundingClientRect();
+    showEditMenu(rect.left + ev.clientX, rect.top + ev.clientY, null, selected);
   });
 }
 
@@ -1169,6 +1178,7 @@ linkCtxMenu.innerHTML = `<button class="ctx-item" data-act="copy">Copy link addr
 document.body.appendChild(linkCtxMenu);
 
 function showLinkContextMenu(x: number, y: number, href: string, frame: HTMLIFrameElement): void {
+  hideEditMenu();
   linkCtxMenu.style.left = "0";
   linkCtxMenu.style.top = "0";
   linkCtxMenu.classList.remove("hidden");
@@ -3375,6 +3385,179 @@ document.addEventListener("keydown", (e) => {
 });
 window.addEventListener("blur", hideFolderMenu);
 
+// ---- Native context-menu suppression + custom edit menu ----
+// The app should feel like a native desktop app, not a web page: right-clicking
+// must never surface the webview's built-in menu (Reload / Back / Inspect / …).
+// We suppress it globally and, where it makes sense, replace it with our own:
+//   - message rows / folders / reading-pane links already have bespoke menus
+//     (handled by their own listeners above);
+//   - editable fields get a Cut / Copy / Paste / Select all menu;
+//   - any other text selection gets a Copy menu.
+// Everywhere else the menu is simply suppressed.
+const editMenu = document.createElement("div");
+editMenu.className = "ctx-menu hidden";
+editMenu.setAttribute("role", "menu");
+document.body.appendChild(editMenu);
+
+function hideEditMenu(): void {
+  editMenu.classList.add("hidden");
+  editMenuTarget = null;
+}
+
+// Resolve the editable element a context-menu event landed in, if any. Only
+// text-bearing inputs/textareas and contenteditable hosts qualify.
+function editableFrom(node: EventTarget | null): HTMLElement | null {
+  const el = node instanceof HTMLElement ? node : null;
+  if (!el) return null;
+  if (el instanceof HTMLTextAreaElement) return el;
+  if (el instanceof HTMLInputElement) {
+    const t = el.type;
+    return t === "" || /^(text|search|email|url|tel|password|number)$/.test(t) ? el : null;
+  }
+  const host = el.closest<HTMLElement>("[contenteditable='true'], [contenteditable='']");
+  return host;
+}
+
+// The text currently selected within `el` (handles both field kinds).
+function selectionTextIn(el: HTMLElement): string {
+  if (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement) {
+    return el.value.slice(el.selectionStart ?? 0, el.selectionEnd ?? 0);
+  }
+  return window.getSelection()?.toString() ?? "";
+}
+
+function selectAllIn(el: HTMLElement): void {
+  if (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement) {
+    el.select();
+    return;
+  }
+  const range = document.createRange();
+  range.selectNodeContents(el);
+  const sel = window.getSelection();
+  sel?.removeAllRanges();
+  sel?.addRange(range);
+}
+
+// Insert plain text at the caret, replacing any selection. Plain text only — the
+// rich/sanitized paste path stays on the editor's own `paste` event (Ctrl+V),
+// so a right-click paste can never inject unsanitized markup.
+function insertTextInto(el: HTMLElement, text: string): void {
+  if (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement) {
+    const start = el.selectionStart ?? el.value.length;
+    const end = el.selectionEnd ?? el.value.length;
+    el.value = el.value.slice(0, start) + text + el.value.slice(end);
+    const caret = start + text.length;
+    el.selectionStart = el.selectionEnd = caret;
+    el.dispatchEvent(new Event("input", { bubbles: true }));
+    return;
+  }
+  el.focus();
+  document.execCommand("insertText", false, text);
+}
+
+function deleteSelectionIn(el: HTMLElement): void {
+  if (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement) {
+    insertTextInto(el, "");
+    return;
+  }
+  el.focus();
+  document.execCommand("delete");
+}
+
+// The editable element the menu currently targets (null for a copy-only menu),
+// plus a snapshot of the selected text (used when the selection isn't in an
+// editable field — e.g. the reading-pane iframe, whose selection lives in its
+// own window and can't be read back from here on click).
+let editMenuTarget: HTMLElement | null = null;
+let editMenuSelectedText = "";
+
+function showEditMenu(x: number, y: number, editable: HTMLElement | null, selected: string): void {
+  hideCtxMenu();
+  hideFolderMenu();
+  linkCtxMenu.classList.add("hidden");
+  editMenuTarget = editable;
+  editMenuSelectedText = selected;
+  const items: string[] = [];
+  if (editable) {
+    if (selected) {
+      items.push(`<button class="ctx-item" data-act="cut">Cut</button>`);
+      items.push(`<button class="ctx-item" data-act="copy">Copy</button>`);
+    }
+    items.push(`<button class="ctx-item" data-act="paste">Paste</button>`);
+    items.push(`<div class="ctx-sep"></div>`);
+    items.push(`<button class="ctx-item" data-act="selectAll">Select all</button>`);
+  } else if (selected) {
+    items.push(`<button class="ctx-item" data-act="copy">Copy</button>`);
+  }
+  editMenu.innerHTML = items.join("");
+  editMenu.classList.remove("hidden");
+  editMenu.style.left = "0";
+  editMenu.style.top = "0";
+  const left = Math.max(4, Math.min(x, window.innerWidth - editMenu.offsetWidth - 4));
+  const top = Math.max(4, Math.min(y, window.innerHeight - editMenu.offsetHeight - 4));
+  editMenu.style.left = `${left}px`;
+  editMenu.style.top = `${top}px`;
+}
+
+editMenu.addEventListener("mousedown", (e) => {
+  // Run on mousedown so the editor keeps its selection/focus (a click would
+  // first blur the field). preventDefault stops the focus shift to the menu.
+  e.preventDefault();
+  e.stopPropagation();
+  const item = (e.target as HTMLElement).closest<HTMLElement>(".ctx-item");
+  const el = editMenuTarget;
+  if (!item) return;
+  const act = item.dataset.act;
+  const selected = el ? selectionTextIn(el) : editMenuSelectedText;
+  hideEditMenu();
+  if (act === "copy") {
+    void copyText(selected);
+  } else if (act === "cut" && el) {
+    void copyText(selectionTextIn(el)).then(() => deleteSelectionIn(el));
+  } else if (act === "paste" && el) {
+    void navigator.clipboard
+      .readText()
+      .then((text) => {
+        if (text) insertTextInto(el, text);
+      })
+      .catch(() => {
+        // Clipboard read denied/unavailable: fall back to the editor's own
+        // paste (Ctrl+V) — nothing to do here.
+      });
+  } else if (act === "selectAll" && el) {
+    selectAllIn(el);
+  }
+});
+
+// The single global suppressor. Runs in the bubble phase, after the row/folder
+// listeners above have had their chance to open their own menu.
+document.addEventListener("contextmenu", (e) => {
+  e.preventDefault(); // never show the webview's native menu
+  hideEditMenu(); // clear any stale edit menu; the row/folder menus opened above
+  const target = e.target;
+  // A bespoke menu owns these regions — don't also open the edit menu.
+  if (target instanceof Node) {
+    if (listEl.contains(target) && (target as HTMLElement).closest?.(".msg")) return;
+    if (foldersEl.contains(target)) return;
+    if (editMenu.contains(target)) return;
+  }
+  const editable = editableFrom(target);
+  const selected = editable ? selectionTextIn(editable) : (window.getSelection()?.toString() ?? "");
+  if (!editable && !selected) {
+    hideEditMenu();
+    return; // nothing useful to offer — stay silent, native menu already gone
+  }
+  showEditMenu(e.clientX, e.clientY, editable, selected);
+});
+
+document.addEventListener("click", (e) => {
+  if (!editMenu.contains(e.target as Node)) hideEditMenu();
+});
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape") hideEditMenu();
+});
+window.addEventListener("blur", hideEditMenu);
+
 // Turn a folder-operation error into a readable status line. Graph rejects a
 // duplicate name with a 409 whose raw body would otherwise dump JSON at the user.
 function folderErrorText(action: string, name: string, e: unknown): string {
@@ -3391,7 +3574,11 @@ function folderErrorText(action: string, name: string, e: unknown): string {
 }
 
 async function createFolder(parentId: string | null): Promise<void> {
-  const name = window.prompt(parentId ? "New subfolder name:" : "New folder name:");
+  const name = await showPrompt(parentId ? "New subfolder name:" : "New folder name:", {
+    title: parentId ? "New subfolder" : "New folder",
+    okLabel: "Create",
+    placeholder: "Folder name",
+  });
   if (name === null) return;
   const trimmed = name.trim();
   if (!trimmed) return;
@@ -3405,7 +3592,11 @@ async function createFolder(parentId: string | null): Promise<void> {
 
 async function renameFolder(id: string): Promise<void> {
   const current = folders.find((f) => f.id === id);
-  const name = window.prompt("Rename folder:", current?.name ?? "");
+  const name = await showPrompt("Rename folder:", {
+    title: "Rename folder",
+    okLabel: "Rename",
+    defaultValue: current?.name ?? "",
+  });
   if (name === null) return;
   const trimmed = name.trim();
   if (!trimmed || trimmed === current?.name) return;
@@ -3419,8 +3610,9 @@ async function renameFolder(id: string): Promise<void> {
 
 async function deleteFolder(id: string): Promise<void> {
   const target = folders.find((f) => f.id === id);
-  const ok = window.confirm(
+  const ok = await showConfirm(
     `Delete folder "${target?.name ?? ""}" and everything in it? This cannot be undone.`,
+    { title: "Delete folder", okLabel: "Delete", danger: true },
   );
   if (!ok) return;
   try {
@@ -3539,8 +3731,26 @@ composeToolbar.addEventListener("mousedown", (e) => {
   e.preventDefault();
   const cmd = btn.dataset.cmd ?? "";
   if (cmd === "createLink") {
-    const url = window.prompt("Link URL:");
-    if (url) document.execCommand("createLink", false, url);
+    // The in-app prompt takes focus, which would collapse the editor selection
+    // execCommand("createLink") needs. mousedown's preventDefault has kept the
+    // selection intact for now, so snapshot it and restore it before applying.
+    const sel = window.getSelection();
+    const saved = sel && sel.rangeCount > 0 ? sel.getRangeAt(0).cloneRange() : null;
+    void (async () => {
+      const url = await showPrompt("Link URL:", {
+        title: "Insert link",
+        okLabel: "Insert",
+        placeholder: "https://example.com",
+      });
+      if (!url) return;
+      cBodyInput.focus();
+      if (saved) {
+        const s = window.getSelection();
+        s?.removeAllRanges();
+        s?.addRange(saved);
+      }
+      document.execCommand("createLink", false, url);
+    })();
   } else if (cmd) {
     document.execCommand(cmd, false);
   }
@@ -3689,7 +3899,8 @@ function aModalIsOpen(): boolean {
     !aboutOverlay.classList.contains("hidden") ||
     !headersOverlay.classList.contains("hidden") ||
     !rulesOverlay.classList.contains("hidden") ||
-    !shortcutsOverlay.classList.contains("hidden")
+    !shortcutsOverlay.classList.contains("hidden") ||
+    isDialogOpen()
   );
 }
 

@@ -392,6 +392,26 @@ body,
   margin-top: 12px;
 }
 
+/* In-app alert / confirm / prompt dialogs (dialog.ts) */
+.dialog-panel {
+  width: 380px;
+}
+.dialog-message {
+  font-size: 13px;
+  line-height: 1.5;
+  color: oklch(var(--bc));
+  white-space: pre-wrap;
+}
+.dialog-input {
+  width: 100%;
+  margin-top: 12px;
+}
+.dialog-message.hidden,
+.dialog-input.hidden,
+.dialog-panel .settings-title.hidden {
+  display: none;
+}
+
 /* Message headers viewer */
 .headers-panel {
   width: 720px;
