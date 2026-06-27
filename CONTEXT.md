@@ -94,6 +94,26 @@ Entra app registration (public, not secret):
 
 ## Progress log
 
+### 2026-06-27 — Compose on a white "paper" surface in both themes (v0.2.4)
+CSS-only. Closed the last email-body readability gap: **reply / forward / draft
+editing in dark mode**. The reader was already adaptive (v0.1.15), but the compose
+editor (`.compose-body`, a `contenteditable`) was painted with the app theme
+(`background: oklch(var(--b1)); color: oklch(var(--bc))`). In the dark theme that
+gave a dark surface, while the quoted original (inserted by `openCompose` from
+`prepare_reply`/`prepare_forward`, carrying the author's light-mode inline colours
+like `color:#000`) rendered **black-on-dark — unreadable**. It was also not WYSIWYG:
+typed text the recipient receives as dark-on-white showed as light-on-dark.
+- **Fix.** `.compose-body` now uses a fixed white paper surface in **both** themes
+  (`background:#fff; color:#1a1a1a`), with `a { color:#2563eb }` and the dark-theme
+  paper-card shadow that mirrors `.reader-frame.is-paper-card`. The message is sent
+  and read on white, so authoring on white is both correct and Outlook/Apple-Mail-like.
+- **Respects the v0.1.15 constraint** ("compose quoted-original is *not* adapted — it
+  is send-bound content; recolouring would corrupt outgoing mail"): the editor surface
+  changes, the content's colours are never rewritten. Outgoing HTML is unchanged.
+- **Verified.** `cargo fmt --check`, `npm run build`, `cargo test` for the three
+  non-GUI crates (26/26) clean. clippy + full `tauri build` deferred to CI (no
+  `libsoup-3.0` in this sandbox); no Rust logic changed, only version bumps.
+
 ### 2026-06-27 — Native-feel UI polish: no webview context menu, in-app dialogs (v0.2.3)
 Frontend-only. Removes the two remaining "this is a web page" tells so the app
 reads as a native desktop client.

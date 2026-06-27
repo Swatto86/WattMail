@@ -783,8 +783,20 @@ body,
   padding: 8px 10px;
   border-radius: 6px;
   border: 1px solid oklch(var(--bc) / 0.2);
-  background: oklch(var(--b1));
-  color: oklch(var(--bc));
+  /* Author on a white "paper" surface in BOTH themes — the message will be sent
+     and read on white, and quoted reply/forward content carries the original
+     author's light-mode colours (e.g. black text). A themed dark editor would
+     render that quote black-on-dark (unreadable) and would not be WYSIWYG.
+     Mirrors the reader's white paper card; matches Outlook / Apple Mail. */
+  background: #ffffff;
+  color: #1a1a1a;
+}
+.compose-body a {
+  color: #2563eb;
+}
+/* Frame the white paper as a sheet in the dark theme, like the reading pane. */
+[data-theme="business"] .compose-body {
+  box-shadow: 0 1px 4px oklch(var(--bc) / 0.25);
 }
 .compose-body img {
   max-width: 100%;
@@ -796,7 +808,7 @@ body,
 }
 .compose-body:empty::before {
   content: "Write your message…";
-  opacity: 0.5;
+  color: #6b7280;
   pointer-events: none;
 }
 .compose-quote-note {
