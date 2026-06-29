@@ -11,7 +11,7 @@ rest.
 The code is cross-platform-capable (paths and the keychain backend are abstracted
 per-OS) but macOS and Linux are only compile-checked in CI — not built or run live.
 
-> Status: **v0.1.19** — functional and actively developed. See [`CONTEXT.md`](CONTEXT.md)
+> Status: **v0.2.5** — functional and actively developed. See [`CONTEXT.md`](CONTEXT.md)
 > for the live progress log, architecture decisions, and roadmap.
 
 ## Features
@@ -38,6 +38,10 @@ per-OS) but macOS and Linux are only compile-checked in CI — not built or run 
   rich-text editor, sanitized rich-HTML paste, inline images (paste/drag-drop), and attachments.
 - **Drafts** — save, resume and send drafts (stored server-side in your mailbox).
 - **Follow-up flags** — flag / clear messages from the list or the context menu.
+- **Save as EML** — right-click a message (or use the reader toolbar) to save it
+  to disk as a raw `.eml` file: Graph's `/$value` endpoint serves the exact MIME
+  Outlook stores (headers, body, embedded attachments), so the file opens
+  faithfully in Outlook / Thunderbird / Apple Mail.
 - **Server-side inbox rules** — create / edit mailbox rules (Office 365 only).
 - **Message-authentication trace** — view a message's internet headers with
   SPF / DKIM / DMARC results and the delivery path.
@@ -111,6 +115,7 @@ cargo run -p auth-spike  # console OAuth + Graph proof
 npm run build                              # tsc --noEmit + vite build
 cargo fmt --all
 cargo clippy --all-targets -- -D warnings  # never --lib
+cargo test --workspace                     # pure-logic + adapter tests
 ```
 
 ### Build an installer

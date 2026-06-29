@@ -408,6 +408,21 @@ impl MailProvider for GraphClient {
             .collect())
     }
 
+    async fn raw_mime(&self, id: &str) -> Result<Vec<u8>, MailError> {
+        // `GET /me/messages/{id}/$value` returns the message's raw RFC 5322 MIME
+        // content (the exact bytes Outlook would send) as `application/octet-
+        // stream` — headers, body, and attachments all embedded as MIME parts.
+        // That is the faithful `.eml` export: no client-side MIME reconstruction,
+        // no sanitization, attachments included.
+        let url = mime_value_url(id);
+        let bytes = check_status(self.get(url.as_str()).await?)
+            .await?
+            .bytes()
+            .await
+            .map_err(|e| MailError::Network(e.to_string()))?;
+        Ok(bytes.to_vec())
+    }
+
     async fn set_read(&self, id: &str, read: bool) -> Result<(), MailError> {
         let response = self
             .http
@@ -1024,6 +1039,18 @@ fn message_endpoint(id: &str) -> url::Url {
     url
 }
 
+/// Build the `/me/messages/{id}/$value` endpoint — Graph's raw-MIME download.
+/// The opaque message id is encoded as a path segment (as in
+/// [`message_endpoint`]); the trailing `/$value` is an OData segment that must
+/// stay literal (never percent-encoded) so Graph recognises it.
+fn mime_value_url(id: &str) -> url::Url {
+    let mut url = message_endpoint(id);
+    url.path_segments_mut()
+        .expect("message endpoint is a proper path")
+        .push("$value");
+    url
+}
+
 /// Build the `/me/mailFolders/{id}` endpoint with the opaque folder id safely
 /// encoded as a path segment.
 fn folder_endpoint(id: &str) -> url::Url {
@@ -1487,5 +1514,18 @@ mod tests {
         assert!(url.ends_with("/messages"));
         assert!(url.contains("%2F")); // '/' encoded, not splitting the segment
         assert!(!url.contains('?'));
+    }
+
+    #[test]
+    fn mime_value_url_encodes_id_but_keeps_value_segment_literal() {
+        // The raw-MIME endpoint must keep `/$value` literal (Graph keys on it)
+        // while still percent-encoding the opaque message id's '/' so it stays
+        // one segment. `+`/`=` are left as-is (valid in a path segment).
+        let url = mime_value_url("AB/cd+ef=");
+        let s = url.as_str();
+        assert!(s.starts_with(&format!("{GRAPH_BASE}/me/messages/")));
+        assert!(s.ends_with("/$value")); // '$value' stays literal, not encoded
+        assert!(s.contains("%2F")); // '/' encoded, not splitting the id segment
+        assert!(!s.contains('?'));
     }
 }

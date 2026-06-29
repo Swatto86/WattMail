@@ -325,6 +325,18 @@ pub trait MailProvider: Send + Sync {
     /// tracing a message's origin and delivery path.
     async fn message_headers(&self, id: &str) -> Result<Vec<MessageHeader>, MailError>;
 
+    /// The message's raw RFC 5322 MIME bytes — the full message exactly as the
+    /// provider stores it (headers, body, and embedded attachments), suitable for
+    /// writing straight to an `.eml` file. This is the faithful export form:
+    /// unlike [`message`](Self::message) it is unsanitized and unmolested, so a
+    /// saved `.eml` round-trips into Outlook/Thunderbird/Apple Mail intact.
+    ///
+    /// A provider that can't serve the raw MIME inherits the `Unsupported`
+    /// default; the export UI is then withheld for that provider.
+    async fn raw_mime(&self, _id: &str) -> Result<Vec<u8>, MailError> {
+        Err(MailError::Unsupported)
+    }
+
     /// Set a message's read state.
     async fn set_read(&self, id: &str, read: bool) -> Result<(), MailError>;
 

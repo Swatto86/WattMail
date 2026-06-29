@@ -118,6 +118,7 @@ pub fn run() {
             commands::load_draft,
             commands::attachments,
             commands::save_attachment,
+            commands::export_message,
             commands::set_read,
             commands::set_flag,
             commands::delete_message,

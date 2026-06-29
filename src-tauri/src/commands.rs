@@ -13,13 +13,13 @@ use wattmail_application::{
     compose_reply, create_event as app_create_event, create_folder as app_create_folder,
     delete_event as app_delete_event, delete_folder as app_delete_folder,
     delete_message as app_delete_message, download_attachment,
-    folder_from_cache as app_folder_from_cache, list_attachments, list_folders as app_list_folders,
-    load_draft as app_load_draft, load_older as app_load_older, move_message as app_move_message,
-    read_headers, read_message, rename_folder as app_rename_folder,
-    respond_to_event as app_respond_to_event, save_draft as app_save_draft,
-    search_messages as app_search_messages, send_draft as app_send_draft,
-    send_message as app_send_message, set_flag as app_set_flag, set_read as app_set_read,
-    sync_folder as app_sync_folder,
+    export_message as app_export_message, folder_from_cache as app_folder_from_cache,
+    list_attachments, list_folders as app_list_folders, load_draft as app_load_draft,
+    load_older as app_load_older, move_message as app_move_message, read_headers, read_message,
+    rename_folder as app_rename_folder, respond_to_event as app_respond_to_event,
+    save_draft as app_save_draft, search_messages as app_search_messages,
+    send_draft as app_send_draft, send_message as app_send_message, set_flag as app_set_flag,
+    set_read as app_set_read, sync_folder as app_sync_folder,
 };
 use wattmail_domain::{
     CalendarProvider, EventDateTime, Folder, InviteResponse, MailProvider, MessageRule,
@@ -683,6 +683,22 @@ pub async fn save_attachment(
 ) -> Result<(), String> {
     let (_account, provider) = active_provider(&accounts).await?;
     let bytes = download_attachment(&*provider, &message_id, &attachment_id)
+        .await
+        .map_err(|e| e.to_string())?;
+    std::fs::write(&dest_path, bytes).map_err(|e| e.to_string())
+}
+
+/// Export a message to `dest_path` as a raw RFC 5322 MIME `.eml` file. The
+/// provider serves the exact bytes it stores (headers + body + embedded
+/// attachments), so the file round-trips into any mail client intact.
+#[tauri::command]
+pub async fn export_message(
+    accounts: State<'_, AccountManager>,
+    id: String,
+    dest_path: String,
+) -> Result<(), String> {
+    let (_account, provider) = active_provider(&accounts).await?;
+    let bytes = app_export_message(&*provider, &id)
         .await
         .map_err(|e| e.to_string())?;
     std::fs::write(&dest_path, bytes).map_err(|e| e.to_string())

@@ -5,7 +5,7 @@
 > new milestone state, a decision made/reversed, or an open question resolved.
 > Keep newest progress entries at the top of the log.
 >
-> **Last updated:** 2026-06-27
+> **Last updated:** 2026-06-29
 
 ---
 
@@ -43,7 +43,7 @@ test-then-release" describe the *prior* policy, now retired.
 | Themes | DaisyUI `business` = dark, `corporate` = light, `system` = follow OS |
 | Mail API | Microsoft Graph (REST) via `reqwest` |
 | Auth | `oauth2`-style public-client + PKCE done with raw form-posts; tokens in OS keychain (`keyring`) |
-| MIME (future) | `mail-parser` / `mail-builder` (Stalwart) |
+| MIME export | provider raw-MIME endpoint (Graph `GET /me/messages/{id}/$value`); `mail-builder`/`mail-parser` reserved for backends that can't serve raw MIME (e.g. parked IMAP) |
 | Local cache (future) | SQLite (`rusqlite`/`sqlx`) |
 
 Stack and patterns deliberately mirror Swatto's **AllTheThings**
@@ -93,6 +93,38 @@ Entra app registration (public, not secret):
 ---
 
 ## Progress log
+
+### 2026-06-29 — Save a message to disk as .eml (v0.2.5)
+Export any message to a raw RFC 5322 MIME `.eml` file from two entry points:
+right-click a message row → **Save as EML…**, or the reader toolbar's
+**Save as EML** button. A native save dialog seeds the filename from the
+subject (sanitized; falls back to `message.eml`) and filters to `*.eml`.
+- **Backend (faithful by construction).** New `MailProvider::raw_mime(id)`
+  contract (domain; defaults to `Unsupported` so the gated Gmail / parked-IMAP
+  backends compile unchanged). The Graph impl is `GET /me/messages/{id}/$value`
+  — Graph returns the message's **exact stored MIME** as
+  `application/octet-stream`: headers, body, and embedded attachments as proper
+  MIME parts. So a saved `.eml` round-trips into Outlook / Thunderbird / Apple
+  Mail intact, with no client-side MIME reconstruction and no sanitization
+  (it is export content, not display content). New `export_message` application
+  use-case; `export_message` Tauri command writes the bytes to the chosen path
+  (mirrors `save_attachment`). New `mime_value_url(id)` URL helper
+  (`message_endpoint(id)` + a literal `/$value` segment) keeps the OData
+  `$value` un-encoded while still percent-encoding the opaque id.
+- **Why not .msg (deferred):** MSG is Outlook's proprietary Compound-File-Binary
+  (OLE2 / MAPI property streams) format, *not* MIME. Graph has no "download as
+  .msg" endpoint, so producing one needs a hand-built CFB writer whose only
+  correctness oracle is "does Outlook open it" — unverifiable in this sandbox.
+  EML is universally openable *and* faithful for free via `/$value`; `.msg` is
+  left as a backlog item (see "Open questions / deferred").
+- **Verified.** `cargo fmt --check`, `cargo clippy --workspace --all-targets
+  -D warnings` (incl. the Tauri presentation crate — the Tauri Linux build deps
+  were installed locally for this pass, so the presentation layer is now
+  compile-verified here, not just CI), `cargo test --workspace` (27, incl. a
+  new `mime_value_url` path-encoding test), `npm run build` (tsc + vite). **Not
+  live-run verified** — the Graph `/$value` fetch isn't exercised against a
+  real mailbox here (can't auth to Graph); the URL shape is unit-tested and
+  mirrors the tested `message_endpoint`. Released as v0.2.5 (release-then-test).
 
 ### 2026-06-27 — Compose on a white "paper" surface in both themes (v0.2.4)
 CSS-only. Closed the last email-body readability gap: **reply / forward / draft
@@ -1014,6 +1046,7 @@ pending (needs a signed-in window).
 | — | Compose polish — resizable/maximizable window, sanitized rich-HTML paste, inline images (cid) | ✅ built (v0.1.12); live run pending |
 | — | Message list: Outlook-style date sections + quick filters (All/Unread/Flagged) + group-by-date toggle | ✅ built (v0.1.19); frontend-only |
 | — | Calendar tab (7-day agenda + create/RSVP/delete; `Calendars.ReadWrite`) | ✅ BUILT on main (CalendarProvider→Graph calendarView, multi-view nav); compile-verified + 2 adversarial-review passes; **live test pending before version bump/release** |
+| — | Save a message to disk as `.eml` (raw-MIME export via Graph `/$value`; right-click + reader toolbar) | ✅ built (v0.2.5); live run pending |
 | — | Contacts / recipient autocomplete (`People.Read`/`Contacts.Read`) | ⬜ backlog (roadmap v0.2.0) |
 | — | Generic IMAP/SMTP backend + Mailspring-style setup | 🟡 BUILT on branch `feature/imap-accounts` (CI-green); parked off main/releases pending a live app-password test |
 
@@ -1045,6 +1078,15 @@ pending (needs a signed-in window).
 
 ## Open questions / deferred
 
+- **Export as `.msg` (Outlook native) — deferred.** EML export shipped in v0.2.5
+  via Graph's `/$value` raw-MIME endpoint (a faithful, universally-openable
+  file). `.msg` is a *different* format — Compound File Binary (OLE2) structured
+  storage + MAPI property streams, not MIME — and Graph offers no "download as
+  .msg" endpoint. Producing one means a hand-built CFB writer whose only
+  correctness oracle is "Outlook opens the file", which can't be exercised in
+  this sandbox, so it would ship unverified. Build only if an Outlook-only
+  `.msg` is genuinely needed (hand-rolled CFB, or a maintained writer crate if
+  one appears); EML covers the realistic "save this email to disk" need today.
 - **HTML email rendering — image privacy & fidelity.** "Load images" now **proxies** images
   server-side and inlines them as `data:` (no remote loads, tight CSP). Residual: a local fetch
   doesn't hide the IP (needs a remote relay); CSS `url()` backgrounds and `<style>`-block CSS are

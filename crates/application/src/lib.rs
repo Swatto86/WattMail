@@ -111,6 +111,12 @@ pub async fn read_headers(
     provider.message_headers(id).await
 }
 
+/// Fetch a message's raw RFC 5322 MIME bytes — the faithful `.eml` export form
+/// (headers, body, embedded attachments), straight from the provider.
+pub async fn export_message(provider: &dyn MailProvider, id: &str) -> Result<Vec<u8>, MailError> {
+    provider.raw_mime(id).await
+}
+
 /// Set a message's read state on the server and in the local cache.
 pub async fn set_read(
     provider: &dyn MailProvider,

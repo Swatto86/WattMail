@@ -1091,6 +1091,7 @@ function renderReader(msg: MessageView): void {
         <button id="reply-btn" class="btn btn-xs">Reply</button>
         <button id="reply-all-btn" class="btn btn-xs">Reply all</button>
         <button id="forward-btn" class="btn btn-xs">Forward</button>
+        <button id="save-eml-btn" class="btn btn-xs btn-ghost" title="Save this message to disk as an .eml file">Save as EML</button>
         <button id="headers-btn" class="btn btn-xs btn-ghost" title="View raw message headers and trace its origin">Headers</button>
       </div>
     </div>
@@ -1110,6 +1111,9 @@ function renderReader(msg: MessageView): void {
   readerEl
     .querySelector<HTMLButtonElement>("#forward-btn")
     ?.addEventListener("click", () => void forwardMsg());
+  readerEl
+    .querySelector<HTMLButtonElement>("#save-eml-btn")
+    ?.addEventListener("click", () => void saveMessageAsEml(msg.id, msg.subject));
   readerEl
     .querySelector<HTMLButtonElement>("#headers-btn")
     ?.addEventListener("click", () => void openHeaders(msg.id, msg.subject));
@@ -1248,6 +1252,36 @@ async function downloadAttachment(messageId: string, attachmentId: string, name:
     statusEl.textContent = `Saved ${name}`;
   } catch (e) {
     statusEl.textContent = `Download failed: ${e}`;
+  }
+}
+
+// Build a safe Windows/POSIX filename base from a message subject: drop the
+// illegal filename characters and control chars, collapse whitespace, trim
+// trailing dots/spaces (Windows drops them anyway), and cap the length.
+function safeFilename(subject: string): string {
+  const cleaned = subject
+    .replace(/[<>:"/\\|?*\x00-\x1f]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .replace(/[. ]+$/g, "");
+  return cleaned.slice(0, 120) || "message";
+}
+
+// Save a message to disk as a raw-RFC-5322-MIME .eml via the export_message
+// command. The backend (Graph `/$value`) serves the exact bytes Outlook
+// stores — headers, body, embedded attachments — so the file opens faithfully
+// in Outlook / Thunderbird / Apple Mail. `subject` seeds the default filename.
+async function saveMessageAsEml(id: string, subject: string): Promise<void> {
+  try {
+    const path = await save({
+      defaultPath: `${safeFilename(subject)}.eml`,
+      filters: [{ name: "Email message", extensions: ["eml"] }],
+    });
+    if (!path) return; // cancelled
+    await invoke("export_message", { id, destPath: path });
+    statusEl.textContent = "Saved message as .eml";
+  } catch (e) {
+    statusEl.textContent = `Save failed: ${e}`;
   }
 }
 
@@ -3175,6 +3209,7 @@ function renderMainMenu(unread: boolean, flagged: boolean): void {
     { act: "reply", label: "Reply" },
     { act: "replyAll", label: "Reply all" },
     { act: "forward", label: "Forward" },
+    { act: "saveEml", label: "Save as EML…" },
     "sep",
     { act: "toggleRead", label: unread ? "Mark as read" : "Mark as unread" },
     { act: "toggleFlag", label: flagged ? "Clear flag" : "Flag" },
@@ -3276,6 +3311,11 @@ ctxMenu.addEventListener("click", (e) => {
     case "forward":
       void forwardMsg(id);
       break;
+    case "saveEml": {
+      const subject = rowFor(id)?.querySelector<HTMLElement>(".msg-subject")?.title ?? "";
+      void saveMessageAsEml(id, subject);
+      break;
+    }
     case "toggleRead":
       void setRead(id, unread); // unread → mark read; read → mark unread
       break;
