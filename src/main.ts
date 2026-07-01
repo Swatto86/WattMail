@@ -84,6 +84,20 @@ interface AttachmentInfo {
   contentType: string;
   size: number;
 }
+
+// Ref to a server-side attachment the user is forwarding. The bytes stay
+// on the server until send time — pass the refs through IPC and let the
+// Tauri command fetch them (avoids the JS bridge round-tripping multi-MB
+// blobs). Same `id`-style field names as `AttachmentInfo` but with a
+// `messageId` companion so the send command knows which message to
+// fetch from.
+interface ForwardedAttachmentInfo {
+  messageId: string;
+  attachmentId: string;
+  name: string;
+  contentType: string;
+  size: number;
+}
 interface HeaderItem {
   name: string;
   value: string;
@@ -2902,20 +2916,42 @@ function inlineImagesSizeProblem(images: InlineImage[]): string | null {
 
 // ---- Compose ----
 let composeAttachPaths: string[] = [];
+// Server-side attachments the user is forwarding. Bytes are fetched from the
+// provider at send time (see send_message's forwardedAttachments arg), so
+// we only carry refs in the editor. The order matches `composeAttachPaths`
+// when both kinds are present, so each chip can be removed independently.
+let composeForwardedAtts: ForwardedAttachmentInfo[] = [];
 // The draft currently open in the compose modal, if any. Set when resuming a
 // draft or after the first "Save draft"; null for a fresh compose/reply/forward.
 let currentDraftId: string | null = null;
 
 function renderComposeAttachments(): void {
-  cAttachments.innerHTML = composeAttachPaths
-    .map((p, i) => {
-      const name = p.split(/[\\/]/).pop() ?? p;
-      return `<span class="attach-chip-c">${esc(name)} <button class="attach-remove" data-i="${i}" type="button" title="Remove">&times;</button></span>`;
-    })
+  // Local file attachments (any compose mode can add them via the picker).
+  const localChips = composeAttachPaths
+    .map(
+      (p, i) =>
+        `<span class="attach-chip-c">${esc(p.split(/[\\/]/).pop() ?? p)} ` +
+        `<button class="attach-remove" data-kind="local" data-i="${i}" type="button" title="Remove">&times;</button></span>`,
+    )
     .join("");
+  // Forwarded attachments — the ↻ marker tells the user these came from the
+  // original message (and will be re-fetched on send), distinguishing them
+  // from files they attached themselves.
+  const fwdChips = composeForwardedAtts
+    .map(
+      (a, i) =>
+        `<span class="attach-chip-c attach-chip-c-fwd" title="Forwarded from original">` +
+        `&#x21bb; ${esc(a.name)} <span class="attach-chip-size">${fmtBytes(a.size)}</span> ` +
+        `<button class="attach-remove" data-kind="fwd" data-i="${i}" type="button" title="Remove">&times;</button></span>`,
+    )
+    .join("");
+  cAttachments.innerHTML = localChips + fwdChips;
   cAttachments.querySelectorAll<HTMLButtonElement>(".attach-remove").forEach((b) => {
     b.addEventListener("click", () => {
-      composeAttachPaths.splice(Number(b.dataset.i), 1);
+      const kind = b.dataset.kind;
+      const i = Number(b.dataset.i);
+      if (kind === "local") composeAttachPaths.splice(i, 1);
+      else if (kind === "fwd") composeForwardedAtts.splice(i, 1);
       renderComposeAttachments();
     });
   });
@@ -2939,6 +2975,9 @@ function openCompose(opts: {
   bodyHtml?: string;
   // The draft being edited, if any; null/omitted for a fresh compose.
   draftId?: string | null;
+  // Non-inline file attachments from the original message (forward only).
+  // The user can remove any of these individually before sending.
+  forwardedAtts?: ForwardedAttachmentInfo[];
 }): void {
   currentDraftId = opts.draftId ?? null;
   composeTitle.textContent = opts.title;
@@ -2954,6 +2993,7 @@ function openCompose(opts: {
     cBodyInput.innerHTML = opts.quotedHtml ? `<p><br></p>${opts.quotedHtml}` : "";
   }
   composeAttachPaths = [];
+  composeForwardedAtts = opts.forwardedAtts ? [...opts.forwardedAtts] : [];
   renderComposeAttachments();
   composeMsg.textContent = "";
   applyComposeSize();
@@ -3005,12 +3045,31 @@ async function forwardMsg(id?: string): Promise<void> {
   if (!targetId) return;
   try {
     const p = await invoke<ComposeData>("prepare_forward", { id: targetId });
+    // Pre-fetch the original's non-inline file attachments so they're
+    // carried into the compose modal as removable chips. The actual bytes
+    // stay server-side until send time — we just carry refs. Failures are
+    // non-fatal: forward still works, just without the original's files.
+    let fwdAtts: ForwardedAttachmentInfo[] = [];
+    try {
+      const list = await invoke<AttachmentInfo[]>("attachments", { messageId: targetId });
+      fwdAtts = list.map((a) => ({
+        messageId: targetId,
+        attachmentId: a.id,
+        name: a.name,
+        contentType: a.contentType,
+        size: a.size,
+      }));
+    } catch (e) {
+      statusEl.textContent = `Could not fetch attachments to forward: ${e}`;
+      fwdAtts = [];
+    }
     openCompose({
       title: "Forward",
       to: p.to,
       cc: p.cc,
       subject: p.subject,
       quotedHtml: p.quotedHtml,
+      forwardedAtts: fwdAtts,
     });
   } catch (e) {
     statusEl.textContent = `Could not prepare forward: ${e}`;
@@ -3094,8 +3153,10 @@ async function sendCompose(): Promise<void> {
   const draftId = currentDraftId;
   // Drafts are sent via the Graph /send path, which carries only the saved draft
   // body — attachments added in the compose modal aren't persisted to the draft,
-  // so warn rather than silently drop them.
-  if (draftId && composeAttachPaths.length > 0) {
+  // so warn rather than silently drop them. Forwarded attachments carry the
+  // same constraint (they re-fetch from the server, not the draft), so they
+  // get the same warning.
+  if (draftId && (composeAttachPaths.length > 0 || composeForwardedAtts.length > 0)) {
     composeMsg.textContent =
       "Attachments aren't supported on drafts yet — remove them or start a fresh message to attach files.";
     composeSendBtn.disabled = false;
@@ -3138,6 +3199,14 @@ async function sendCompose(): Promise<void> {
         bodyHtml: html,
         attachmentPaths: composeAttachPaths,
         inlineImages: images,
+        // Server-side refs — the Rust `send_message` command fetches the
+        // bytes per ref. Match the DTO's camelCase field names exactly.
+        forwardedAttachments: composeForwardedAtts.map((a) => ({
+          messageId: a.messageId,
+          attachmentId: a.attachmentId,
+          name: a.name,
+          contentType: a.contentType,
+        })),
       });
     }
     closeCompose();

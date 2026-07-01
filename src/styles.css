@@ -887,6 +887,17 @@ body,
   background: oklch(var(--bc) / 0.08);
   border: 1px solid oklch(var(--bc) / 0.14);
 }
+/* Forwarded attachment — accent border + slight tint so the user can tell
+   at a glance that the file will come from the original message rather
+   than from their own machine. */
+.attach-chip-c-fwd {
+  border-color: oklch(var(--p) / 0.45);
+  background: oklch(var(--p) / 0.08);
+}
+.attach-chip-size {
+  opacity: 0.65;
+  font-variant-numeric: tabular-nums;
+}
 .attach-remove {
   border: 0;
   background: transparent;

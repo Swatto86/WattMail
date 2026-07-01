@@ -486,6 +486,21 @@ pub struct InlineImageDto {
     pub data_base64: String,
 }
 
+/// A reference to a server-side attachment the user is forwarding along
+/// with the new message. The bytes are fetched from the provider at send
+/// time (rather than carried over the IPC) so a forwarded attachment
+/// doesn't round-trip the JS bridge twice. `name`/`content_type` are cached
+/// for the send-time attachment record and so the chip can render before
+/// the send — they're ignored if the server returns a different value.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ForwardedAttachmentDto {
+    pub message_id: String,
+    pub attachment_id: String,
+    pub name: String,
+    pub content_type: String,
+}
+
 /// Send a message (compose / reply / forward), saved to Sent Items.
 #[tauri::command]
 pub async fn send_message(
@@ -496,6 +511,7 @@ pub async fn send_message(
     body_html: String,
     attachment_paths: Vec<String>,
     inline_images: Vec<InlineImageDto>,
+    forwarded_attachments: Vec<ForwardedAttachmentDto>,
 ) -> Result<(), String> {
     let (_account, provider) = active_provider(&accounts).await?;
 
@@ -528,6 +544,28 @@ pub async fn send_message(
             bytes,
             content_id: Some(image.content_id),
             is_inline: true,
+        });
+    }
+
+    // Forwarded attachments are downloaded from the provider at send time so a
+    // multi-MB file doesn't cross the IPC bridge twice. Sequential — typical
+    // forwards have a handful of files; if large forwards become common, switch
+    // to `futures::future::join_all` to fan out the GETs.
+    for fwd in forwarded_attachments {
+        let bytes = download_attachment(&*provider, &fwd.message_id, &fwd.attachment_id)
+            .await
+            .map_err(|e| {
+                format!(
+                    "could not fetch forwarded attachment \"{}\": {e}",
+                    fwd.name
+                )
+            })?;
+        attachments.push(OutgoingAttachment {
+            name: fwd.name,
+            content_type: fwd.content_type,
+            bytes,
+            content_id: None,
+            is_inline: false,
         });
     }
 

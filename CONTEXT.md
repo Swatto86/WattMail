@@ -5,7 +5,7 @@
 > new milestone state, a decision made/reversed, or an open question resolved.
 > Keep newest progress entries at the top of the log.
 >
-> **Last updated:** 2026-06-29
+> **Last updated:** 2026-07-01
 
 ---
 
@@ -93,6 +93,40 @@ Entra app registration (public, not secret):
 ---
 
 ## Progress log
+
+### 2026-07-01 — Forward now carries attachments
+Fixes the silent-drop bug where forwarding a message sent it body-only and
+dropped every attachment on the floor. Reply is unchanged (re-sending someone
+else's attachments back at them isn't the convention).
+
+- **End-to-end flow.** `forwardMsg` now pre-fetches the original message's
+  non-inline file attachments via the existing `attachments` command
+  (`MailProvider::attachments`, which already filters out `isInline=true`),
+  maps each into a `{messageId, attachmentId, name, contentType, size}` ref,
+  and passes them into `openCompose` as `forwardedAtts`. The compose modal
+  renders each ref as a distinguishable chip (↻ marker + accent border +
+  size) alongside the user's own `composeAttachPaths`. Every chip has an × so
+  the user can drop a forwarded file before send.
+- **Backend fetch at send time.** New `ForwardedAttachmentDto`
+  (`{message_id, attachment_id, name, content_type}`, camelCase) extends the
+  `send_message` Tauri command with a `forwardedAttachments: Vec<…>` arg.
+  For each ref, `send_message` calls `download_attachment(provider, …)` to
+  pull the bytes from the provider, then packs them into a normal
+  `OutgoingAttachment` alongside locally-attached files. Sequential — typical
+  forwards have a handful of files; if that changes, fan out with
+  `futures::join_all`. **Bytes stay server-side until send** so a multi-MB
+  forward doesn't round-trip the JS bridge twice.
+- **Drafts get the same warning** as locally-attached files (the Graph
+  `/messages/{id}/send` path drops both). Pre-existing inline-image deferral
+  on drafts is unchanged.
+- **Why not re-fetch + base64 carry?** Would double the IPC traffic for
+  multi-MB attachments (once to fetch, once to send) and push an N×M attack
+  surface for accidental in-memory copies of large files. Server-side refs
+  keep the editor clean and the bytes off the IPC until the actual send.
+- **Verified.** `npm run build` (tsc + vite) clean. **Not live-run verified**
+  — Rust workspace doesn't compile in this sandbox; CI runs
+  `cargo fmt --check` + `clippy --all-targets -D warnings` + `cargo test
+  --workspace` + full `tauri build`. Released as v0.2.6 (release-then-test).
 
 ### 2026-06-29 — Save a message to disk as .eml (v0.2.5)
 Export any message to a raw RFC 5322 MIME `.eml` file from two entry points:
