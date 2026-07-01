@@ -71,6 +71,7 @@ interface ComposeData {
   cc: string[];
   subject: string;
   quotedHtml: string;
+  attachmentPaths: string[];
 }
 interface DraftPrefill {
   to: string[];
@@ -2939,6 +2940,7 @@ function openCompose(opts: {
   bodyHtml?: string;
   // The draft being edited, if any; null/omitted for a fresh compose.
   draftId?: string | null;
+  attachmentPaths?: string[];
 }): void {
   currentDraftId = opts.draftId ?? null;
   composeTitle.textContent = opts.title;
@@ -2954,6 +2956,9 @@ function openCompose(opts: {
     cBodyInput.innerHTML = opts.quotedHtml ? `<p><br></p>${opts.quotedHtml}` : "";
   }
   composeAttachPaths = [];
+  if (opts.attachmentPaths) {
+    composeAttachPaths = opts.attachmentPaths;
+  }
   renderComposeAttachments();
   composeMsg.textContent = "";
   applyComposeSize();
@@ -3011,6 +3016,7 @@ async function forwardMsg(id?: string): Promise<void> {
       cc: p.cc,
       subject: p.subject,
       quotedHtml: p.quotedHtml,
+      attachmentPaths: p.attachmentPaths,
     });
   } catch (e) {
     statusEl.textContent = `Could not prepare forward: ${e}`;

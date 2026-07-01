@@ -434,6 +434,7 @@ pub struct ComposeDto {
     pub cc: Vec<String>,
     pub subject: String,
     pub quoted_html: String,
+    pub attachment_paths: Vec<String>,
 }
 
 /// Build a reply / reply-all prefill from a message.
@@ -454,6 +455,7 @@ pub async fn prepare_reply(
         cc: prefill.cc,
         subject: prefill.subject,
         quoted_html: prefill.quoted_html,
+        attachment_paths: vec![],
     })
 }
 
@@ -468,11 +470,28 @@ pub async fn prepare_forward(
         .await
         .map_err(|e| e.to_string())?;
     let prefill = compose_forward(&message);
+    
+    let mut attachment_paths = Vec::new();
+    if let Ok(attachments) = list_attachments(&*provider, &id).await {
+        for att in attachments {
+            if let Ok(bytes) = download_attachment(&*provider, &id, &att.id).await {
+                let temp_name = format!("wattmail-fwd-{}", att.name);
+                let temp_path = std::env::temp_dir().join(temp_name);
+                if std::fs::write(&temp_path, &bytes).is_ok() {
+                    if let Some(p) = temp_path.to_str() {
+                        attachment_paths.push(p.to_string());
+                    }
+                }
+            }
+        }
+    }
+    
     Ok(ComposeDto {
         to: prefill.to,
         cc: prefill.cc,
         subject: prefill.subject,
         quoted_html: prefill.quoted_html,
+        attachment_paths,
     })
 }
 
