@@ -456,18 +456,38 @@ impl MailProvider for GmailClient {
             .map_err(|e| MailError::Decode(e.to_string()))?;
 
         let mut changes = Vec::new();
+        let mut hydrated_ids = std::collections::HashSet::new();
         for record in history.history.unwrap_or_default() {
             for added in record.messages_added.unwrap_or_default() {
                 if let Some(msg) = added.message {
-                    // Hydrate to a full summary; skip ones we can't fetch.
-                    if let Ok(summary) = self.fetch_summary(&msg.id).await {
-                        changes.push(MessageChange::Upserted(summary));
+                    if hydrated_ids.insert(msg.id.clone()) {
+                        if let Ok(summary) = self.fetch_summary(&msg.id).await {
+                            changes.push(MessageChange::Upserted(summary));
+                        }
                     }
                 }
             }
             for deleted in record.messages_deleted.unwrap_or_default() {
                 if let Some(msg) = deleted.message {
                     changes.push(MessageChange::Removed(msg.id));
+                }
+            }
+            for label_change in record.labels_added.unwrap_or_default() {
+                if let Some(msg) = label_change.message {
+                    if hydrated_ids.insert(msg.id.clone()) {
+                        if let Ok(summary) = self.fetch_summary(&msg.id).await {
+                            changes.push(MessageChange::Upserted(summary));
+                        }
+                    }
+                }
+            }
+            for label_change in record.labels_removed.unwrap_or_default() {
+                if let Some(msg) = label_change.message {
+                    if hydrated_ids.insert(msg.id.clone()) {
+                        if let Ok(summary) = self.fetch_summary(&msg.id).await {
+                            changes.push(MessageChange::Upserted(summary));
+                        }
+                    }
                 }
             }
         }
@@ -1102,12 +1122,14 @@ struct GmailHistoryResponse {
     history_id: Option<String>,
 }
 
-/// One history record: messages added and/or deleted for the label.
+/// One history record: messages added, deleted, or label-changed for the label.
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct GmailHistoryRecord {
     messages_added: Option<Vec<GmailHistoryMessage>>,
     messages_deleted: Option<Vec<GmailHistoryMessage>>,
+    labels_added: Option<Vec<GmailHistoryMessage>>,
+    labels_removed: Option<Vec<GmailHistoryMessage>>,
 }
 
 /// A history entry wrapping a message reference.
@@ -1207,5 +1229,102 @@ mod tests {
             friendly_label_name("Label_42", Some("Work/Clients")),
             "Work/Clients"
         );
+    }
+
+    #[test]
+    fn history_record_deserializes_with_label_changes() {
+        let json = r#"{
+            "id": "12345",
+            "messages": [],
+            "messagesAdded": [
+                {
+                    "message": {
+                        "id": "msg1",
+                        "threadId": "thread1"
+                    }
+                }
+            ],
+            "messagesDeleted": [
+                {
+                    "message": {
+                        "id": "msg2",
+                        "threadId": "thread2"
+                    }
+                }
+            ],
+            "labelsAdded": [
+                {
+                    "message": {
+                        "id": "msg3",
+                        "threadId": "thread3",
+                        "labelIds": ["UNREAD", "STARRED"]
+                    }
+                }
+            ],
+            "labelsRemoved": [
+                {
+                    "message": {
+                        "id": "msg4",
+                        "threadId": "thread4",
+                        "labelIds": ["UNREAD"]
+                    }
+                }
+            ]
+        }"#;
+
+        let record: GmailHistoryRecord = serde_json::from_str(json).expect("deserializes");
+
+        assert_eq!(record.messages_added.as_ref().unwrap().len(), 1);
+        assert_eq!(
+            record.messages_added.as_ref().unwrap()[0]
+                .message
+                .as_ref()
+                .unwrap()
+                .id,
+            "msg1"
+        );
+
+        assert_eq!(record.messages_deleted.as_ref().unwrap().len(), 1);
+        assert_eq!(
+            record.messages_deleted.as_ref().unwrap()[0]
+                .message
+                .as_ref()
+                .unwrap()
+                .id,
+            "msg2"
+        );
+
+        assert_eq!(record.labels_added.as_ref().unwrap().len(), 1);
+        assert_eq!(
+            record.labels_added.as_ref().unwrap()[0]
+                .message
+                .as_ref()
+                .unwrap()
+                .id,
+            "msg3"
+        );
+
+        assert_eq!(record.labels_removed.as_ref().unwrap().len(), 1);
+        assert_eq!(
+            record.labels_removed.as_ref().unwrap()[0]
+                .message
+                .as_ref()
+                .unwrap()
+                .id,
+            "msg4"
+        );
+    }
+
+    #[test]
+    fn history_record_deserializes_without_label_changes() {
+        let json = r#"{
+            "id": "12345",
+            "messages": [],
+            "messagesAdded": []
+        }"#;
+
+        let record: GmailHistoryRecord = serde_json::from_str(json).expect("deserializes");
+        assert!(record.labels_added.is_none());
+        assert!(record.labels_removed.is_none());
     }
 }
