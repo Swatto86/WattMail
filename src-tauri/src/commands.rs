@@ -475,7 +475,12 @@ pub async fn prepare_forward(
     if let Ok(attachments) = list_attachments(&*provider, &id).await {
         for att in attachments {
             if let Ok(bytes) = download_attachment(&*provider, &id, &att.id).await {
-                let temp_name = format!("wattmail-fwd-{}", att.name);
+                let safe_name = std::path::Path::new(&att.name)
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or(&att.name);
+                let id_prefix = att.id.chars().take(8).collect::<String>();
+                let temp_name = format!("wattmail-fwd-{id_prefix}-{safe_name}");
                 let temp_path = std::env::temp_dir().join(temp_name);
                 if std::fs::write(&temp_path, &bytes).is_ok() {
                     if let Some(p) = temp_path.to_str() {
