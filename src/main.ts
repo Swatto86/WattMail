@@ -1861,14 +1861,14 @@ async function loadRules(): Promise<void> {
 
 function ruleSummary(rule: MessageRule): string {
   const parts: string[] = [];
-  if (rule.conditions.senderContains.length) parts.push(`from: ${rule.conditions.senderContains.join(", ")}`);
-  if (rule.conditions.subjectContains.length) parts.push(`subject: ${rule.conditions.subjectContains.join(", ")}`);
-  if (rule.conditions.recipientContains.length) parts.push(`to: ${rule.conditions.recipientContains.join(", ")}`);
+  if (rule.conditions.senderContains.length) parts.push(`from: ${esc(rule.conditions.senderContains.join(", "))}`);
+  if (rule.conditions.subjectContains.length) parts.push(`subject: ${esc(rule.conditions.subjectContains.join(", "))}`);
+  if (rule.conditions.recipientContains.length) parts.push(`to: ${esc(rule.conditions.recipientContains.join(", "))}`);
   const cond = parts.length ? parts.join(" · ") : "(no conditions)";
   const actions: string[] = [];
   if (rule.actions.moveToFolderId) {
     const folder = folders.find((f) => f.id === rule.actions.moveToFolderId);
-    actions.push(`move to ${folder ? folder.name : "folder"}`);
+    actions.push(`move to ${folder ? esc(folder.name) : "folder"}`);
   }
   if (rule.actions.markAsRead) actions.push("mark as read");
   const act = actions.length ? actions.join(" · ") : "(no actions)";
@@ -2122,12 +2122,12 @@ async function loadFolders(): Promise<void> {
     return;
   }
   if (!currentFolderId) {
-    const inbox = folders.find((f) => f.name.toLowerCase() === "inbox");
+    const inbox = folders.find((f) => f.role === "inbox");
     currentFolderId = inbox?.id ?? folders[0]?.id ?? null;
   }
   renderFolders();
   // Reflect the inbox unread count in the system tray (icon + tooltip).
-  const inboxFolder = folders.find((f) => f.name.toLowerCase() === "inbox");
+  const inboxFolder = folders.find((f) => f.role === "inbox");
   void invoke("set_unread", { count: inboxFolder?.unreadCount ?? 0 }).catch(() => {});
 }
 
@@ -2283,7 +2283,7 @@ async function syncFolder(quiet = false): Promise<void> {
     // Only when not searching (search results aren't the inbox) and the current
     // folder is the Inbox.
     if (!searchActive) {
-      const inboxFolder = folders.find((f) => f.name.toLowerCase() === "inbox");
+      const inboxFolder = folders.find((f) => f.role === "inbox");
       if (inboxFolder && currentFolderId === inboxFolder.id) {
         void checkNewMail();
       }
