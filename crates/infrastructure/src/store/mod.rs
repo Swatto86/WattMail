@@ -187,35 +187,44 @@ impl MailStore for SqliteStore {
             .collect();
 
         self.run(move |conn| {
-            let mut stmt = conn.prepare(
-                "INSERT INTO messages (id, folder_id, subject, sender, recipients, received, preview, is_read, is_flagged, has_attachments)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
-                 ON CONFLICT(id) DO UPDATE SET
-                     folder_id       = excluded.folder_id,
-                     subject         = excluded.subject,
-                     sender          = excluded.sender,
-                     recipients      = excluded.recipients,
-                     received        = excluded.received,
-                     preview         = excluded.preview,
-                     is_read         = excluded.is_read,
-                     is_flagged      = excluded.is_flagged,
-                     has_attachments = excluded.has_attachments",
-            )?;
-            for r in &rows {
-                stmt.execute(rusqlite::params![
-                    r.id,
-                    r.folder_id,
-                    r.subject,
-                    r.sender,
-                    r.recipients,
-                    r.received,
-                    r.preview,
-                    r.is_read,
-                    r.is_flagged,
-                    r.has_attachments,
-                ])?;
+            conn.execute_batch("BEGIN;")?;
+            let result = (|| -> rusqlite::Result<()> {
+                let mut stmt = conn.prepare(
+                    "INSERT INTO messages (id, folder_id, subject, sender, recipients, received, preview, is_read, is_flagged, has_attachments)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+                     ON CONFLICT(id) DO UPDATE SET
+                         folder_id       = excluded.folder_id,
+                         subject         = excluded.subject,
+                         sender          = excluded.sender,
+                         recipients      = excluded.recipients,
+                         received        = excluded.received,
+                         preview         = excluded.preview,
+                         is_read         = excluded.is_read,
+                         is_flagged      = excluded.is_flagged,
+                         has_attachments = excluded.has_attachments",
+                )?;
+                for r in &rows {
+                    stmt.execute(rusqlite::params![
+                        r.id,
+                        r.folder_id,
+                        r.subject,
+                        r.sender,
+                        r.recipients,
+                        r.received,
+                        r.preview,
+                        r.is_read,
+                        r.is_flagged,
+                        r.has_attachments,
+                    ])?;
+                }
+                Ok(())
+            })();
+            if result.is_err() {
+                let _ = conn.execute_batch("ROLLBACK;");
+            } else {
+                conn.execute_batch("COMMIT;")?;
             }
-            Ok(())
+            result
         })
         .await
     }
@@ -342,24 +351,31 @@ impl MailStore for SqliteStore {
             .collect();
 
         self.run(move |conn| {
-            // Replace-all: the live list is authoritative, so wipe then re-insert
-            // in order. position preserves the sidebar's tree order on read-back.
-            conn.execute("DELETE FROM folders", [])?;
-            let mut stmt = conn.prepare(
-                "INSERT INTO folders (id, name, unread_count, depth, position, role)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            )?;
-            for r in &rows {
-                stmt.execute(rusqlite::params![
-                    r.id,
-                    r.name,
-                    r.unread_count,
-                    r.depth,
-                    r.position,
-                    r.role,
-                ])?;
+            conn.execute_batch("BEGIN;")?;
+            let result = (|| -> rusqlite::Result<()> {
+                conn.execute("DELETE FROM folders", [])?;
+                let mut stmt = conn.prepare(
+                    "INSERT INTO folders (id, name, unread_count, depth, position, role)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                )?;
+                for r in &rows {
+                    stmt.execute(rusqlite::params![
+                        r.id,
+                        r.name,
+                        r.unread_count,
+                        r.depth,
+                        r.position,
+                        r.role,
+                    ])?;
+                }
+                Ok(())
+            })();
+            if result.is_err() {
+                let _ = conn.execute_batch("ROLLBACK;");
+            } else {
+                conn.execute_batch("COMMIT;")?;
             }
-            Ok(())
+            result
         })
         .await
     }
