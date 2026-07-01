@@ -252,7 +252,7 @@ impl AuthService {
             .to_ip()
             .map(|addr| addr.port())
             .ok_or_else(|| AuthError::Listener(io_other("loopback listener has no IP port")))?;
-        let redirect_uri = format!("http://localhost:{port}");
+        let redirect_uri = format!("http://127.0.0.1:{port}");
 
         let pkce = Pkce::generate();
         let state = random_token();
@@ -355,7 +355,7 @@ impl AuthService {
 /// CSRF state. Browser noise (e.g. favicon requests) is answered and ignored.
 fn wait_for_code(server: tiny_http::Server, expected_state: &str) -> Result<String, AuthError> {
     for request in server.incoming_requests() {
-        let target = format!("http://localhost{}", request.url());
+        let target = format!("http://127.0.0.1{}", request.url());
         let (code, state, error) = match url::Url::parse(&target) {
             Ok(url) => extract_params(&url),
             Err(_) => (None, None, None),
