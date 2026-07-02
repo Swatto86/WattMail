@@ -75,8 +75,10 @@ interface ComposeData {
 interface DraftPrefill {
   to: string[];
   cc: string[];
+  bcc: string[];
   subject: string;
   bodyHtml: string; // raw, unsanitized body for the editor
+  hasAttachments: boolean; // draft has server-side attachments WattMail can't edit
 }
 interface AttachmentInfo {
   id: string;
@@ -501,6 +503,7 @@ appRoot.innerHTML = /* html */ `
       </div>
       <input id="c-to" class="input input-bordered input-sm compose-input" placeholder="To (comma-separated)" autocomplete="off" />
       <input id="c-cc" class="input input-bordered input-sm compose-input" placeholder="Cc" autocomplete="off" />
+      <input id="c-bcc" class="input input-bordered input-sm compose-input" placeholder="Bcc" autocomplete="off" />
       <input id="c-subject" class="input input-bordered input-sm compose-input" placeholder="Subject" autocomplete="off" />
       <div id="c-toolbar" class="compose-toolbar">
         <button type="button" data-cmd="bold" title="Bold"><b>B</b></button>
@@ -649,6 +652,7 @@ const composeResizeGrip = document.querySelector<HTMLDivElement>("#compose-resiz
 const composeTitle = document.querySelector<HTMLDivElement>("#compose-title")!;
 const cToInput = document.querySelector<HTMLInputElement>("#c-to")!;
 const cCcInput = document.querySelector<HTMLInputElement>("#c-cc")!;
+const cBccInput = document.querySelector<HTMLInputElement>("#c-bcc")!;
 const cSubjectInput = document.querySelector<HTMLInputElement>("#c-subject")!;
 const cBodyInput = document.querySelector<HTMLDivElement>("#c-body")!;
 const composeToolbar = document.querySelector<HTMLDivElement>("#c-toolbar")!;
@@ -767,9 +771,10 @@ function showSignedOut(): void {
   foldersEl.innerHTML = "";
   searchActive = false;
   searchSeq++;
+  clearSearchTimer();
   searchInput.value = "";
   setSearchClearVisible(false);
-  void invoke("set_unread", { count: 0 }).catch(() => {});
+  void invoke("set_unread", { count: 0, silent: true }).catch(() => {});
   resetReader();
   statusEl.textContent = "Not signed in";
 }
@@ -928,7 +933,11 @@ function markRead(id: string): void {
   row.classList.remove("unread");
   const dot = row.querySelector(".msg-dot");
   if (dot) dot.innerHTML = "";
-  void invoke("set_read", { id, read: true }).catch(() => {});
+  // Refresh folder badges / tray immediately (silent — this is user-initiated,
+  // not new mail), rather than leaving them stale until the next auto-sync.
+  void invoke("set_read", { id, read: true })
+    .then(() => loadFolders())
+    .catch(() => {});
 }
 
 // Set a message's read state (context-menu action), reflecting it optimistically.
@@ -973,12 +982,27 @@ async function setFlag(id: string, flagged: boolean): Promise<void> {
   }
 }
 
-// Delete a message (moves it to Deleted Items), updating the list optimistically.
+// Delete a message. From an ordinary folder this moves it to Deleted Items
+// (recoverable). From Deleted Items itself it's a permanent delete, so confirm
+// first. Updates the list optimistically. Returns whether the delete proceeded
+// (so the autosave-discard path can key off it if needed).
 async function deleteMessage(id: string): Promise<void> {
+  // Key "permanent" off the CURRENT folder's role, but only outside search
+  // (search spans folders, so we can't tell where the row lives — default to the
+  // safe recoverable move).
+  const folder = folders.find((f) => f.id === currentFolderId);
+  const permanent = !searchActive && folder?.role === "deleteditems";
+  if (permanent) {
+    const ok = await showConfirm(
+      "Permanently delete this message? This cannot be undone.",
+      { danger: true, okLabel: "Delete" },
+    );
+    if (!ok) return;
+  }
   rowFor(id)?.remove();
   if (selectedId === id) resetReader();
   try {
-    await invoke("delete_message", { id });
+    await invoke("delete_message", { id, permanent });
     await reconcileAfterAction(); // update loaded/total count and unread badges
   } catch (e) {
     statusEl.textContent = `Delete failed: ${e}`;
@@ -1008,6 +1032,16 @@ const SEARCH_DEBOUNCE_MS = 300;
 let searchActive = false;
 let searchTimer: ReturnType<typeof setTimeout> | null = null;
 let searchSeq = 0; // discards stale responses when the query changes mid-flight
+
+// Cancel any pending search-debounce tick. Called on every view transition
+// (folder switch, account switch, sign-out) so a queued query can't fire after
+// the user has moved on and hijack the new view with a stale search.
+function clearSearchTimer(): void {
+  if (searchTimer) {
+    clearTimeout(searchTimer);
+    searchTimer = null;
+  }
+}
 
 function setSearchClearVisible(visible: boolean): void {
   searchClearBtn.classList.toggle("hidden", !visible);
@@ -1166,9 +1200,21 @@ function wireFrameLinks(frame: HTMLIFrameElement): void {
   if (!doc) return;
   doc.addEventListener("click", (ev) => {
     ev.preventDefault();
+    // A click inside the iframe never reaches the parent document, so dismiss
+    // the floating menus here — otherwise the link menu would stay open when the
+    // user clicks body text inside the message.
+    linkCtxMenu.classList.add("hidden");
+    hideEditMenu();
     const anchor = (ev.target as HTMLElement | null)?.closest?.("a");
     const href = anchor?.getAttribute("href") ?? "";
     if (/^https?:\/\//i.test(href)) void openUrl(href);
+  });
+  // Escape inside the iframe also can't reach the parent — dismiss here too.
+  doc.addEventListener("keydown", (ev) => {
+    if (ev.key === "Escape") {
+      linkCtxMenu.classList.add("hidden");
+      hideEditMenu();
+    }
   });
   doc.addEventListener("contextmenu", (ev) => {
     // Never show the webview's native menu inside the reading pane either.
@@ -2127,11 +2173,58 @@ composeResizeGrip.addEventListener("pointerdown", (e) => {
   composeResizeGrip.addEventListener("pointerup", up);
 });
 
+// ---- Re-authentication ----
+// The backend never opens an interactive browser sign-in from a background
+// command; instead an expired/revoked refresh token surfaces as an
+// "auth-required:" error string. We catch it, stop the auto-sync loop, and offer
+// a one-tap re-sign-in via the dedicated reauthenticate_account command.
+let reauthRequired = false;
+let reauthPrompting = false;
+
+function looksLikeAuthRequired(e: unknown): boolean {
+  return String(e).includes("auth-required:");
+}
+
+// Returns true when `e` was an auth-required error it handled (so the caller
+// should skip its own error reporting). Shows the re-sign-in prompt at most once
+// at a time; on success it clears the flag and resumes loading.
+async function handlePossibleAuthError(e: unknown): Promise<boolean> {
+  if (!looksLikeAuthRequired(e)) return false;
+  reauthRequired = true;
+  if (reauthPrompting) return true;
+  reauthPrompting = true;
+  statusEl.textContent = "Your session has expired — sign in again.";
+  try {
+    const ok = await showConfirm(
+      "Your WattMail session has expired. Sign in again to continue?",
+      { okLabel: "Sign in" },
+    );
+    if (!ok) return true;
+    statusEl.textContent = "Opening your browser to sign in…";
+    await invoke("reauthenticate_account");
+    reauthRequired = false;
+    statusEl.textContent = "Signed in.";
+    await loadFolders();
+    await refreshFromCache().catch(() => {});
+    await syncFolder();
+  } catch (err) {
+    statusEl.textContent = `Sign-in failed: ${err}`;
+  } finally {
+    reauthPrompting = false;
+  }
+  return true;
+}
+
 // ---- Folders ----
-async function loadFolders(): Promise<void> {
+// `allowChime` lets the tray play the new-mail sound when the inbox unread count
+// rises. Only the sync path (where new mail actually arrives) passes it; every
+// other caller (mark read/unread, deletes, account switch, initial load) leaves
+// it false so those never trigger a spurious chime.
+async function loadFolders(opts: { allowChime?: boolean } = {}): Promise<void> {
   try {
     folders = await invoke<FolderInfo[]>("list_folders");
   } catch (e) {
+    if (await handlePossibleAuthError(e)) return;
     statusEl.textContent = `Could not list folders: ${e}`;
     return;
   }
@@ -2142,7 +2235,10 @@ async function loadFolders(): Promise<void> {
   renderFolders();
   // Reflect the inbox unread count in the system tray (icon + tooltip).
   const inboxFolder = folders.find((f) => f.role === "inbox");
-  void invoke("set_unread", { count: inboxFolder?.unreadCount ?? 0 }).catch(() => {});
+  void invoke("set_unread", {
+    count: inboxFolder?.unreadCount ?? 0,
+    silent: !opts.allowChime,
+  }).catch(() => {});
 }
 
 function renderFolders(): void {
@@ -2162,6 +2258,10 @@ async function selectFolder(id: string): Promise<void> {
     if (searchActive) exitSearch();
     return;
   }
+  // Always drop any pending search debounce, even if search isn't "active" yet
+  // (the query was typed but the timer hasn't fired) — otherwise it would run
+  // after the folder switch and replace this folder with stale results.
+  clearSearchTimer();
   if (searchActive) {
     searchSeq++;
     searchActive = false;
@@ -2177,14 +2277,30 @@ async function selectFolder(id: string): Promise<void> {
 }
 
 // ---- Desktop notifications for new mail ----
-// After an Inbox sync, ask the backend to check for messages newer than the
-// last-notified timestamp. If there are new unread messages, show a native OS
-// notification; clicking it focuses the window and opens the message.
-async function checkNewMail(): Promise<void> {
+// After a sync, ensure the Inbox cache is fresh (syncing it too if the open
+// folder isn't the Inbox) and ask the backend for messages newer than the
+// last-notified watermark, so new mail is announced no matter which folder is
+// open. The backend seeds its watermark silently on the first check per account.
+async function checkInboxForNewMail(): Promise<void> {
+  const inboxFolder = folders.find((f) => f.role === "inbox");
+  if (!inboxFolder) return;
+  // If the Inbox isn't the folder we just synced, sync it too so new arrivals
+  // reach its cache. This never touches the open folder's view.
+  if (currentFolderId !== inboxFolder.id) {
+    try {
+      await invoke("sync_folder", { folderId: inboxFolder.id });
+    } catch {
+      return; // offline / auth — nothing to notify about
+    }
+  }
+  await checkNewMail(inboxFolder.id);
+}
+
+async function checkNewMail(inboxFolderId: string): Promise<void> {
   try {
     const inbox = await invoke<Inbox>("folder_from_cache", {
-      folderId: currentFolderId!,
-      top: loadedCount,
+      folderId: inboxFolderId,
+      top: 50,
     });
     const batch = await invoke<NewMailBatch | null>("check_new_mail", {
       messages: inbox.messages.map((m) => ({
@@ -2223,6 +2339,10 @@ async function refreshFromCache(preserveScroll = false): Promise<void> {
   // flight — otherwise we'd paint this folder's rows under another folder's
   // selection. Mirrors the openMessage / search epoch guards.
   if (fid !== currentFolderId) return;
+  // Bail if a search started while this refresh was in flight — otherwise the
+  // folder rows would repaint over live search results (with searchActive still
+  // true, wedging the view). Mirrors reconcileAfterAction's search branch.
+  if (searchActive) return;
   showSignedIn();
   renderInbox(inbox);
   if (preserveScroll) listEl.scrollTop = scroll;
@@ -2240,14 +2360,16 @@ async function backfillOlder(): Promise<void> {
   const before = currentTotal;
   try {
     const inbox = await invoke<Inbox>("load_older", { folderId: fid, top: loadedCount });
-    if (fid !== currentFolderId) return; // folder switched mid-flight
+    if (fid !== currentFolderId || searchActive) return; // folder switched / search started
     if (inbox.total <= before) reachedOldest = true; // server had nothing older
     renderInbox(inbox);
     listEl.scrollTop = scroll;
   } catch {
-    // Offline or fetch failed — undo the optimistic window growth so the button
-    // stays and the user can retry.
-    loadedCount = Math.max(PAGE_SIZE, loadedCount - PAGE_SIZE);
+    // Server backfill failed (offline). Still widen from the cache up to what it
+    // holds, so the rows the "Load more" click promised do render; leave
+    // reachedOldest false so the button stays for a retry.
+    loadedCount = Math.max(PAGE_SIZE, Math.min(loadedCount, currentTotal));
+    if (fid === currentFolderId && !searchActive) await refreshFromCache(true).catch(() => {});
   } finally {
     backfilling = false;
   }
@@ -2292,15 +2414,12 @@ async function syncFolder(quiet = false): Promise<void> {
   try {
     await invoke("sync_folder", { folderId: currentFolderId });
     await refreshFromCache(quiet);
-    await loadFolders(); // refresh unread counts
-    // After an Inbox sync, check for new mail to show a desktop notification.
-    // Only when not searching (search results aren't the inbox) and the current
-    // folder is the Inbox.
+    await loadFolders({ allowChime: true }); // refresh unread counts; chime on new mail
+    // Check the Inbox for new mail regardless of which folder is open (the
+    // notification setting promises alerts for Inbox arrivals), syncing the
+    // Inbox too when it isn't the current folder. Skipped while searching.
     if (!searchActive) {
-      const inboxFolder = folders.find((f) => f.role === "inbox");
-      if (inboxFolder && currentFolderId === inboxFolder.id) {
-        void checkNewMail();
-      }
+      void checkInboxForNewMail();
     }
     if (!quiet) {
       const shown =
@@ -2310,7 +2429,11 @@ async function syncFolder(quiet = false): Promise<void> {
       statusEl.textContent = `${shown} · synced ${fmtDate(new Date().toISOString())}`;
     }
   } catch (e) {
-    if (!quiet) statusEl.textContent = `Sync failed: ${e}`;
+    if (await handlePossibleAuthError(e)) {
+      // fall through to cleanup; the re-auth prompt owns the recovery
+    } else if (!quiet) {
+      statusEl.textContent = `Sync failed: ${e}`;
+    }
   } finally {
     syncing = false;
     if (!quiet) refreshBtn.disabled = false;
@@ -2384,6 +2507,7 @@ async function loadActiveAccount(): Promise<void> {
   reachedOldest = false;
   searchActive = false;
   searchSeq++;
+  clearSearchTimer();
   searchInput.value = "";
   setSearchClearVisible(false);
   cursorId = null;
@@ -2494,6 +2618,17 @@ async function switchAccount(id: string): Promise<void> {
 }
 
 async function removeAccount(id: string): Promise<void> {
+  // Removing an account forgets its credentials and deletes its local cache —
+  // irreversible, so confirm (matching the folder-delete danger prompt).
+  const ok = await showConfirm(
+    "Remove this account? Its saved sign-in and local cache will be deleted.",
+    { danger: true, okLabel: "Remove" },
+  );
+  if (!ok) return;
+  // Note whether the removed account was the active one — only then does the
+  // whole mailbox view need reloading; removing a background account shouldn't
+  // drop the open message / folder / search of the account still in use.
+  const wasActive = accountList.find((a) => a.id === id)?.active ?? false;
   try {
     await invoke("remove_account", { id });
   } catch (e) {
@@ -2501,12 +2636,14 @@ async function removeAccount(id: string): Promise<void> {
     return;
   }
   await refreshAccounts();
-  if (accountList.length > 0) {
-    await loadActiveAccount();
-  } else {
+  if (accountList.length === 0) {
     closeSettings();
     showSignedOut();
+  } else if (wasActive) {
+    await loadActiveAccount();
   }
+  // else: a non-active account was removed — the accounts list already refreshed,
+  // and the active mailbox view is left untouched.
 }
 
 // ---- Toolbar account switcher dropdown ----
@@ -2561,8 +2698,10 @@ document.addEventListener("click", (e) => {
 });
 document.addEventListener("keydown", (e) => {
   if (e.key !== "Escape") return;
+  // The account dropdown closes on Esc here. The provider picker is handled by
+  // the central Esc chain (topmost-first), so it is NOT closed here — otherwise
+  // one Esc would close both the picker and the Settings panel beneath it.
   hideAccountMenu();
-  if (!providerOverlay.classList.contains("hidden")) closeProvider(null);
 });
 window.addEventListener("blur", hideAccountMenu);
 
@@ -2924,6 +3063,13 @@ let composeForwardedAtts: ForwardedAttachmentInfo[] = [];
 // The draft currently open in the compose modal, if any. Set when resuming a
 // draft or after the first "Save draft"; null for a fresh compose/reply/forward.
 let currentDraftId: string | null = null;
+// True when the open draft was resumed from the Drafts folder (as opposed to
+// auto-created this session). A resumed draft is never deleted on discard.
+let currentDraftIsResumed = false;
+// A save (manual, send, or autosave) is in flight — serialize the three so a
+// Send during an in-flight save can't create a duplicate, and an autosave never
+// races a send.
+let composeSaveInFlight = false;
 
 function renderComposeAttachments(): void {
   // Local file attachments (any compose mode can add them via the picker).
@@ -2968,6 +3114,7 @@ function openCompose(opts: {
   title: string;
   to: string[];
   cc: string[];
+  bcc?: string[];
   subject: string;
   // The quoted original (reply/forward) — prefixed with a blank line in the editor.
   quotedHtml?: string;
@@ -2975,20 +3122,25 @@ function openCompose(opts: {
   bodyHtml?: string;
   // The draft being edited, if any; null/omitted for a fresh compose.
   draftId?: string | null;
+  // Whether the draft was resumed from the Drafts folder (never deleted on discard).
+  draftIsResumed?: boolean;
   // Non-inline file attachments from the original message (forward only).
   // The user can remove any of these individually before sending.
   forwardedAtts?: ForwardedAttachmentInfo[];
 }): void {
   currentDraftId = opts.draftId ?? null;
+  currentDraftIsResumed = opts.draftIsResumed ?? false;
   composeTitle.textContent = opts.title;
   cToInput.value = opts.to.join(", ");
   cCcInput.value = opts.cc.join(", ");
+  cBccInput.value = (opts.bcc ?? []).join(", ");
   cSubjectInput.value = opts.subject;
-  // A resumed draft's body is restored verbatim; a quoted reply/forward goes in
-  // below a blank line so it's visible and editable. Never repopulate the editor
-  // from display-sanitized HTML — drafts carry their own raw body.
+  // A resumed draft's body is restored through the paste sanitizer (a foreign
+  // draft can carry a document-wide <style> block or on* handlers that would
+  // otherwise restyle/attack the privileged app window). A quoted reply/forward
+  // goes in below a blank line; its quote is already server-sanitized.
   if (opts.bodyHtml !== undefined) {
-    cBodyInput.innerHTML = opts.bodyHtml;
+    cBodyInput.innerHTML = sanitizeHtml(opts.bodyHtml);
   } else {
     cBodyInput.innerHTML = opts.quotedHtml ? `<p><br></p>${opts.quotedHtml}` : "";
   }
@@ -2996,9 +3148,15 @@ function openCompose(opts: {
   composeForwardedAtts = opts.forwardedAtts ? [...opts.forwardedAtts] : [];
   renderComposeAttachments();
   composeMsg.textContent = "";
+  delete composeMsg.dataset.error;
   applyComposeSize();
   composeOverlay.classList.remove("hidden");
   focusComposeBody();
+  // Snapshot the opened state so we can tell whether the user has since edited
+  // anything (drives discard-confirm and autosave). The prefill — recipients,
+  // subject, quoted original — is NOT "dirty".
+  captureComposeBaseline();
+  cancelAutosave();
 }
 
 // Focus the editor with the caret at the very start (above any quoted reply).
@@ -3011,12 +3169,130 @@ function focusComposeBody(): void {
   sel?.removeAllRanges();
   sel?.addRange(range);
 }
+// Just hide the modal (after a send, or after a confirmed discard). Cancels any
+// pending autosave so it can't fire against a closed compose.
 function closeCompose(): void {
+  cancelAutosave();
   composeOverlay.classList.add("hidden");
 }
 
+// The compose baseline captured at open, so composeIsDirty() can tell whether
+// the user has changed anything beyond the reply/forward/draft prefill (the
+// prefilled recipients, quoted body, and forwarded attachments are NOT dirty).
+let composeBaseline = { to: "", cc: "", bcc: "", subject: "", body: "", attach: 0, fwd: 0 };
+function captureComposeBaseline(): void {
+  composeBaseline = {
+    to: cToInput.value,
+    cc: cCcInput.value,
+    bcc: cBccInput.value,
+    subject: cSubjectInput.value,
+    body: cBodyInput.innerHTML,
+    attach: composeAttachPaths.length,
+    fwd: composeForwardedAtts.length,
+  };
+}
+function composeIsDirty(): boolean {
+  return (
+    cToInput.value !== composeBaseline.to ||
+    cCcInput.value !== composeBaseline.cc ||
+    cBccInput.value !== composeBaseline.bcc ||
+    cSubjectInput.value !== composeBaseline.subject ||
+    cBodyInput.innerHTML !== composeBaseline.body ||
+    composeAttachPaths.length !== composeBaseline.attach ||
+    composeForwardedAtts.length !== composeBaseline.fwd
+  );
+}
+
+// The single close path for every dismiss (Esc, Cancel, backdrop). Confirms
+// before discarding an edited message so a stray keypress/click can't destroy
+// it; deletes an auto-created draft on confirmed discard (never a resumed one).
+async function requestCloseCompose(): Promise<void> {
+  if (composeIsDirty()) {
+    const ok = await showConfirm("Discard this message?", {
+      danger: true,
+      okLabel: "Discard",
+    });
+    if (!ok) return;
+    // If autosave created a draft this session (and it wasn't a pre-existing
+    // resumed draft), remove it so a discarded message doesn't linger in Drafts.
+    if (currentDraftId && !currentDraftIsResumed) {
+      const id = currentDraftId;
+      currentDraftId = null;
+      void invoke("delete_message", { id, permanent: false })
+        .then(() => syncDraftsFolder())
+        .catch(() => {});
+    }
+  }
+  closeCompose();
+}
+
+// ---- Compose autosave (#34) ----
+// Silently save the compose to Drafts a few seconds after the user stops typing
+// (and at least every ~30s while typing), so a lost window never loses the mail.
+const AUTOSAVE_DEBOUNCE_MS = 3000;
+const AUTOSAVE_MAX_INTERVAL_MS = 30000;
+let autosaveTimer: ReturnType<typeof setTimeout> | null = null;
+let autosaveArmedAt = 0;
+
+function cancelAutosave(): void {
+  if (autosaveTimer) {
+    clearTimeout(autosaveTimer);
+    autosaveTimer = null;
+  }
+  autosaveArmedAt = 0;
+}
+
+// Called on every real edit. Arms a debounced autosave, but caps the wait so a
+// continuous typist still gets a save at least every AUTOSAVE_MAX_INTERVAL_MS.
+function scheduleAutosave(): void {
+  if (composeOverlay.classList.contains("hidden")) return;
+  const now = Date.now();
+  if (autosaveArmedAt === 0) autosaveArmedAt = now;
+  if (autosaveTimer) clearTimeout(autosaveTimer);
+  const waited = now - autosaveArmedAt;
+  const delay = Math.min(AUTOSAVE_DEBOUNCE_MS, Math.max(0, AUTOSAVE_MAX_INTERVAL_MS - waited));
+  autosaveTimer = setTimeout(() => void runAutosave(), delay);
+}
+
+async function runAutosave(): Promise<void> {
+  autosaveTimer = null;
+  autosaveArmedAt = 0;
+  // Don't fire while the modal is closed, mid other-save, or with nothing typed.
+  if (composeOverlay.classList.contains("hidden")) return;
+  if (composeSaveInFlight) {
+    scheduleAutosave(); // retry shortly after the in-flight save finishes
+    return;
+  }
+  if (!composeIsDirty()) return;
+  composeSaveInFlight = true;
+  try {
+    const id = await invoke<string>("save_draft", {
+      id: currentDraftId,
+      to: parseAddresses(cToInput.value),
+      cc: parseAddresses(cCcInput.value),
+      bcc: parseAddresses(cBccInput.value),
+      subject: cSubjectInput.value,
+      bodyHtml: cBodyInput.innerHTML,
+    });
+    currentDraftId = id;
+    // Show a quiet timestamp, but never stomp on an error already displayed.
+    if (!composeMsg.dataset.error) {
+      const t = new Date();
+      composeMsg.textContent = `Draft saved ${String(t.getHours()).padStart(2, "0")}:${String(
+        t.getMinutes(),
+      ).padStart(2, "0")}`;
+    }
+    // Keep the Drafts folder view/badges current in the background.
+    void syncDraftsFolder();
+  } catch {
+    // Offline etc. — don't interrupt typing; the next edit re-arms a retry.
+  } finally {
+    composeSaveInFlight = false;
+  }
+}
+
 function composeNew(): void {
-  openCompose({ title: "New message", to: [], cc: [], subject: "", quotedHtml: "" });
+  openCompose({ title: "New message", to: [], cc: [], bcc: [], subject: "", quotedHtml: "" });
 }
 
 async function replyTo(replyAll: boolean, id?: string): Promise<void> {
@@ -3063,6 +3339,17 @@ async function forwardMsg(id?: string): Promise<void> {
       statusEl.textContent = `Could not fetch attachments to forward: ${e}`;
       fwdAtts = [];
     }
+    // Some attachments (embedded messages, cloud-reference links) can't be
+    // re-sent by the forward path; surface a notice so the user isn't surprised
+    // when they don't ride along (best-effort — never blocks the forward).
+    let unforwardable = false;
+    try {
+      unforwardable = await invoke<boolean>("message_has_unforwardable_attachments", {
+        messageId: targetId,
+      });
+    } catch {
+      /* ignore — the notice is a nicety */
+    }
     openCompose({
       title: "Forward",
       to: p.to,
@@ -3071,10 +3358,25 @@ async function forwardMsg(id?: string): Promise<void> {
       quotedHtml: p.quotedHtml,
       forwardedAtts: fwdAtts,
     });
+    // Warn early if the forwarded attachments alone exceed the send budget, so
+    // the user learns before composing rather than at send (backend enforces it).
+    const fwdBytes = fwdAtts.reduce((sum, a) => sum + a.size, 0);
+    if (fwdBytes > MAX_SEND_ATTACHMENT_BYTES) {
+      composeMsg.textContent = `The forwarded attachments total ${(fwdBytes / 1_000_000).toFixed(
+        1,
+      )} MB — over the ~2.5 MB send limit. Remove some before sending.`;
+    } else if (unforwardable) {
+      composeMsg.textContent =
+        "Some attachments on the original (embedded messages or cloud links) can't be forwarded by WattMail.";
+    }
   } catch (e) {
     statusEl.textContent = `Could not prepare forward: ${e}`;
   }
 }
+
+// Total-attachment budget for a single send (Graph's simple sendMail path). Must
+// match the backend guard in send_message.
+const MAX_SEND_ATTACHMENT_BYTES = 2_500_000;
 
 // Resume editing a saved draft: load its RAW body (never the display-sanitized
 // reader HTML) and open compose in edit mode, tracking the draft id.
@@ -3085,20 +3387,54 @@ async function resumeDraft(id: string): Promise<void> {
       title: "Edit draft",
       to: d.to,
       cc: d.cc,
+      bcc: d.bcc,
       subject: d.subject,
       bodyHtml: d.bodyHtml,
       draftId: id,
+      draftIsResumed: true,
     });
+    // A foreign draft (e.g. from Outlook) may carry attachments WattMail can't
+    // edit or remove; warn that Send will include them.
+    if (d.hasAttachments) {
+      composeMsg.textContent =
+        "This draft has attachments saved on the server — they will be sent with it.";
+    }
   } catch (e) {
     statusEl.textContent = `Could not open draft: ${e}`;
   }
 }
 
+// Minimal address shape check — good enough to catch typos and garbage tokens
+// before Graph rejects them with an opaque 400.
+const EMAIL_RE = /^\S+@\S+\.\S+$/;
+
+// Pull the address out of a "Name <addr>" token; otherwise the trimmed token.
+function extractAddress(token: string): string {
+  const m = /<([^>]+)>/.exec(token);
+  return (m ? m[1] : token).trim();
+}
+
+// Lenient split used by save/autosave: split on , or ;, extract angle-bracket
+// addresses, drop blanks. No validation (a draft may be mid-typing).
 function parseAddresses(value: string): string[] {
   return value
     .split(/[,;]/)
-    .map((a) => a.trim())
+    .map((a) => extractAddress(a))
     .filter(Boolean);
+}
+
+// Strict parse used at send time: returns the cleaned addresses, or the first
+// token that isn't a valid address so the user can be told exactly which failed.
+function parseAndValidate(value: string): { addresses: string[]; bad: string | null } {
+  const addresses: string[] = [];
+  for (const raw of value.split(/[,;]/)) {
+    const token = raw.trim();
+    if (!token) continue;
+    const addr = extractAddress(token);
+    if (!EMAIL_RE.test(addr)) return { addresses, bad: token };
+    addresses.push(addr);
+  }
+  return { addresses, bad: null };
 }
 
 // Pull the Drafts folder's cache up to date so the list reflects a just
@@ -3116,9 +3452,33 @@ async function syncDraftsFolder(): Promise<void> {
   await loadFolders();
 }
 
+// True when the compose carries attachments (local, forwarded, or inline images)
+// that a draft can't persist. Used to warn on the explicit "Save draft" button.
+function composeHasUnsaveableAttachments(): boolean {
+  return (
+    composeAttachPaths.length > 0 ||
+    composeForwardedAtts.length > 0 ||
+    cBodyInput.querySelector('img[src^="data:image/"]') !== null
+  );
+}
+
 // Save the compose modal as a draft: create on first save, update thereafter.
-// Tracks the new draft id so subsequent saves (and a later Send) reuse it.
+// Tracks the new draft id so subsequent saves (and a later Send) reuse it. This
+// is the EXPLICIT "Save draft" button — it warns about attachments (drafts don't
+// carry them); the silent autosave (#34) skips that dialog by design.
 async function saveDraft(): Promise<void> {
+  // Warn before dropping attachments the draft can't keep (mirrors the send-time
+  // guard, but here so the user isn't surprised when they resume a chip-less draft).
+  if (composeHasUnsaveableAttachments()) {
+    const ok = await showConfirm(
+      "Attachments aren't saved with drafts yet — save the message without them?",
+      { okLabel: "Save anyway" },
+    );
+    if (!ok) return;
+  }
+  if (composeSaveInFlight) return; // a save/send is already running (#30)
+  composeSaveInFlight = true;
+  cancelAutosave();
   composeSaveDraftBtn.disabled = true;
   composeMsg.textContent = "Saving draft…";
   try {
@@ -3126,57 +3486,75 @@ async function saveDraft(): Promise<void> {
       id: currentDraftId,
       to: parseAddresses(cToInput.value),
       cc: parseAddresses(cCcInput.value),
+      bcc: parseAddresses(cBccInput.value),
       subject: cSubjectInput.value,
       bodyHtml: cBodyInput.innerHTML,
     });
     currentDraftId = id;
+    delete composeMsg.dataset.error;
     composeMsg.textContent = "Draft saved.";
     await syncDraftsFolder();
   } catch (e) {
+    composeMsg.dataset.error = "1";
     composeMsg.textContent = `Could not save draft: ${e}`;
   } finally {
+    composeSaveInFlight = false;
     composeSaveDraftBtn.disabled = false;
   }
 }
 
 async function sendCompose(): Promise<void> {
-  const to = parseAddresses(cToInput.value);
+  // Validate recipients up front so a garbage token (or a typo) is reported
+  // clearly rather than surfacing as a raw Graph 400.
+  const toParsed = parseAndValidate(cToInput.value);
+  const ccParsed = parseAndValidate(cCcInput.value);
+  const bccParsed = parseAndValidate(cBccInput.value);
+  const badToken = toParsed.bad ?? ccParsed.bad ?? bccParsed.bad;
+  if (badToken) {
+    composeMsg.textContent = `"${badToken}" is not a valid email address.`;
+    return;
+  }
+  const to = toParsed.addresses;
   if (to.length === 0) {
     composeMsg.textContent = "Add at least one recipient.";
     return;
   }
+  if (composeSaveInFlight) return; // a draft save is in flight (#30) — don't double-send
+  composeSaveInFlight = true;
+  cancelAutosave();
   composeSendBtn.disabled = true;
   composeMsg.textContent = "Sending…";
-  const cc = parseAddresses(cCcInput.value);
+  const cc = ccParsed.addresses;
+  const bcc = bccParsed.addresses;
   const subject = cSubjectInput.value;
   const bodyHtml = cBodyInput.innerHTML;
   const draftId = currentDraftId;
-  // Drafts are sent via the Graph /send path, which carries only the saved draft
-  // body — attachments added in the compose modal aren't persisted to the draft,
-  // so warn rather than silently drop them. Forwarded attachments carry the
-  // same constraint (they re-fetch from the server, not the draft), so they
-  // get the same warning.
-  if (draftId && (composeAttachPaths.length > 0 || composeForwardedAtts.length > 0)) {
+  // Only a RESUMED draft (already living in Drafts) is sent via the Graph /send
+  // path, which carries the saved draft body only — attachments and inline
+  // images aren't persisted to a draft, so warn rather than silently drop them.
+  // A brand-new compose that was merely AUTOSAVED sends as a fresh message (so
+  // its attachments/inline images ride along); its autosaved draft is deleted
+  // afterward.
+  const resumed = currentDraftIsResumed;
+  if (resumed && (composeAttachPaths.length > 0 || composeForwardedAtts.length > 0)) {
     composeMsg.textContent =
       "Attachments aren't supported on drafts yet — remove them or start a fresh message to attach files.";
     composeSendBtn.disabled = false;
+    composeSaveInFlight = false;
     return;
   }
-  // The draft /send path carries the saved body verbatim (draft_body_json omits
-  // attachments), so inline data:image/ images aren't converted to cid: and most
-  // mail clients drop data: URIs — the recipient sees broken images. Warn rather
-  // than silently ship them, mirroring the file-attachment deferral above.
-  if (draftId && cBodyInput.querySelector('img[src^="data:image/"]')) {
+  if (resumed && cBodyInput.querySelector('img[src^="data:image/"]')) {
     composeMsg.textContent =
       "Inline images aren't supported on drafts yet — remove them or start a fresh message to embed images.";
     composeSendBtn.disabled = false;
+    composeSaveInFlight = false;
     return;
   }
   try {
-    if (draftId) {
+    if (resumed && draftId) {
       // Resuming a draft: flush edits, then send via /send so the draft is
       // consumed (moved to Sent) rather than duplicated by a separate sendMail.
-      await invoke("save_draft", { id: draftId, to, cc, subject, bodyHtml });
+      await invoke("save_draft", { id: draftId, to, cc, bcc, subject, bodyHtml });
       await invoke("send_draft", { id: draftId });
       currentDraftId = null;
     } else {
@@ -3190,11 +3568,13 @@ async function sendCompose(): Promise<void> {
       if (sizeProblem) {
         composeMsg.textContent = sizeProblem;
         composeSendBtn.disabled = false;
+        composeSaveInFlight = false;
         return;
       }
       await invoke("send_message", {
         to,
         cc,
+        bcc,
         subject,
         bodyHtml: html,
         attachmentPaths: composeAttachPaths,
@@ -3206,15 +3586,31 @@ async function sendCompose(): Promise<void> {
           attachmentId: a.attachmentId,
           name: a.name,
           contentType: a.contentType,
+          size: a.size,
         })),
       });
+      // A fresh send that had an autosaved draft: remove the leftover so Drafts
+      // isn't left holding a copy of the message we just sent.
+      if (draftId) {
+        try {
+          await invoke("delete_message", { id: draftId, permanent: false });
+        } catch {
+          /* best-effort — the draft lingering is harmless */
+        }
+      }
     }
+    // A successful send consumed/removed the draft — clear the id BEFORE
+    // closeCompose so the discard path (dirty check) can't try to delete it again.
+    currentDraftId = null;
+    const hadDraft = draftId !== null;
     closeCompose();
     statusEl.textContent = "Message sent.";
-    if (draftId) await syncDraftsFolder(); // the sent draft has left Drafts
+    if (hadDraft) await syncDraftsFolder(); // the draft has left Drafts
   } catch (e) {
+    composeMsg.dataset.error = "1";
     composeMsg.textContent = `Send failed: ${e}`;
   } finally {
+    composeSaveInFlight = false;
     composeSendBtn.disabled = false;
   }
 }
@@ -3726,19 +4122,23 @@ async function deleteFolder(id: string): Promise<void> {
   if (!ok) return;
   try {
     await invoke("delete_folder", { id });
-    if (currentFolderId === id) {
-      // The open folder is gone — fall back to Inbox (or the first folder) and
-      // load it, since loadFolders() only repaints the sidebar.
-      currentFolderId = null;
-      await loadFolders();
+    await loadFolders();
+    // The deleted folder — or ANY descendant of it (deleting a parent removes the
+    // whole subtree) — may have been the open folder. If the current folder is no
+    // longer in the refreshed list, it's stranded: fall back to Inbox and load it,
+    // otherwise every sync of the dead folder 404s and the view shows stale rows.
+    if (!currentFolderId || !folders.some((f) => f.id === currentFolderId)) {
+      const inbox = folders.find((f) => f.role === "inbox");
+      currentFolderId = inbox?.id ?? folders[0]?.id ?? null;
+      renderFolders();
       if (currentFolderId) {
         loadedCount = PAGE_SIZE;
         reachedOldest = false;
         await refreshFromCache().catch(() => {});
         await syncFolder();
+      } else {
+        resetReader();
       }
-    } else {
-      await loadFolders();
     }
   } catch (e) {
     statusEl.textContent = folderErrorText("delete", target?.name ?? "That folder", e);
@@ -3828,10 +4228,17 @@ accountsListEl.addEventListener("click", (e) => {
   else if (btn.dataset.remove) void removeAccount(btn.dataset.remove);
 });
 composeBtn.addEventListener("click", composeNew);
-composeCancel.addEventListener("click", closeCompose);
+composeCancel.addEventListener("click", () => void requestCloseCompose());
 composeSaveDraftBtn.addEventListener("click", () => void saveDraft());
 composeSendBtn.addEventListener("click", () => void sendCompose());
 cAttachBtn.addEventListener("click", () => void pickAttachments());
+// Arm the autosave on any real edit to the recipients / subject / body. The
+// prefill isn't an edit (baseline captured at open), so replies/forwards don't
+// litter Drafts until the user actually types.
+for (const field of [cToInput, cCcInput, cBccInput, cSubjectInput]) {
+  field.addEventListener("input", scheduleAutosave);
+}
+cBodyInput.addEventListener("input", scheduleAutosave);
 // Rich-text editing via execCommand (deprecated but universally supported in the
 // webview). mousedown + preventDefault keeps the editor's selection.
 composeToolbar.addEventListener("mousedown", (e) => {
@@ -3846,17 +4253,31 @@ composeToolbar.addEventListener("mousedown", (e) => {
     const sel = window.getSelection();
     const saved = sel && sel.rangeCount > 0 ? sel.getRangeAt(0).cloneRange() : null;
     void (async () => {
-      const url = await showPrompt("Link URL:", {
+      const raw = await showPrompt("Link URL:", {
         title: "Insert link",
         okLabel: "Insert",
         placeholder: "https://example.com",
       });
-      if (!url) return;
+      if (raw === null) return;
+      const trimmed = raw.trim();
+      if (!trimmed) return;
+      // Prepend https:// when no scheme is given, so "www.example.com" doesn't
+      // become a dead relative link in the recipient's client.
+      const url = /^[a-z][a-z0-9+.-]*:/i.test(trimmed) ? trimmed : `https://${trimmed}`;
       cBodyInput.focus();
       if (saved) {
         const s = window.getSelection();
         s?.removeAllRanges();
         s?.addRange(saved);
+      } else {
+        composeMsg.textContent = "Select the text to turn into a link first.";
+        return;
+      }
+      // A collapsed selection makes createLink a silent no-op — tell the user.
+      const sel2 = window.getSelection();
+      if (!sel2 || sel2.isCollapsed) {
+        composeMsg.textContent = "Select the text to turn into a link first.";
+        return;
       }
       document.execCommand("createLink", false, url);
     })();
@@ -3918,8 +4339,17 @@ cBodyInput.addEventListener("drop", (e) => {
   }
   document.execCommand("insertText", false, data?.getData("text/plain") ?? "");
 });
+// Backdrop click closes — but only when the press STARTED on the backdrop.
+// Otherwise a text drag-select in the editor that releases over the dimmed
+// backdrop would count as a click and silently discard the message.
+let composeMouseDownOnBackdrop = false;
+composeOverlay.addEventListener("mousedown", (e) => {
+  composeMouseDownOnBackdrop = e.target === composeOverlay;
+});
 composeOverlay.addEventListener("click", (e) => {
-  if (e.target === composeOverlay) closeCompose();
+  const backdrop = e.target === composeOverlay && composeMouseDownOnBackdrop;
+  composeMouseDownOnBackdrop = false;
+  if (backdrop) void requestCloseCompose();
 });
 headersCloseBtn.addEventListener("click", closeHeaders);
 headersFilter.addEventListener("input", applyHeaderFilter);
@@ -3972,7 +4402,11 @@ settingsOverlay.addEventListener("click", (e) => {
 });
 document.addEventListener("keydown", (e) => {
   if (e.key !== "Escape") return;
-  if (!shortcutsOverlay.classList.contains("hidden")) closeShortcuts();
+  // Topmost first. The provider picker can stack over Settings, so it must be
+  // closed on its own (one Esc = close picker, a second = close Settings) — it
+  // has no separate Esc listener of its own.
+  if (!providerOverlay.classList.contains("hidden")) closeProvider(null);
+  else if (!shortcutsOverlay.classList.contains("hidden")) closeShortcuts();
   else if (!rulesOverlay.classList.contains("hidden")) {
     if (!rulesEditor.classList.contains("hidden")) rulesEditor.classList.add("hidden");
     else closeRules();
@@ -3980,7 +4414,7 @@ document.addEventListener("keydown", (e) => {
   else if (!headersOverlay.classList.contains("hidden")) closeHeaders();
   else if (!aboutOverlay.classList.contains("hidden")) closeAbout();
   else if (!settingsOverlay.classList.contains("hidden")) closeSettings();
-  else if (!composeOverlay.classList.contains("hidden")) closeCompose();
+  else if (!composeOverlay.classList.contains("hidden")) void requestCloseCompose();
 });
 
 // ---- Global keyboard shortcuts (message-list navigation + actions) ----
@@ -4009,6 +4443,7 @@ function aModalIsOpen(): boolean {
     !headersOverlay.classList.contains("hidden") ||
     !rulesOverlay.classList.contains("hidden") ||
     !shortcutsOverlay.classList.contains("hidden") ||
+    !providerOverlay.classList.contains("hidden") ||
     isDialogOpen()
   );
 }
@@ -4025,9 +4460,18 @@ document.addEventListener("keydown", (e) => {
   if (mainView.classList.contains("hidden")) return;
   if (e.ctrlKey || e.metaKey || e.altKey) return;
   if (isTypingTarget() || aModalIsOpen()) return;
-  // A context menu owns the keyboard while open (its own Escape closes it);
-  // don't fire list actions behind it. Covers both the message and folder menus.
-  if (!ctxMenu.classList.contains("hidden") || !folderMenu.classList.contains("hidden")) return;
+  // A floating menu owns the keyboard while open (its own Escape closes it);
+  // don't fire list actions behind it. Covers the message, folder, edit, link,
+  // and account menus.
+  if (
+    !ctxMenu.classList.contains("hidden") ||
+    !folderMenu.classList.contains("hidden") ||
+    !editMenu.classList.contains("hidden") ||
+    !linkCtxMenu.classList.contains("hidden") ||
+    !accountMenu.classList.contains("hidden")
+  ) {
+    return;
+  }
 
   // "/" focuses search regardless of the cursor; it's the one binding that
   // deliberately moves focus into a text field.
@@ -4104,13 +4548,9 @@ updateLater.addEventListener("click", () => updateBanner.classList.add("hidden")
 // Tray "Settings…" menu item asks the frontend to open the modal.
 void listen("open-settings", () => openSettings());
 
-// Notification click: focus the window and open the message.
-void listen<string>("open-message", (event) => {
-  void getCurrentWindow().show();
-  void getCurrentWindow().setFocus();
-  const id = event.payload;
-  if (id) void openMessage(id);
-});
+// (No notification-click handler: tauri-plugin-notification doesn't deliver
+// click events, so there is nothing to listen for. Clicking a new-mail toast
+// just dismisses it.)
 
 // ---- Updates ----
 let pendingUpdate: Update | null = null;
@@ -4184,6 +4624,9 @@ const AUTO_SYNC_MS = 60_000;
 setInterval(() => {
   // Only while the mail view is active: no point spending a Graph sync_folder
   // call + mail-DOM rebuild on a hidden list while the calendar tab is open.
-  // Don't clobber displayed search results with a background folder refresh.
-  if (appMode === "mail" && currentFolderId && !searchActive) void syncFolder(true);
+  // Don't clobber displayed search results with a background folder refresh, and
+  // stop entirely once the session needs re-auth (so we don't loop on failures).
+  if (appMode === "mail" && currentFolderId && !searchActive && !reauthRequired) {
+    void syncFolder(true);
+  }
 }, AUTO_SYNC_MS);

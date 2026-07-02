@@ -263,13 +263,17 @@ export async function loadCalendar(): Promise<void> {
 
 // ---- Agenda rendering ----
 function renderAgenda(start: Date): void {
-  // Bucket events by their start day (local). Multi-day events appear under their
-  // start day only — adequate for an agenda MVP.
+  // Bucket events by their start day (local). An event that started before the
+  // visible window (an ongoing multi-day vacation/conference) is clamped to the
+  // first window day so it still shows — otherwise its off-window start-day key
+  // matches no rendered day and the event silently disappears.
+  const windowStartKey = dayKey(start);
   const byDay = new Map<string, CalendarEvent[]>();
   for (const ev of events) {
     const d = parseLocal(ev.start);
     if (isNaN(d.getTime())) continue;
-    const key = dayKey(d);
+    let key = dayKey(d);
+    if (key < windowStartKey) key = windowStartKey;
     const list = byDay.get(key) ?? [];
     list.push(ev);
     byDay.set(key, list);
@@ -540,9 +544,19 @@ function renderBodyIframe(container: HTMLElement, html: string): void {
   container.appendChild(iframe);
 }
 
+// Disable/enable all RSVP + delete buttons in the detail pane, so a double-click
+// (or clicking Accept then Decline) can't fire duplicate Graph requests — each
+// RSVP emails the organizer, and a stray delete surfaces a spurious 404.
+function setDetailActionsDisabled(disabled: boolean): void {
+  detailEl
+    .querySelectorAll<HTMLButtonElement>("[data-rsvp],[data-cal-delete]")
+    .forEach((b) => (b.disabled = disabled));
+}
+
 async function respond(id: string, response: string): Promise<void> {
   const msg = detailEl.querySelector<HTMLDivElement>("#cal-detail-msg");
   if (msg) msg.textContent = "Sending response…";
+  setDetailActionsDisabled(true);
   try {
     await invoke("respond_to_event", {
       id,
@@ -550,9 +564,10 @@ async function respond(id: string, response: string): Promise<void> {
       comment: null,
       sendResponse: true,
     });
-    await loadCalendar();
+    await loadCalendar(); // re-renders the detail pane (fresh buttons)
   } catch (e) {
     if (msg) msg.textContent = `Could not send response: ${String(e)}`;
+    setDetailActionsDisabled(false); // let the user retry
   }
 }
 
@@ -564,12 +579,14 @@ async function deleteEvent(ev: CalendarEvent): Promise<void> {
   if (!ok) return;
   const msg = detailEl.querySelector<HTMLDivElement>("#cal-detail-msg");
   if (msg) msg.textContent = "Deleting…";
+  setDetailActionsDisabled(true);
   try {
     await invoke("delete_event", { id: ev.id });
     selectedId = null;
     await loadCalendar();
   } catch (e) {
     if (msg) msg.textContent = `Could not delete event: ${String(e)}`;
+    setDetailActionsDisabled(false);
   }
 }
 
@@ -700,10 +717,21 @@ async function saveEvent(): Promise<void> {
     }
   }
 
-  const attendees = evAttendees.value
-    .split(",")
-    .map((s) => s.trim())
-    .filter((s) => s.length > 0);
+  // Split on comma OR semicolon, extract the address from "Name <addr>" tokens,
+  // and validate — so an Outlook-style paste ("a@x.com; b@y.com" or
+  // "Alice <a@x.com>") doesn't silently invite garbage or fail with a raw 400.
+  const attendees: string[] = [];
+  for (const raw of evAttendees.value.split(/[,;]/)) {
+    const token = raw.trim();
+    if (!token) continue;
+    const m = /<([^>]+)>/.exec(token);
+    const addr = (m ? m[1] : token).trim();
+    if (!/^\S+@\S+\.\S+$/.test(addr)) {
+      evMsg.textContent = `"${token}" is not a valid attendee address.`;
+      return;
+    }
+    attendees.push(addr);
+  }
 
   evSave.disabled = true;
   evMsg.textContent = "Creating…";
