@@ -554,12 +554,7 @@ pub async fn send_message(
     for fwd in forwarded_attachments {
         let bytes = download_attachment(&*provider, &fwd.message_id, &fwd.attachment_id)
             .await
-            .map_err(|e| {
-                format!(
-                    "could not fetch forwarded attachment \"{}\": {e}",
-                    fwd.name
-                )
-            })?;
+            .map_err(|e| format!("could not fetch forwarded attachment \"{}\": {e}", fwd.name))?;
         attachments.push(OutgoingAttachment {
             name: fwd.name,
             content_type: fwd.content_type,
