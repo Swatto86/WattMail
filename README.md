@@ -11,7 +11,7 @@ rest.
 The code is cross-platform-capable (paths and the keychain backend are abstracted
 per-OS) but macOS and Linux are only compile-checked in CI — not built or run live.
 
-> Status: **v0.2.5** — functional and actively developed. See [`CONTEXT.md`](CONTEXT.md)
+> Status: **v0.2.9** — functional and actively developed. See [`CONTEXT.md`](CONTEXT.md)
 > for the live progress log, architecture decisions, and roadmap.
 
 ## Features
@@ -21,10 +21,10 @@ per-OS) but macOS and Linux are only compile-checked in CI — not built or run 
   each with its own keychain-isolated credentials and encrypted cache, so mail and
   tokens never cross between accounts. **Office 365** is the only provider live in a
   default build; **Outlook.com / Hotmail** (consumer Graph) and **Gmail** (Gmail REST
-  API) are fully implemented but **gated off** behind placeholder client IDs — supply
-  real `OUTLOOK_CONSUMER_CLIENT_ID` / `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` to
-  enable them. A generic **IMAP/SMTP** backend (with Mailspring-style autodiscovery) is
-  built but parked on a branch — see [Parked work](#parked-work).
+  API) have provider code in `main` but are **gated off** behind placeholder client
+  IDs — supply real `OUTLOOK_CONSUMER_CLIENT_ID` / `GOOGLE_CLIENT_ID` /
+  `GOOGLE_CLIENT_SECRET` and live-test the flows to enable them. Generic **IMAP/SMTP**
+  is not present in the current repository.
 - **Outlook-style message list** — date section headers (Today / Yesterday / This Week /
   Last Week / This Month / Last Month / older months), quick filters (All / Unread /
   Flagged), and a group-by-date toggle (on by default for date-ordered sorts).
@@ -83,9 +83,8 @@ A Cargo workspace with strict, inward-pointing layers:
 | `apps/auth-spike` | — | Console tool that proves the OAuth + Graph round-trip. |
 
 The transport sits behind a provider-agnostic `MailProvider` trait, so additional
-backends slot in without touching the application or presentation layers — the parked
-[`feature/imap-accounts`](#parked-work) branch already does exactly this for generic
-IMAP/SMTP.
+backends slot in without touching the application or presentation layers. Current
+backends in `main` are Microsoft Graph (Office 365 / Outlook.com) and Gmail REST.
 
 Frontend: **Vite + TypeScript + Tailwind + DaisyUI**, vanilla TS (no framework) for
 fast startup.
@@ -124,24 +123,19 @@ cargo test --workspace                     # pure-logic + adapter tests
 npm run tauri build    # NSIS installer under target/release/bundle/
 ```
 
-## Parked work
+## Additional provider state
 
-### `feature/imap-accounts`
-
-A complete but **unmerged** generic **IMAP/SMTP** backend lives on the
-[`feature/imap-accounts`](https://github.com/Swatto86/WattMail/tree/feature/imap-accounts)
-branch (CI-green), deliberately kept off `main` and out of releases until it's
-live-tested against a real app-password mailbox. It carries:
-
-- A `ProviderKind::Imap` backend (`crates/infrastructure/src/imap/`) over `async-imap`
-  + `lettre` (SMTP) + `mail-parser`, with **Mailspring-style account setup**
-  (provider chooser, credentials form, autodiscovery via a preset table + Mozilla ISPDB).
-- The credential-seam refactor (`ManagedAccount` → `OAuth | Imap` credentials).
-- Fixes to the (gated) Gmail sync backend and build-time injection of the OAuth client
-  credentials from environment variables / GitHub secrets.
-
-It diverges from `main` across `release.yml`, `CONTEXT.md`, and several source files.
-To resume generic-IMAP support: merge the branch, live-test, then release.
+- **Office 365**: configured and live in the default build.
+- **Outlook.com / Hotmail**: Microsoft Graph consumer-provider code exists, but the
+  committed build still has a placeholder OAuth client ID. It needs a real consumer
+  Microsoft app registration, release-secret wiring, and live sign-in/send/sync tests.
+- **Gmail**: Gmail REST provider code exists, but the committed build still has
+  placeholder Google OAuth credentials. It needs a real Google Desktop OAuth client,
+  release-secret wiring, and live sign-in/send/sync tests. Gmail is mail-only here;
+  there is no Gmail calendar backend.
+- **Generic IMAP/SMTP**: not present in the current repository or remote branches.
+  It still needs implementation or re-import, credentials UX, autodiscovery, live
+  mailbox testing, and release wiring.
 
 ## License
 

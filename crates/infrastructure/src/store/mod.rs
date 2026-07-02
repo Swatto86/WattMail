@@ -304,10 +304,34 @@ impl MailStore for SqliteStore {
     async fn set_read(&self, id: &str, read: bool) -> Result<(), MailError> {
         let id = id.to_string();
         self.run(move |conn| {
+            let existing = conn
+                .query_row(
+                    "SELECT folder_id, is_read FROM messages WHERE id = ?1",
+                    [&id],
+                    |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)? != 0)),
+                )
+                .optional()?;
             conn.execute(
                 "UPDATE messages SET is_read = ?1 WHERE id = ?2",
                 rusqlite::params![i64::from(read), id],
             )?;
+            if let Some((folder_id, was_read)) = existing {
+                match (was_read, read) {
+                    (false, true) => {
+                        conn.execute(
+                            "UPDATE folders SET unread_count = CASE WHEN unread_count > 0 THEN unread_count - 1 ELSE 0 END WHERE id = ?1",
+                            [folder_id],
+                        )?;
+                    }
+                    (true, false) => {
+                        conn.execute(
+                            "UPDATE folders SET unread_count = unread_count + 1 WHERE id = ?1",
+                            [folder_id],
+                        )?;
+                    }
+                    _ => {}
+                }
+            }
             Ok(())
         })
         .await
@@ -423,4 +447,67 @@ impl MailStore for SqliteStore {
 
 fn storage_err(e: impl std::fmt::Display) -> MailError {
     MailError::Storage(e.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn temp_db(name: &str) -> std::path::PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock before unix epoch")
+            .as_nanos();
+        std::env::temp_dir().join(format!("wattmail-{name}-{}-{nanos}.db", std::process::id()))
+    }
+
+    fn message(id: &str, is_read: bool) -> MessageSummary {
+        MessageSummary {
+            id: id.to_string(),
+            subject: "Subject".to_string(),
+            from: "Sender".to_string(),
+            to: "Recipient".to_string(),
+            received: "2026-07-02T12:00:00Z".to_string(),
+            preview: "Preview".to_string(),
+            is_read,
+            is_flagged: false,
+            has_attachments: false,
+        }
+    }
+
+    #[tokio::test]
+    async fn set_read_keeps_cached_folder_unread_count_in_sync() {
+        let path = temp_db("set-read-count");
+        {
+            let store = SqliteStore::open(&path).expect("open store");
+            store
+                .save_folders(vec![Folder {
+                    id: "inbox".to_string(),
+                    name: "Inbox".to_string(),
+                    unread_count: 1,
+                    depth: 0,
+                    role: Some(FolderRole::Inbox),
+                }])
+                .await
+                .expect("save folder");
+            store
+                .upsert_messages("inbox", vec![message("m1", false)])
+                .await
+                .expect("save message");
+
+            store.set_read("m1", true).await.expect("mark read");
+            let folders = store.cached_folders().await.expect("folders");
+            assert_eq!(folders[0].unread_count, 0);
+
+            store.set_read("m1", true).await.expect("mark read again");
+            let folders = store.cached_folders().await.expect("folders");
+            assert_eq!(folders[0].unread_count, 0);
+
+            store.set_read("m1", false).await.expect("mark unread");
+            let folders = store.cached_folders().await.expect("folders");
+            assert_eq!(folders[0].unread_count, 1);
+        }
+        let _ = std::fs::remove_file(path);
+    }
 }

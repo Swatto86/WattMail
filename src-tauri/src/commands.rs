@@ -824,13 +824,16 @@ pub fn set_close_to_tray(state: State<'_, SettingsState>, value: bool) -> Result
     settings::save(&updated).map_err(|e| e.to_string())
 }
 
-/// Update the tray icon + tooltip to reflect the inbox unread count. `silent`
-/// suppresses the new-mail chime — set for user-initiated updates (marking a
-/// message unread, switching accounts, initial load), so only genuinely new mail
-/// arriving via the auto-sync tick makes a sound.
+/// Update the tray icon + tooltip to reflect the inbox unread count.
 #[tauri::command]
-pub fn set_unread(app: tauri::AppHandle, count: u32, silent: bool) {
-    crate::update_tray(&app, count, silent);
+pub fn set_unread(app: tauri::AppHandle, count: u32) {
+    crate::update_tray(&app, count);
+}
+
+/// Play the native new-mail sound.
+#[tauri::command]
+pub fn play_new_mail_sound() {
+    crate::play_notify_sound();
 }
 
 /// Whether desktop notifications for new mail are enabled.

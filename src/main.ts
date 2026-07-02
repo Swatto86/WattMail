@@ -774,7 +774,7 @@ function showSignedOut(): void {
   clearSearchTimer();
   searchInput.value = "";
   setSearchClearVisible(false);
-  void invoke("set_unread", { count: 0, silent: true }).catch(() => {});
+  void invoke("set_unread", { count: 0 }).catch(() => {});
   resetReader();
   statusEl.textContent = "Not signed in";
 }
@@ -926,6 +926,23 @@ function activateCursor(): void {
   if (!searchActive && currentFolderIsDrafts()) void resumeDraft(cursorId);
   else void openMessage(cursorId);
 }
+function updateTrayUnread(): void {
+  const inboxFolder = folders.find((f) => f.role === "inbox");
+  void invoke("set_unread", { count: inboxFolder?.unreadCount ?? 0 }).catch(() => {});
+}
+function currentFolderUnreadDelta(wasUnread: boolean, read: boolean): number {
+  if (wasUnread && read) return -1;
+  if (!wasUnread && !read) return 1;
+  return 0;
+}
+function applyCurrentFolderUnreadDelta(delta: number): void {
+  if (delta === 0 || searchActive) return;
+  const folder = folders.find((f) => f.id === currentFolderId);
+  if (!folder) return;
+  folder.unreadCount = Math.max(0, folder.unreadCount + delta);
+  renderFolders();
+  updateTrayUnread();
+}
 // Optimistically mark a row read in the UI, then tell the server.
 function markRead(id: string): void {
   const row = rowFor(id);
@@ -933,25 +950,35 @@ function markRead(id: string): void {
   row.classList.remove("unread");
   const dot = row.querySelector(".msg-dot");
   if (dot) dot.innerHTML = "";
-  // Refresh folder badges / tray immediately (silent — this is user-initiated,
-  // not new mail), rather than leaving them stale until the next auto-sync.
+  applyCurrentFolderUnreadDelta(-1);
+  // Refresh folder badges / tray immediately rather than leaving them stale
+  // until the next auto-sync.
   void invoke("set_read", { id, read: true })
-    .then(() => loadFolders())
-    .catch(() => {});
+    .then(() => {
+      if (searchActive) void loadFolders();
+    })
+    .catch(() => {
+      row.classList.add("unread");
+      if (dot) dot.innerHTML = `<span class="dot"></span>`;
+      applyCurrentFolderUnreadDelta(1);
+    });
 }
 
 // Set a message's read state (context-menu action), reflecting it optimistically.
 async function setRead(id: string, read: boolean): Promise<void> {
   const row = rowFor(id);
+  const delta = row ? currentFolderUnreadDelta(row.classList.contains("unread"), read) : 0;
   if (row) {
     row.classList.toggle("unread", !read);
     const dot = row.querySelector(".msg-dot");
     if (dot) dot.innerHTML = read ? "" : `<span class="dot"></span>`;
   }
+  applyCurrentFolderUnreadDelta(delta);
   try {
     await invoke("set_read", { id, read });
-    await loadFolders(); // refresh unread badges
+    if (searchActive || !row) await loadFolders(); // refresh unread badges when we could not adjust safely
   } catch (e) {
+    applyCurrentFolderUnreadDelta(-delta);
     statusEl.textContent = `Could not update message: ${e}`;
     await revertOptimisticAction();
   }
@@ -2216,11 +2243,7 @@ async function handlePossibleAuthError(e: unknown): Promise<boolean> {
 }
 
 // ---- Folders ----
-// `allowChime` lets the tray play the new-mail sound when the inbox unread count
-// rises. Only the sync path (where new mail actually arrives) passes it; every
-// other caller (mark read/unread, deletes, account switch, initial load) leaves
-// it false so those never trigger a spurious chime.
-async function loadFolders(opts: { allowChime?: boolean } = {}): Promise<void> {
+async function loadFolders(): Promise<void> {
   try {
     folders = await invoke<FolderInfo[]>("list_folders");
   } catch (e) {
@@ -2234,11 +2257,7 @@ async function loadFolders(opts: { allowChime?: boolean } = {}): Promise<void> {
   }
   renderFolders();
   // Reflect the inbox unread count in the system tray (icon + tooltip).
-  const inboxFolder = folders.find((f) => f.role === "inbox");
-  void invoke("set_unread", {
-    count: inboxFolder?.unreadCount ?? 0,
-    silent: !opts.allowChime,
-  }).catch(() => {});
+  updateTrayUnread();
 }
 
 function renderFolders(): void {
@@ -2312,6 +2331,7 @@ async function checkNewMail(inboxFolderId: string): Promise<void> {
     });
     if (!batch) return;
     const body = batch.count === 1 ? batch.newestSubject : `${batch.count} new messages`;
+    void invoke("play_new_mail_sound").catch(() => {});
     await sendNotification({ title: "WattMail", body });
   } catch {
     /* notifications are best-effort — don't disrupt the sync */
@@ -2414,7 +2434,7 @@ async function syncFolder(quiet = false): Promise<void> {
   try {
     await invoke("sync_folder", { folderId: currentFolderId });
     await refreshFromCache(quiet);
-    await loadFolders({ allowChime: true }); // refresh unread counts; chime on new mail
+    await loadFolders(); // refresh unread counts
     // Check the Inbox for new mail regardless of which folder is open (the
     // notification setting promises alerts for Inbox arrivals), syncing the
     // Inbox too when it isn't the current folder. Skipped while searching.

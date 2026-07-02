@@ -9,7 +9,6 @@ mod paths;
 mod settings;
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::RwLock;
 
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
@@ -130,6 +129,7 @@ pub fn run() {
             commands::get_close_to_tray,
             commands::set_close_to_tray,
             commands::set_unread,
+            commands::play_new_mail_sound,
             commands::started_hidden,
             commands::get_notification_setting,
             commands::set_notification_setting,
@@ -188,13 +188,9 @@ fn build_tray(app: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// Last reported inbox unread count; `-1` until the first report. Used to play a
-/// sound only when the count *increases* (new mail), not on every sync.
-static LAST_UNREAD: AtomicI64 = AtomicI64::new(-1);
-
 /// Play the system notification sound (respects the user's sound scheme).
 #[cfg(windows)]
-fn play_notify_sound() {
+pub(crate) fn play_notify_sound() {
     // user32!MessageBeep(MB_ICONASTERISK) — plays the "Asterisk" scheme sound,
     // asynchronously. Declared inline to avoid a windows-sys dependency.
     #[link(name = "user32")]
@@ -208,21 +204,12 @@ fn play_notify_sound() {
 }
 
 #[cfg(not(windows))]
-fn play_notify_sound() {}
+pub(crate) fn play_notify_sound() {}
 
-/// Update the tray icon + tooltip to reflect the inbox unread count, and chime
-/// when the count increases. The tooltip includes the signed-in account email
-/// when available (read from the cached account state).
-pub(crate) fn update_tray(app: &AppHandle, unread: u32, silent: bool) {
-    // Always advance the watermark so the next comparison is relative to the
-    // current count (this also makes account switches, which pass silent=true,
-    // reset the baseline without a spurious chime). Chime only on a genuine
-    // increase from a non-silent (auto-sync) update.
-    let previous = LAST_UNREAD.swap(i64::from(unread), Ordering::Relaxed);
-    if !silent && previous >= 0 && i64::from(unread) > previous {
-        play_notify_sound();
-    }
-
+/// Update the tray icon + tooltip to reflect the inbox unread count. The tooltip
+/// includes the signed-in account email when available (read from the cached
+/// account state).
+pub(crate) fn update_tray(app: &AppHandle, unread: u32) {
     let Some(tray) = app.tray_by_id("main") else {
         return;
     };
