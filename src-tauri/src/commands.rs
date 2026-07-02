@@ -502,7 +502,10 @@ pub struct ForwardedAttachmentDto {
 }
 
 /// Send a message (compose / reply / forward), saved to Sent Items.
+// Arity mirrors the compose IPC surface; bundling into a struct would only
+// move the field list and churn the JS invoke shape.
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub async fn send_message(
     accounts: State<'_, AccountManager>,
     to: Vec<String>,
