@@ -129,6 +129,13 @@ handler / Graph wire shape). Your job is to implement the fixes.
 - **Accept:** Esc on a dirty compose asks before discarding; a clean compose
   (nothing typed beyond the prefill) still closes instantly; drag-select
   release on backdrop does not close.
+- **Note:** this is almost certainly the reported real-world symptom
+  "sometimes I lose the compose window and have no way of getting it back".
+  Fix it together with #34 (auto-save to Drafts), which is the safety net for
+  every other way the window can be lost. Interplay: when the user confirms
+  "Discard" here and #34 has auto-created a draft this session, delete that
+  draft too (`delete_message` on `currentDraftId`) — but NEVER delete a
+  pre-existing draft the user resumed from the Drafts folder.
 
 ### 3. Failed token refresh silently opens browser sign-ins and wedges the app; cancelled OAuth hangs forever
 
@@ -203,6 +210,60 @@ handler / Graph wire shape). Your job is to implement the fixes.
     immediately in `composeMsg` so the user learns before send.
 - **Accept:** oversized send fails fast with the readable message; a normal
   small send is unaffected.
+
+### 34. FEATURE — auto-save compose to Drafts so a lost window never loses the email
+
+*(Numbered 34 to avoid renumbering the doc; treat it as P1, implemented
+right after #2.)*
+
+- **Where:** `src/main.ts` — compose state (`currentDraftId`, `saveDraft`
+  `:3121-3140`, `sendCompose` `:3142+`, `openCompose`/`closeCompose`),
+  reusing the existing `save_draft` command and the draft-update path
+  (`crates/infrastructure/src/graph/mod.rs` `draft_body_json` PATCH). No new
+  backend endpoints should be needed.
+- **Why:** Users have lost fully written messages when the compose window
+  vanished (see #2 for the likely trigger, but a crash, an accidental app
+  quit, or any unknown path has the same result). With auto-save, the
+  recovery path is always simply the Drafts folder.
+- **Behavior to implement:**
+  - **Start saving on the first real edit**, not on open — any `input` event
+    on to/cc/bcc/subject/body, or an attachment being added, marks the
+    compose dirty and arms the autosaver. (On-open would litter Drafts with
+    empty drafts from every accidental `c` press or opened reply.) Applies
+    identically to new mail, reply, reply-all, and forward — for
+    reply/forward the quoted prefill does NOT count as an edit.
+  - **Debounced + heartbeat:** save ~3s after the last edit, and at most
+    every ~30s while continuously typing. Reuse the exact `saveDraft` logic:
+    first save calls `save_draft` (create) and stores the returned id in
+    `currentDraftId`; subsequent saves take the existing update path. After
+    the first autosave, the message therefore already sits in the Drafts
+    folder.
+  - **Silent:** no dialogs, no focus steal. Show a quiet "Draft saved HH:MM"
+    in the compose status area (`composeMsg`) only when it doesn't overwrite
+    an error message currently displayed there. Autosave failures (offline)
+    must not interrupt typing — show nothing or a subtle "Draft not saved
+    yet", and retry on the next debounce tick.
+  - **Send path:** a send with `currentDraftId` set already goes PATCH +
+    `POST /send` (existing code), so the autosaved draft is consumed by the
+    send itself — verify no duplicate remains in Drafts after a successful
+    send. Serialize autosave against send/manual-save with the same
+    in-flight flag as #30 so an autosave never fires mid-send.
+  - **Discard path:** see the interplay note in #2 — confirmed discard
+    deletes the auto-created draft; a draft resumed from the Drafts folder
+    is never deleted by discard.
+  - **Attachment caveat (ties to #12):** drafts still don't carry
+    attachments. Autosave must NOT trigger #12's confirm dialog (that stays
+    on the explicit "Save draft" button only). Instead, while chips are
+    present, keep a persistent inline note in the compose footer:
+    "Attachments aren't saved with drafts". If inline images are present and
+    the existing draft path defers/blocks them, autosave the text anyway if
+    the existing `save_draft` allows it, else skip body-image extraction the
+    same way the manual path does — do not invent a new draft format.
+- **Accept:** type a message, wait ~3s, see it appear in Drafts (with
+  "(no subject)" handling matching manual save); keep typing and the same
+  draft updates rather than duplicating; send it and Drafts is clean; kill
+  the app mid-compose and the text is recoverable from Drafts on relaunch;
+  discarding via #2's confirm removes the auto-created draft.
 
 ---
 
@@ -371,8 +432,11 @@ handler / Graph wire shape). Your job is to implement the fixes.
   composeForwardedAtts.length` (or inline images present — reuse the send
   path's detection), show the same warning via `showConfirm` ("Attachments
   aren't saved with drafts yet — save anyway without them?") before saving.
+  This confirm applies to the explicit "Save draft" button ONLY — the
+  autosaver from #34 must bypass it (it shows a persistent inline note
+  instead; see #34).
 - **Accept:** saving a draft with chips asks first; chipless saves are
-  unchanged.
+  unchanged; autosave never raises the dialog.
 
 ### 13. Resumed draft body is injected into the app DOM verbatim — foreign `<style>` restyles the whole app
 
@@ -594,7 +658,9 @@ non-removable notice chip "1 attached item can't be forwarded by WattMail".
 
 ## Suggested order
 
-Work P1 top-down (1 → 4), then P2 (5 → 17), then P3. Within P2: #5, #6+#7,
+Work P1 top-down (1 → 4, then #34 — the compose autosave feature, which
+builds directly on #2's close-path rework), then P2 (5 → 17), then P3.
+Within P2: #5, #6+#7,
 #14, #16, #17 are small and independent — do them early; #10 and #11 are the
 two larger ones — do them last, each in its own commit, and re-run the full
 verify suite after each.
