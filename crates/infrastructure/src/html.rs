@@ -116,22 +116,39 @@ pub fn sanitize_email(content: &str, is_html: bool, allow_images: bool) -> Sanit
             "cellspacing",
             "border",
         ])
-        .attribute_filter(|_element, attribute, value| {
+        // `data:` URLs are self-contained (no remote load): allow them so inline
+        // `cid:`-resolved and embedded images survive sanitization. The
+        // attribute filter below still strips remote (`http(s)`) image sources
+        // in blocked mode, and a `data:` href on a link is dropped there too.
+        .add_url_schemes(["data"])
+        .attribute_filter(move |element, attribute, value| {
             if attribute == "style" {
                 let cleaned = sanitize_style(value);
-                if cleaned.is_empty() {
+                return if cleaned.is_empty() {
                     None
                 } else {
                     Some(Cow::Owned(cleaned))
-                }
-            } else {
-                Some(Cow::Borrowed(value))
+                };
             }
+            if element == "img" && attribute == "src" {
+                let is_data = value.trim_start().to_ascii_lowercase().starts_with("data:");
+                // Keep inline (`data:`) images always; keep remote images only
+                // when images are allowed (they're proxied to `data:` after
+                // sanitization). In blocked mode a remote src is dropped so
+                // nothing loads remotely.
+                return if is_data || allow_images {
+                    Some(Cow::Borrowed(value))
+                } else {
+                    None
+                };
+            }
+            // Never let a `data:` URL ride on a link (defense in depth — links
+            // are inert in the sandbox and externally gated, but keep them out).
+            if attribute == "href" && value.trim_start().to_ascii_lowercase().starts_with("data:") {
+                return None;
+            }
+            Some(Cow::Borrowed(value))
         });
-    if !allow_images {
-        // Removing `img` closes the remote-image / tracking-pixel vector.
-        builder.rm_tags(["img"]);
-    }
     // Classify against the raw source (before cleaning) so author intent is
     // visible even where the sanitizer would later drop a value. This only
     // reads; it can never reintroduce blocked content.
@@ -189,14 +206,27 @@ fn text_to_html(text: &str) -> String {
         .replace('\n', "<br>")
 }
 
-/// Heuristic: did the original body reference remote resources we strip? Drives
-/// the "remote content blocked" indicator, not the sanitization itself.
+/// Heuristic: did the original body reference *remote* resources we strip?
+/// Drives the "remote content blocked" indicator, not the sanitization itself.
+/// Inline `cid:`/`data:` images are self-contained (no remote load), so an image
+/// whose only sources are inline must NOT trip the banner — otherwise clicking
+/// "load images" does nothing.
 fn has_remote_content(html: &str) -> bool {
     let lower = html.to_ascii_lowercase();
-    lower.contains("<img")
+    has_remote_img_src(&lower)
         || lower.contains("url(http")
+        || lower.contains("url('http")
+        || lower.contains("url(\"http")
         || lower.contains("background:url")
         || lower.contains("background: url")
+}
+
+/// True when a source attribute points at an `http(s)` URL — a remote-loading
+/// image. Only `<img>` carries a fetching `src` in rendered mail (scripts and
+/// link `href`s don't load in the sandboxed frame), so this reads as "a remote
+/// image would have loaded". `cid:`/`data:` sources are inline and excluded.
+fn has_remote_img_src(lower: &str) -> bool {
+    lower.contains("src=\"http") || lower.contains("src='http") || lower.contains("src=http")
 }
 
 /// Conservative, theme-independent test: does the source declare its own
@@ -359,5 +389,46 @@ mod tests {
         assert!(designed(
             r##"<body bgcolor="#ffffff"><td bgcolor="#0a66c2">x</td></body>"##
         ));
+    }
+
+    #[test]
+    fn cid_only_body_does_not_trip_the_remote_banner() {
+        // A message whose only image is a cid: reference has no remote content —
+        // the banner must not appear (clicking "load images" can't help it).
+        let s = sanitize_email(r#"<p>hi</p><img src="cid:logo@01d">"#, true, false);
+        assert!(!s.remote_content_blocked);
+    }
+
+    #[test]
+    fn data_image_survives_blocked_mode() {
+        // Inline data: images are self-contained and must render even when remote
+        // images are blocked.
+        let s = sanitize_email(r#"<img src="data:image/png;base64,AAAA">"#, true, false);
+        assert!(s.html.contains("data:image/png;base64,AAAA"));
+        assert!(!s.remote_content_blocked);
+    }
+
+    #[test]
+    fn remote_image_is_stripped_and_flagged_in_blocked_mode() {
+        let s = sanitize_email(r#"<img src="http://tracker.example/x.png">"#, true, false);
+        assert!(s.remote_content_blocked);
+        assert!(!s.html.contains("http://tracker.example"));
+    }
+
+    #[test]
+    fn remote_image_survives_when_images_allowed() {
+        // In allow mode the remote src is kept (it's proxied to data: afterward).
+        let s = sanitize_email(r#"<img src="http://cdn.example/x.png">"#, true, true);
+        assert!(s.html.contains("http://cdn.example/x.png"));
+    }
+
+    #[test]
+    fn data_href_on_a_link_is_dropped() {
+        let s = sanitize_email(
+            r#"<a href="data:text/html,<script>">click</a>"#,
+            true,
+            false,
+        );
+        assert!(!s.html.contains("data:text/html"));
     }
 }

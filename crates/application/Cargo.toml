@@ -7,3 +7,7 @@ rust-version.workspace = true
 
 [dependencies]
 wattmail-domain.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true }
+async-trait = { workspace = true }

@@ -129,6 +129,20 @@ pub enum AuthError {
     Provider { error: String, description: String },
     #[error("secure token store error: {0}")]
     Store(#[from] keyring::Error),
+    /// The stored refresh token was rejected (revoked/expired) — the user must
+    /// sign in again interactively. The message is prefixed `auth-required:` so
+    /// the frontend can recognise it after the command layer stringifies it and
+    /// show a re-authenticate prompt instead of a generic error.
+    #[error("auth-required: your WattMail session has expired — sign in again")]
+    ReauthRequired,
+    /// A transport failure acquiring a token (offline, DNS, timeout). Distinct
+    /// from [`ReauthRequired`] so a network blip doesn't demand re-sign-in.
+    #[error("network error: {0}")]
+    Network(String),
+    /// The interactive sign-in wasn't completed within the allotted time (the
+    /// user closed the browser tab or never finished).
+    #[error("sign-in timed out or was cancelled")]
+    TimedOut,
 }
 
 #[derive(serde::Deserialize)]
@@ -166,22 +180,41 @@ impl AuthService {
         })
     }
 
-    /// Return a valid access token, refreshing or prompting interactively as
-    /// needed.
+    /// Return a valid access token, refreshing silently when needed.
+    ///
+    /// This NEVER launches an interactive browser sign-in — background commands
+    /// must not pop OS browser tabs unprompted. A revoked/expired refresh token
+    /// surfaces as [`AuthError::ReauthRequired`] (the UI then offers a
+    /// re-authenticate button, which calls [`reauthenticate`](Self::reauthenticate));
+    /// a transport failure surfaces as [`AuthError::Network`] (offline, not a
+    /// credential problem).
     pub async fn access_token(&self) -> Result<String, AuthError> {
         if let Some(access_token) = self.cached_access_token() {
             return Ok(access_token);
         }
-        if let Some(refresh) = self.current_refresh_token() {
-            if let Ok(tokens) = self.refresh(&refresh).await {
+        let Some(refresh) = self.current_refresh_token() else {
+            return Err(AuthError::ReauthRequired);
+        };
+        match self.refresh(&refresh).await {
+            Ok(tokens) => {
                 self.remember(&tokens)?;
-                return Ok(tokens.access_token);
+                Ok(tokens.access_token)
             }
-            // Refresh failed (revoked/expired) — fall through to interactive.
+            // A transport failure (offline/DNS/timeout) is not a credential
+            // problem — surface it as network so the UI shows "offline", not a
+            // re-auth prompt. An OAuth error response (invalid_grant: refresh
+            // token revoked/expired) genuinely needs re-authentication.
+            Err(AuthError::Http(e)) => Err(AuthError::Network(e.to_string())),
+            Err(_) => Err(AuthError::ReauthRequired),
         }
+    }
+
+    /// Re-run interactive sign-in for this (already-registered) account and
+    /// persist the fresh tokens. Called explicitly from the re-authenticate UI
+    /// after [`access_token`](Self::access_token) reported [`AuthError::ReauthRequired`].
+    pub async fn reauthenticate(&self) -> Result<(), AuthError> {
         let tokens = self.interactive_login().await?;
-        self.remember(&tokens)?;
-        Ok(tokens.access_token)
+        self.remember(&tokens)
     }
 
     /// The cached access token, if still valid for this process.
@@ -353,8 +386,19 @@ impl AuthService {
 
 /// Block on the loopback listener until the OAuth redirect arrives, validating
 /// CSRF state. Browser noise (e.g. favicon requests) is answered and ignored.
+/// Bounded by a deadline so a user who closes the browser tab (never completing
+/// sign-in) doesn't wedge the flow forever — it returns [`AuthError::TimedOut`].
 fn wait_for_code(server: tiny_http::Server, expected_state: &str) -> Result<String, AuthError> {
-    for request in server.incoming_requests() {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(300);
+    loop {
+        let Some(remaining) = deadline.checked_duration_since(std::time::Instant::now()) else {
+            return Err(AuthError::TimedOut);
+        };
+        let request = match server.recv_timeout(remaining) {
+            Ok(Some(request)) => request,
+            Ok(None) => return Err(AuthError::TimedOut), // deadline elapsed
+            Err(e) => return Err(AuthError::Listener(io_other(e))),
+        };
         let target = format!("http://127.0.0.1{}", request.url());
         let (code, state, error) = match url::Url::parse(&target) {
             Ok(url) => extract_params(&url),
@@ -386,7 +430,6 @@ fn wait_for_code(server: tiny_http::Server, expected_state: &str) -> Result<Stri
             _ => Err(AuthError::NoCode),
         };
     }
-    Err(AuthError::NoCode)
 }
 
 fn extract_params(url: &url::Url) -> (Option<String>, Option<String>, Option<String>) {

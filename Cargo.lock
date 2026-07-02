@@ -5443,12 +5443,14 @@ dependencies = [
 name = "wattmail-application"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
+ "tokio",
  "wattmail-domain",
 ]
 
 [[package]]
 name = "wattmail-desktop"
-version = "0.2.6"
+version = "0.2.8"
 dependencies = [
  "base64 0.22.1",
  "dirs 6.0.0",

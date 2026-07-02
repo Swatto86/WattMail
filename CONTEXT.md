@@ -94,6 +94,61 @@ Entra app registration (public, not secret):
 
 ## Progress log
 
+### 2026-07-02 — Bug-sweep implementation: 34 user-facing fixes (v0.2.8)
+Implemented the full `BUGSWEEP.md` work order (a five-area sweep of user-facing
+actions, each finding verified against both sides of the contract). 34 items
+across the Rust workspace and the TypeScript frontend; every change kept
+`cargo fmt`/`clippy -D warnings`/`cargo test --workspace` (50 tests) and
+`npm run build` green.
+
+- **P1 (data loss / core action):** Delete now MOVES to Deleted Items via the
+  Graph move API (the old `DELETE` went to Recoverable Items, invisible
+  everywhere); a permanent delete (with a danger confirm) is offered only from
+  Deleted Items itself. Compose no longer discards an in-progress message
+  silently — Esc/Cancel/backdrop route through a dirty-check discard confirm
+  (backdrop only closes when the mousedown started on it), and a debounced
+  **autosave to Drafts** means a lost window never loses the mail. A failed
+  token refresh no longer opens surprise browser tabs from background commands:
+  `access_token()` returns `ReauthRequired`/`Network` (never interactive login),
+  `wait_for_code` has a 5-minute deadline, and the UI offers a one-tap re-sign-in
+  via a new `reauthenticate_account` command. Attachments over ~2.5 MB fail fast
+  with a readable message (Graph's simple-send cap) instead of a raw 413.
+- **P2:** delta changes apply in feed order (deleted messages no longer
+  resurrect); new-mail notifications are keyed per account, seed silently on
+  first check (no launch-time toast spam), and fire for the Inbox regardless of
+  the open folder; all-day calendar events are snapped to the nearest midnight
+  (Graph's `Prefer` zone-converts them, sliding them off-day); inline `cid:`
+  images are resolved to `data:` URLs and the sanitizer keeps `data:` images in
+  both modes (the "load images" banner now only shows for real http(s) images);
+  a **Bcc** field was added and plumbed through send/draft/resume, and a
+  foreign draft's server-side Bcc/attachments are surfaced; resumed draft bodies
+  run through the paste sanitizer (no more foreign `<style>` restyling the app);
+  the in-app dialog's Enter-on-Cancel now cancels; remove-account closes the
+  store before deleting the cache (+ `-wal`/`-shm`); search survives in-flight
+  refreshes and stale debounces; the provider picker joins the modal/Esc/shortcut
+  guards.
+- **P3:** older-mail backfill uses `le` at the boundary second; opening a
+  message refreshes badges immediately; the tray chime only fires from the sync
+  path (a `silent` flag stops false chimes on account switch / mark-unread); the
+  dead notification-click listener was removed; calendar RSVP/delete buttons are
+  disabled in-flight; recipient/attendee input is validated (extracts
+  `Name <addr>`, reports the bad token); a transient boot cache-open failure no
+  longer drops the account; the folder list follows `@odata.nextLink` (no
+  100-folder truncation); deleting a parent folder while inside a descendant
+  falls back to Inbox; offline "Load more" still widens from cache;
+  insert-link prepends `https://`; save/send is serialized (no duplicate draft);
+  the reading-pane link menu dismisses from inside the iframe; reply prefers
+  `Reply-To` and reply-all keeps original To recipients on the To line; forwarding
+  surfaces a notice for attachments it can't forward.
+- **New unit tests:** delta-order, reply/reply-all, cid rewrite, folder paging,
+  all-day midnight snap, and sanitizer data/http image handling.
+- **Verification level:** compile/test-verified — all four gates clean locally
+  (Tauri Linux build deps installed here, so the presentation crate is
+  compile-checked too). **Not live-run verified** — no signed-in mailbox in this
+  sandbox; the Graph wire paths (delete-as-move, cid resolution, Bcc, the reauth
+  flow) are unit-/shape-tested but not exercised against a real account. Released
+  as v0.2.8 under the release-then-test policy.
+
 ### 2026-07-01 — Forward now carries attachments
 Fixes the silent-drop bug where forwarding a message sent it body-only and
 dropped every attachment on the floor. Reply is unchanged (re-sending someone

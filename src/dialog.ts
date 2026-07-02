@@ -129,9 +129,12 @@ function open(kind: DialogKind, message: string, opts: DialogOptions): Promise<s
       e.stopPropagation();
       settle(cancelResult());
     } else if (e.key === "Enter" && document.activeElement !== inputEl) {
+      // Enter confirms — UNLESS the Cancel button is focused, where it must
+      // cancel (Tab-to-Cancel then Enter should not perform the OK action, e.g.
+      // deleting a folder). Enter on the OK button (or elsewhere) still confirms.
       e.preventDefault();
       e.stopPropagation();
-      settle(currentResult());
+      settle(document.activeElement === cancelBtn ? cancelResult() : currentResult());
     }
   };
   document.addEventListener("keydown", activeKeyHandler, true);

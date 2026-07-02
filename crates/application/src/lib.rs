@@ -139,14 +139,26 @@ pub async fn set_flag(
     store.set_flag(id, flagged).await
 }
 
-/// Delete a message on the server (→ Deleted Items) and drop it from the cache.
+/// Delete a message and drop it from the cache. `permanent` false moves it to
+/// Deleted Items (recoverable); true deletes it outright (already in Deleted
+/// Items). Either way it leaves the current folder, so the cached row is removed.
 pub async fn delete_message(
     provider: &dyn MailProvider,
     store: &dyn MailStore,
     id: &str,
+    permanent: bool,
 ) -> Result<(), MailError> {
-    provider.delete_message(id).await?;
+    provider.delete_message(id, permanent).await?;
     store.remove_message(id).await
+}
+
+/// Whether a message has attachments WattMail can't forward (embedded messages /
+/// cloud references). Lets the forward UI surface a "can't be forwarded" notice.
+pub async fn has_unforwardable_attachments(
+    provider: &dyn MailProvider,
+    message_id: &str,
+) -> Result<bool, MailError> {
+    provider.has_unforwardable_attachments(message_id).await
 }
 
 /// Move a message to another folder and drop it from the source folder's cache
@@ -197,6 +209,11 @@ pub async fn sync_folder(
     let token = store.load_state(&token_key).await?.map(SyncToken::new);
     let batch = provider.sync(folder_id, token.as_ref()).await?;
 
+    // Apply changes in FEED ORDER. Upserts are still batched for efficiency, but
+    // the pending buffer is flushed before each Removed/FlagsChanged so an
+    // out-of-order pair for one id (e.g. an early-page upsert followed by a
+    // later-page tombstone) resolves correctly — otherwise a flush-after-loop
+    // would re-insert a message the feed already removed (a ghost row).
     let mut upserts = Vec::new();
     for change in batch.changes {
         match change {
@@ -206,6 +223,7 @@ pub async fn sync_folder(
                 is_read,
                 is_flagged,
             } => {
+                flush_upserts(store, folder_id, &mut upserts).await?;
                 // Update only the flags the notification carried; a missing row
                 // (message never fully cached) is a no-op until the next upsert.
                 if let Some(read) = is_read {
@@ -215,13 +233,28 @@ pub async fn sync_folder(
                     store.set_flag(&id, flagged).await?;
                 }
             }
-            MessageChange::Removed(id) => store.remove_message(&id).await?,
+            MessageChange::Removed(id) => {
+                flush_upserts(store, folder_id, &mut upserts).await?;
+                store.remove_message(&id).await?;
+            }
         }
     }
-    if !upserts.is_empty() {
-        store.upsert_messages(folder_id, upserts).await?;
-    }
+    flush_upserts(store, folder_id, &mut upserts).await?;
     store.save_state(&token_key, batch.token.as_str()).await?;
+    Ok(())
+}
+
+/// Flush any pending upserts to the store, preserving feed order relative to the
+/// removes/flag-changes interleaved around them.
+async fn flush_upserts(
+    store: &dyn MailStore,
+    folder_id: &str,
+    upserts: &mut Vec<MessageSummary>,
+) -> Result<(), MailError> {
+    if !upserts.is_empty() {
+        let batch = std::mem::take(upserts);
+        store.upsert_messages(folder_id, batch).await?;
+    }
     Ok(())
 }
 
@@ -376,27 +409,49 @@ pub struct ComposePrefill {
 }
 
 /// Build a reply (or reply-all) prefill from a message.
+///
+/// The reply target is the message's `Reply-To` addresses when present (mailing
+/// lists, ticketing systems), otherwise the raw `From`. Reply-all keeps the
+/// original `To` recipients on the `To` line (rather than demoting them to `Cc`,
+/// which breaks recipients' filters and diverges from Outlook/Gmail), and the
+/// original `Cc` on `Cc` — always excluding the sender and de-duplicating.
 pub fn compose_reply(message: &MessageBody, self_email: &str, reply_all: bool) -> ComposePrefill {
-    let mut to = Vec::new();
-    if !message.from_address.is_empty() {
-        to.push(message.from_address.clone());
-    }
-    let mut cc = Vec::new();
-    if reply_all {
-        for addr in message
-            .to_addresses
-            .iter()
-            .chain(message.cc_addresses.iter())
-        {
-            let duplicate = addr.is_empty()
-                || addr.eq_ignore_ascii_case(self_email)
-                || addr.eq_ignore_ascii_case(&message.from_address)
-                || cc.iter().any(|c: &String| c.eq_ignore_ascii_case(addr));
-            if !duplicate {
-                cc.push(addr.clone());
-            }
+    let mut to: Vec<String> = Vec::new();
+    let push_unique = |list: &mut Vec<String>, addr: &str| {
+        if !addr.is_empty() && !list.iter().any(|a: &String| a.eq_ignore_ascii_case(addr)) {
+            list.push(addr.to_string());
+        }
+    };
+
+    // Prefer Reply-To over the raw From; fall back to From when unset.
+    if message.reply_to_addresses.is_empty() {
+        push_unique(&mut to, &message.from_address);
+    } else {
+        for addr in &message.reply_to_addresses {
+            push_unique(&mut to, addr);
         }
     }
+
+    let mut cc: Vec<String> = Vec::new();
+    if reply_all {
+        // Original To recipients stay on To (don't demote to Cc).
+        for addr in &message.to_addresses {
+            if !addr.eq_ignore_ascii_case(self_email) {
+                push_unique(&mut to, addr);
+            }
+        }
+        // Original Cc recipients stay on Cc (minus self / anyone already on To).
+        for addr in &message.cc_addresses {
+            if addr.is_empty()
+                || addr.eq_ignore_ascii_case(self_email)
+                || to.iter().any(|t| t.eq_ignore_ascii_case(addr))
+            {
+                continue;
+            }
+            push_unique(&mut cc, addr);
+        }
+    }
+
     ComposePrefill {
         to,
         cc,
@@ -453,4 +508,238 @@ fn escape_html(s: &str) -> String {
     s.replace('&', "&amp;")
         .replace('<', "&lt;")
         .replace('>', "&gt;")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use async_trait::async_trait;
+    use std::collections::HashMap;
+    use std::sync::Mutex;
+    use wattmail_domain::{
+        EmailAddress, Folder, MessageBody, MessageHeader, MessageSummary, SyncBatch, SyncToken,
+    };
+
+    fn summary(id: &str) -> MessageSummary {
+        MessageSummary {
+            id: id.to_string(),
+            subject: "s".into(),
+            from: "f".into(),
+            to: "t".into(),
+            received: "2026-07-01T00:00:00Z".into(),
+            preview: "p".into(),
+            is_read: false,
+            is_flagged: false,
+            has_attachments: false,
+        }
+    }
+
+    /// A mock store recording message presence and sync-state, for exercising
+    /// [`sync_folder`]'s change-ordering. Unused port methods are unreachable here.
+    #[derive(Default)]
+    struct MockStore {
+        messages: Mutex<HashMap<String, MessageSummary>>,
+        state: Mutex<HashMap<String, String>>,
+    }
+
+    #[async_trait]
+    impl MailStore for MockStore {
+        async fn upsert_messages(
+            &self,
+            _folder_id: &str,
+            messages: Vec<MessageSummary>,
+        ) -> Result<(), MailError> {
+            let mut map = self.messages.lock().unwrap();
+            for m in messages {
+                map.insert(m.id.clone(), m);
+            }
+            Ok(())
+        }
+        async fn remove_message(&self, id: &str) -> Result<(), MailError> {
+            self.messages.lock().unwrap().remove(id);
+            Ok(())
+        }
+        async fn forget_folder(&self, _folder_id: &str) -> Result<(), MailError> {
+            Ok(())
+        }
+        async fn recent(&self, _f: &str, _t: u32) -> Result<Vec<MessageSummary>, MailError> {
+            Ok(Vec::new())
+        }
+        async fn oldest_received(&self, _f: &str) -> Result<Option<String>, MailError> {
+            Ok(None)
+        }
+        async fn count(&self, _f: &str) -> Result<u32, MailError> {
+            Ok(self.messages.lock().unwrap().len() as u32)
+        }
+        async fn set_read(&self, id: &str, read: bool) -> Result<(), MailError> {
+            if let Some(m) = self.messages.lock().unwrap().get_mut(id) {
+                m.is_read = read;
+            }
+            Ok(())
+        }
+        async fn set_flag(&self, id: &str, flagged: bool) -> Result<(), MailError> {
+            if let Some(m) = self.messages.lock().unwrap().get_mut(id) {
+                m.is_flagged = flagged;
+            }
+            Ok(())
+        }
+        async fn save_folders(&self, _folders: Vec<Folder>) -> Result<(), MailError> {
+            Ok(())
+        }
+        async fn cached_folders(&self) -> Result<Vec<Folder>, MailError> {
+            Ok(Vec::new())
+        }
+        async fn load_state(&self, key: &str) -> Result<Option<String>, MailError> {
+            Ok(self.state.lock().unwrap().get(key).cloned())
+        }
+        async fn save_state(&self, key: &str, value: &str) -> Result<(), MailError> {
+            self.state
+                .lock()
+                .unwrap()
+                .insert(key.to_string(), value.to_string());
+            Ok(())
+        }
+    }
+
+    /// A mock provider that returns a preset sync batch. Only the methods
+    /// [`sync_folder`] touches are implemented.
+    struct MockProvider {
+        batch: Mutex<Option<SyncBatch>>,
+    }
+
+    #[async_trait]
+    impl MailProvider for MockProvider {
+        async fn current_user(&self) -> Result<UserProfile, MailError> {
+            Ok(UserProfile {
+                id: "id".into(),
+                display_name: "Me".into(),
+                email: EmailAddress::parse("me@example.com").unwrap(),
+            })
+        }
+        async fn sync(
+            &self,
+            _folder_id: &str,
+            _since: Option<&SyncToken>,
+        ) -> Result<SyncBatch, MailError> {
+            Ok(self
+                .batch
+                .lock()
+                .unwrap()
+                .take()
+                .expect("batch consumed once"))
+        }
+        async fn list_recent(&self, _top: u32) -> Result<Vec<MessageSummary>, MailError> {
+            unreachable!()
+        }
+        async fn search(&self, _q: &str, _t: u32) -> Result<Vec<MessageSummary>, MailError> {
+            unreachable!()
+        }
+        async fn message(&self, _id: &str, _i: bool) -> Result<MessageBody, MailError> {
+            unreachable!()
+        }
+        async fn message_headers(&self, _id: &str) -> Result<Vec<MessageHeader>, MailError> {
+            unreachable!()
+        }
+        async fn set_read(&self, _id: &str, _r: bool) -> Result<(), MailError> {
+            unreachable!()
+        }
+        async fn set_flag(&self, _id: &str, _f: bool) -> Result<(), MailError> {
+            unreachable!()
+        }
+        async fn delete_message(&self, _id: &str, _p: bool) -> Result<(), MailError> {
+            unreachable!()
+        }
+        async fn move_message(&self, _id: &str, _d: &str) -> Result<(), MailError> {
+            unreachable!()
+        }
+        async fn folders(&self) -> Result<Vec<Folder>, MailError> {
+            unreachable!()
+        }
+        async fn send_message(&self, _m: &OutgoingMessage) -> Result<(), MailError> {
+            unreachable!()
+        }
+        async fn create_draft(&self, _m: &OutgoingMessage) -> Result<String, MailError> {
+            unreachable!()
+        }
+        async fn update_draft(&self, _id: &str, _m: &OutgoingMessage) -> Result<(), MailError> {
+            unreachable!()
+        }
+        async fn send_draft(&self, _id: &str) -> Result<(), MailError> {
+            unreachable!()
+        }
+        async fn load_draft(&self, _id: &str) -> Result<DraftPrefill, MailError> {
+            unreachable!()
+        }
+        async fn attachments(&self, _id: &str) -> Result<Vec<Attachment>, MailError> {
+            unreachable!()
+        }
+        async fn attachment_bytes(&self, _m: &str, _a: &str) -> Result<Vec<u8>, MailError> {
+            unreachable!()
+        }
+    }
+
+    #[tokio::test]
+    async fn delta_upsert_then_remove_for_same_id_leaves_it_absent() {
+        // The bug: buffering all upserts and flushing after the loop re-inserted
+        // a message the same feed had already removed. Applied in feed order, the
+        // remove must win.
+        let store = MockStore::default();
+        let provider = MockProvider {
+            batch: Mutex::new(Some(SyncBatch {
+                changes: vec![
+                    MessageChange::Upserted(summary("A")),
+                    MessageChange::Removed("A".to_string()),
+                ],
+                token: SyncToken::new("delta-token"),
+            })),
+        };
+
+        sync_folder(&provider, &store, "inbox").await.unwrap();
+
+        assert!(
+            !store.messages.lock().unwrap().contains_key("A"),
+            "removed message must not be resurrected by the earlier upsert"
+        );
+    }
+
+    fn body_with(from: &str, reply_to: &[&str], to: &[&str], cc: &[&str]) -> MessageBody {
+        MessageBody {
+            id: "1".into(),
+            subject: "Hello".into(),
+            from: from.into(),
+            from_address: from.into(),
+            to: Vec::new(),
+            to_addresses: to.iter().map(|s| s.to_string()).collect(),
+            cc_addresses: cc.iter().map(|s| s.to_string()).collect(),
+            reply_to_addresses: reply_to.iter().map(|s| s.to_string()).collect(),
+            received: "2026-07-01T00:00:00Z".into(),
+            html: String::new(),
+            remote_content_blocked: false,
+            is_designed: false,
+        }
+    }
+
+    #[test]
+    fn reply_prefers_reply_to_over_from() {
+        let msg = body_with("sender@x.com", &["list@x.com"], &[], &[]);
+        let prefill = compose_reply(&msg, "me@x.com", false);
+        assert_eq!(prefill.to, vec!["list@x.com".to_string()]);
+    }
+
+    #[test]
+    fn reply_all_keeps_original_to_on_to_line_not_cc() {
+        let msg = body_with(
+            "sender@x.com",
+            &[],
+            &["alice@x.com", "me@x.com"],
+            &["bob@x.com"],
+        );
+        let prefill = compose_reply(&msg, "me@x.com", true);
+        // From + original To (minus self) all on To; original Cc on Cc.
+        assert_eq!(
+            prefill.to,
+            vec!["sender@x.com".to_string(), "alice@x.com".to_string()]
+        );
+        assert_eq!(prefill.cc, vec!["bob@x.com".to_string()]);
+    }
 }

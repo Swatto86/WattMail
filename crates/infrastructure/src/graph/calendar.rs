@@ -228,6 +228,61 @@ fn normalize_local_datetime(s: &str) -> String {
         .to_string()
 }
 
+/// Snap an all-day event's (zone-converted) local datetime back to the nearest
+/// midnight. Graph applies the `Prefer` zone conversion to all-day events too, so
+/// their `T00:00:00` slides by the zone offset (< 12 h). If the hour is < 12 the
+/// conversion nudged it forward within the same day → truncate to that day's
+/// midnight; if ≥ 12 it slid back across midnight → roll forward to the next day.
+fn snap_all_day_to_midnight(dt: &str) -> String {
+    let Some((date, time)) = dt.split_once('T') else {
+        return dt.to_string();
+    };
+    let hour: u32 = time.get(0..2).and_then(|h| h.parse().ok()).unwrap_or(0);
+    if hour >= 12 {
+        format!("{}T00:00:00", next_calendar_day(date))
+    } else {
+        format!("{date}T00:00:00")
+    }
+}
+
+/// Increment a `YYYY-MM-DD` date by one day (Gregorian, leap-aware). Returns the
+/// input unchanged if it doesn't parse as a date.
+fn next_calendar_day(date: &str) -> String {
+    let parts: Vec<&str> = date.split('-').collect();
+    let (Some(Ok(y)), Some(Ok(m)), Some(Ok(d))) = (
+        parts.first().map(|s| s.parse::<i32>()),
+        parts.get(1).map(|s| s.parse::<u32>()),
+        parts.get(2).map(|s| s.parse::<u32>()),
+    ) else {
+        return date.to_string();
+    };
+    let (mut y, mut m, mut d) = (y, m, d);
+    d += 1;
+    if d > days_in_month(y, m) {
+        d = 1;
+        m += 1;
+        if m > 12 {
+            m = 1;
+            y += 1;
+        }
+    }
+    format!("{y:04}-{m:02}-{d:02}")
+}
+
+fn days_in_month(year: i32, month: u32) -> u32 {
+    match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 if is_leap_year(year) => 29,
+        2 => 28,
+        _ => 31,
+    }
+}
+
+fn is_leap_year(year: i32) -> bool {
+    (year % 4 == 0 && year % 100 != 0) || year % 400 == 0
+}
+
 /// Map a Graph event to the domain [`CalendarEvent`], sanitizing its body and
 /// resolving the user's own response. `tz` is the requested zone, used only as a
 /// fallback when Graph omits a per-field `timeZone`.
@@ -293,12 +348,24 @@ fn to_domain_event(event: GraphEvent, tz: &str) -> CalendarEvent {
             .or(event.online_meeting_url),
     );
 
+    let is_all_day = event.is_all_day.unwrap_or(false);
+    let mut start = to_domain_datetime(event.start, tz);
+    let mut end = to_domain_datetime(event.end, tz);
+    if is_all_day {
+        // `Prefer: outlook.timezone` converts EVERY returned dateTime, including
+        // all-day events, so an all-day event created in another zone comes back
+        // shifted off midnight (e.g. `...T19:00:00`). Snap back to the nearest
+        // midnight so day-bucketing and range math land on the right day.
+        start.date_time = snap_all_day_to_midnight(&start.date_time);
+        end.date_time = snap_all_day_to_midnight(&end.date_time);
+    }
+
     CalendarEvent {
         id: event.id,
         subject: event.subject.unwrap_or_else(|| "(no subject)".to_string()),
-        start: to_domain_datetime(event.start, tz),
-        end: to_domain_datetime(event.end, tz),
-        is_all_day: event.is_all_day.unwrap_or(false),
+        start,
+        end,
+        is_all_day,
         location: event
             .location
             .and_then(|l| l.display_name)
@@ -439,6 +506,43 @@ mod tests {
             normalize_local_datetime("2026-06-24T09:00:00Z"),
             "2026-06-24T09:00:00"
         );
+    }
+
+    #[test]
+    fn all_day_snap_rolls_forward_when_shifted_back_across_midnight() {
+        // London all-day "July 10" viewed from New York → 2026-07-09T19:00:00.
+        assert_eq!(
+            snap_all_day_to_midnight("2026-07-09T19:00:00"),
+            "2026-07-10T00:00:00"
+        );
+    }
+
+    #[test]
+    fn all_day_snap_truncates_when_shifted_forward_within_day() {
+        // LA all-day event viewed from London → 2026-07-10T08:00:00.
+        assert_eq!(
+            snap_all_day_to_midnight("2026-07-10T08:00:00"),
+            "2026-07-10T00:00:00"
+        );
+    }
+
+    #[test]
+    fn all_day_snap_leaves_midnight_unchanged() {
+        assert_eq!(
+            snap_all_day_to_midnight("2026-07-10T00:00:00"),
+            "2026-07-10T00:00:00"
+        );
+    }
+
+    #[test]
+    fn next_calendar_day_handles_month_and_year_boundaries() {
+        assert_eq!(next_calendar_day("2026-07-10"), "2026-07-11");
+        assert_eq!(next_calendar_day("2026-07-31"), "2026-08-01");
+        assert_eq!(next_calendar_day("2026-12-31"), "2027-01-01");
+        // Leap year: Feb has 29 days in 2028.
+        assert_eq!(next_calendar_day("2028-02-28"), "2028-02-29");
+        assert_eq!(next_calendar_day("2028-02-29"), "2028-03-01");
+        assert_eq!(next_calendar_day("2027-02-28"), "2027-03-01");
     }
 
     #[test]

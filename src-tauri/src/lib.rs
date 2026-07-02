@@ -8,6 +8,7 @@ mod commands;
 mod paths;
 mod settings;
 
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::RwLock;
 
@@ -26,15 +27,16 @@ const HIDDEN_FLAG: &str = "--hidden";
 /// `started_hidden` command so the frontend skips revealing the window.
 pub(crate) struct StartHidden(pub bool);
 
-/// In-memory state for desktop new-mail notifications: the most recent
-/// `receivedDateTime` we have already notified about, so we only fire on
-/// genuinely new messages rather than re-notifying on every sync.
+/// In-memory state for desktop new-mail notifications: per account, the most
+/// recent `receivedDateTime` we have already notified about, so we only fire on
+/// genuinely new messages rather than re-notifying on every sync — and never
+/// compare one account's mail against another's watermark.
 #[derive(Default)]
 pub(crate) struct NotificationState {
-    /// The ISO-8601 `receivedDateTime` of the newest message we've notified
-    /// about. Messages with a timestamp strictly newer than this trigger a
-    /// notification (then this is updated).
-    last_notified_at: RwLock<Option<String>>,
+    /// Account id → ISO-8601 `receivedDateTime` of the newest message notified
+    /// about for that account. An absent entry means "not seeded yet" (the first
+    /// check seeds it silently). Messages strictly newer than the entry notify.
+    last_notified_at: RwLock<HashMap<String, String>>,
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -122,6 +124,8 @@ pub fn run() {
             commands::set_read,
             commands::set_flag,
             commands::delete_message,
+            commands::reauthenticate_account,
+            commands::message_has_unforwardable_attachments,
             commands::move_message,
             commands::get_close_to_tray,
             commands::set_close_to_tray,
@@ -209,9 +213,13 @@ fn play_notify_sound() {}
 /// Update the tray icon + tooltip to reflect the inbox unread count, and chime
 /// when the count increases. The tooltip includes the signed-in account email
 /// when available (read from the cached account state).
-pub(crate) fn update_tray(app: &AppHandle, unread: u32) {
+pub(crate) fn update_tray(app: &AppHandle, unread: u32, silent: bool) {
+    // Always advance the watermark so the next comparison is relative to the
+    // current count (this also makes account switches, which pass silent=true,
+    // reset the baseline without a spurious chime). Chime only on a genuine
+    // increase from a non-silent (auto-sync) update.
     let previous = LAST_UNREAD.swap(i64::from(unread), Ordering::Relaxed);
-    if previous >= 0 && i64::from(unread) > previous {
+    if !silent && previous >= 0 && i64::from(unread) > previous {
         play_notify_sound();
     }
 

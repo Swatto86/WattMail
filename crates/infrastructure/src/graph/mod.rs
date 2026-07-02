@@ -68,7 +68,7 @@ impl GraphClient {
         parent: Option<&str>,
     ) -> Result<Vec<GraphFolder>, MailError> {
         let select = "$top=100&$select=id,displayName,unreadItemCount,childFolderCount";
-        let url = match parent {
+        let mut url = match parent {
             None => format!("{GRAPH_BASE}/me/mailFolders?{select}"),
             Some(id) => {
                 let mut url =
@@ -82,13 +82,23 @@ impl GraphClient {
                 url.into()
             }
         };
-        let body: GraphFolders = self
-            .get(&url)
-            .await?
-            .json()
-            .await
-            .map_err(|e| MailError::Decode(e.to_string()))?;
-        Ok(body.value)
+        // Follow `@odata.nextLink` so a level with more than `$top` folders isn't
+        // silently truncated (which would make mail in folder 101+ unreachable).
+        let mut folders = Vec::new();
+        loop {
+            let body: GraphFolders = self
+                .get(&url)
+                .await?
+                .json()
+                .await
+                .map_err(|e| MailError::Decode(e.to_string()))?;
+            folders.extend(body.value);
+            match body.next_link {
+                Some(next) => url = next,
+                None => break,
+            }
+        }
+        Ok(folders)
     }
 
     /// Depth-first walk of the folder tree (children follow their parent), each
@@ -156,6 +166,80 @@ impl GraphClient {
             .map_err(|e| MailError::Decode(e.to_string()))?;
         Ok(roles_from_batch(batch))
     }
+
+    /// Fetch the message's inline attachments and return a map of their
+    /// normalized `contentId` -> `data:` URL, for resolving `cid:` image
+    /// references in the body. Best-effort: any failure yields an empty map, so
+    /// the caller falls back to leaving `cid:` refs unresolved rather than
+    /// erroring the whole message load.
+    async fn inline_cid_data_urls(&self, message_id: &str) -> HashMap<String, String> {
+        let mut url = message_endpoint(message_id);
+        {
+            let mut segments = url.path_segments_mut().expect("base URL is a proper path");
+            segments.push("attachments");
+        }
+        url.set_query(Some(
+            "$filter=isInline eq true&$select=id,contentType,contentId,contentBytes,isInline&$top=50",
+        ));
+
+        let Ok(response) = self.get(url.as_str()).await else {
+            return HashMap::new();
+        };
+        let Ok(body) = response.json::<GraphInlineAttachments>().await else {
+            return HashMap::new();
+        };
+
+        let mut map = HashMap::new();
+        for att in body.value {
+            let (Some(content_id), Some(bytes)) = (att.content_id, att.content_bytes) else {
+                continue;
+            };
+            let content_type = att
+                .content_type
+                .unwrap_or_else(|| "application/octet-stream".to_string());
+            map.insert(
+                normalize_cid(&content_id),
+                format!("data:{content_type};base64,{bytes}"),
+            );
+        }
+        map
+    }
+}
+
+/// Normalize a `contentId` for matching a `cid:` reference: strip a wrapping
+/// `<...>`, trim, and lowercase (Graph and the body can differ in case/brackets).
+fn normalize_cid(raw: &str) -> String {
+    raw.trim()
+        .trim_start_matches('<')
+        .trim_end_matches('>')
+        .to_ascii_lowercase()
+}
+
+/// Rewrite `<img src="cid:ID">` references to the inline attachment's `data:`
+/// URL, using the `contentId -> data URL` map. Unmatched `cid:` refs are left
+/// untouched. Mirrors [`inline_remote_images`]'s string-replace approach.
+fn rewrite_cid_images(html: &str, cid_map: &HashMap<String, String>) -> String {
+    if cid_map.is_empty() {
+        return html.to_string();
+    }
+    let refs: HashSet<String> = IMG_SRC_RE
+        .captures_iter(html)
+        .filter_map(|c| c.get(1).map(|m| m.as_str().to_string()))
+        .filter(|u| u.len() > 4 && u[..4].eq_ignore_ascii_case("cid:"))
+        .collect();
+
+    let mut result = html.to_string();
+    for reference in refs {
+        let key = normalize_cid(&reference[4..]);
+        if let Some(data_url) = cid_map.get(&key) {
+            result = result.replace(
+                &format!("src=\"{reference}\""),
+                &format!("src=\"{data_url}\""),
+            );
+            result = result.replace(&format!("src='{reference}'"), &format!("src='{data_url}'"));
+        }
+    }
+    result
 }
 
 /// Build the `folder id -> role` map from a `$batch` response. Each successful
@@ -292,8 +376,11 @@ impl MailProvider for GraphClient {
     ) -> Result<Vec<MessageSummary>, MailError> {
         // The regular `/messages` endpoint (unlike `/messages/delta`) pages the
         // full folder, so it reaches history older than the delta window. Pull
-        // the next `limit` messages strictly older than `before`, newest first.
-        let filter = format!("receivedDateTime lt {before}");
+        // the next `limit` messages at or older than `before`, newest first.
+        // `le` (not `lt`) so siblings sharing the oldest cached second aren't
+        // skipped; the overlap rows re-upsert harmlessly by id, and the caller
+        // treats an overlap-only page (no growth in `total`) as end-of-folder.
+        let filter = format!("receivedDateTime le {before}");
         let top = limit.to_string();
         let response = self
             .http
@@ -323,7 +410,7 @@ impl MailProvider for GraphClient {
     async fn message(&self, id: &str, allow_images: bool) -> Result<MessageBody, MailError> {
         let mut url = message_endpoint(id);
         url.set_query(Some(
-            "$select=id,subject,from,toRecipients,ccRecipients,receivedDateTime,body",
+            "$select=id,subject,from,replyTo,toRecipients,ccRecipients,receivedDateTime,body",
         ));
 
         let message: GraphFullMessage = self
@@ -339,9 +426,21 @@ impl MailProvider for GraphClient {
             .map(|b| b.content_type.eq_ignore_ascii_case("html"))
             .unwrap_or(false);
         let raw = message.body.map(|b| b.content).unwrap_or_default();
+        // Resolve inline `cid:` image references (signature logos, pasted
+        // screenshots — delivered as inline attachments) to self-contained
+        // `data:` URLs before sanitizing, so they render in both blocked and
+        // allow-images modes. Best-effort: if the attachment fetch fails the
+        // `cid:` refs simply stay unresolved (a broken image, never an error).
+        let raw = if raw.to_ascii_lowercase().contains("cid:") {
+            let cid_map = self.inline_cid_data_urls(id).await;
+            rewrite_cid_images(&raw, &cid_map)
+        } else {
+            raw
+        };
         let sanitized = crate::html::sanitize_email(&raw, is_html, allow_images);
-        // When images are allowed, fetch them server-side and inline as data URLs
-        // so the webview never makes a remote request.
+        // When images are allowed, fetch remote ones server-side and inline as
+        // data URLs so the webview never makes a remote request. (cid: images
+        // are already inlined above.)
         let html = if allow_images {
             inline_remote_images(&sanitized.html).await
         } else {
@@ -357,6 +456,7 @@ impl MailProvider for GraphClient {
         let cc_recipients = message.cc_recipients.unwrap_or_default();
         let to_addresses = recipient_addresses(&to_recipients);
         let cc_addresses = recipient_addresses(&cc_recipients);
+        let reply_to_addresses = recipient_addresses(&message.reply_to.unwrap_or_default());
 
         Ok(MessageBody {
             id: message.id,
@@ -371,6 +471,7 @@ impl MailProvider for GraphClient {
                 .collect(),
             to_addresses,
             cc_addresses,
+            reply_to_addresses,
             received: message.received_date_time.unwrap_or_default(),
             html,
             remote_content_blocked: sanitized.remote_content_blocked,
@@ -450,17 +551,24 @@ impl MailProvider for GraphClient {
         Ok(())
     }
 
-    async fn delete_message(&self, id: &str) -> Result<(), MailError> {
-        // Graph DELETE on a message moves it to Deleted Items (soft delete).
-        let response = self
-            .http
-            .delete(message_endpoint(id).as_str())
-            .bearer_auth(&self.access_token)
-            .send()
-            .await
-            .map_err(|e| MailError::Network(e.to_string()))?;
-        check_status(response).await?;
-        Ok(())
+    async fn delete_message(&self, id: &str, permanent: bool) -> Result<(), MailError> {
+        // Graph's DELETE on a message does NOT go to Deleted Items — it moves
+        // the message to Recoverable Items, invisible in every folder. To match
+        // the "Deleted Items" the UI promises, a normal delete is a move to the
+        // well-known `deleteditems` folder. Only a `permanent` delete (used when
+        // the message already sits in Deleted Items) issues the real DELETE.
+        if permanent {
+            let response = self
+                .http
+                .delete(message_endpoint(id).as_str())
+                .bearer_auth(&self.access_token)
+                .send()
+                .await
+                .map_err(|e| MailError::Network(e.to_string()))?;
+            check_status(response).await?;
+            return Ok(());
+        }
+        self.move_message(id, "deleteditems").await
     }
 
     async fn move_message(&self, id: &str, destination_folder_id: &str) -> Result<(), MailError> {
@@ -642,6 +750,7 @@ impl MailProvider for GraphClient {
                 "body": { "contentType": "HTML", "content": message.body_html },
                 "toRecipients": recipients_json(&message.to),
                 "ccRecipients": recipients_json(&message.cc),
+                "bccRecipients": recipients_json(&message.bcc),
                 "attachments": attachments_json(&message.attachments),
             },
             "saveToSentItems": true,
@@ -725,7 +834,9 @@ impl MailProvider for GraphClient {
         // Fetch the RAW editable body (not the display-sanitized html from
         // `message`) so the editor round-trips the draft faithfully.
         let mut url = message_endpoint(id);
-        url.set_query(Some("$select=subject,toRecipients,ccRecipients,body"));
+        url.set_query(Some(
+            "$select=subject,toRecipients,ccRecipients,bccRecipients,body,hasAttachments",
+        ));
 
         let message: GraphDraftMessage = self
             .get(url.as_str())
@@ -737,8 +848,10 @@ impl MailProvider for GraphClient {
         Ok(DraftPrefill {
             to: recipient_addresses(&message.to_recipients.unwrap_or_default()),
             cc: recipient_addresses(&message.cc_recipients.unwrap_or_default()),
+            bcc: recipient_addresses(&message.bcc_recipients.unwrap_or_default()),
             subject: message.subject.unwrap_or_default(),
             body_html: message.body.map(|b| b.content).unwrap_or_default(),
+            has_attachments: message.has_attachments.unwrap_or(false),
         })
     }
 
@@ -796,6 +909,30 @@ impl MailProvider for GraphClient {
             .await
             .map_err(|e| MailError::Network(e.to_string()))?;
         Ok(bytes.to_vec())
+    }
+
+    async fn has_unforwardable_attachments(&self, message_id: &str) -> Result<bool, MailError> {
+        // A non-inline attachment that is not a plain `fileAttachment` — an
+        // embedded message (`itemAttachment`) or a cloud link
+        // (`referenceAttachment`) — can't be re-sent by WattMail's forward path.
+        let mut url = message_endpoint(message_id);
+        {
+            let mut segments = url.path_segments_mut().expect("base URL is a proper path");
+            segments.push("attachments");
+        }
+        url.set_query(Some("$select=id,isInline,@odata.type&$top=50"));
+
+        let body: GraphAttachments = self
+            .get(url.as_str())
+            .await?
+            .json()
+            .await
+            .map_err(|e| MailError::Decode(e.to_string()))?;
+
+        Ok(body.value.into_iter().any(|a| {
+            !a.is_inline.unwrap_or(false)
+                && a.odata_type.as_deref() != Some("#microsoft.graph.fileAttachment")
+        }))
     }
 
     fn supports_message_rules(&self) -> bool {
@@ -931,6 +1068,7 @@ struct GraphFullMessage {
     id: String,
     subject: Option<String>,
     from: Option<GraphRecipient>,
+    reply_to: Option<Vec<GraphRecipient>>,
     to_recipients: Option<Vec<GraphRecipient>>,
     cc_recipients: Option<Vec<GraphRecipient>>,
     received_date_time: Option<String>,
@@ -958,7 +1096,9 @@ struct GraphDraftMessage {
     subject: Option<String>,
     to_recipients: Option<Vec<GraphRecipient>>,
     cc_recipients: Option<Vec<GraphRecipient>>,
+    bcc_recipients: Option<Vec<GraphRecipient>>,
     body: Option<GraphBody>,
+    has_attachments: Option<bool>,
 }
 
 #[derive(serde::Deserialize)]
@@ -1092,6 +1232,8 @@ fn folder_messages_url(folder_id: &str) -> String {
 #[derive(serde::Deserialize)]
 struct GraphFolders {
     value: Vec<GraphFolder>,
+    #[serde(rename = "@odata.nextLink")]
+    next_link: Option<String>,
 }
 
 #[derive(serde::Deserialize)]
@@ -1135,6 +1277,7 @@ fn draft_body_json(message: &OutgoingMessage) -> serde_json::Value {
         "body": { "contentType": "HTML", "content": message.body_html },
         "toRecipients": recipients_json(&message.to),
         "ccRecipients": recipients_json(&message.cc),
+        "bccRecipients": recipients_json(&message.bcc),
     })
 }
 
@@ -1171,6 +1314,21 @@ fn attachments_json(attachments: &[OutgoingAttachment]) -> Vec<serde_json::Value
 #[derive(serde::Deserialize)]
 struct GraphAttachments {
     value: Vec<GraphAttachment>,
+}
+
+/// Inline attachments carrying their bytes, for resolving `cid:` image refs.
+#[derive(serde::Deserialize)]
+struct GraphInlineAttachments {
+    value: Vec<GraphInlineAttachment>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GraphInlineAttachment {
+    content_type: Option<String>,
+    content_id: Option<String>,
+    /// base64 (standard) content, as Graph returns for a `fileAttachment`.
+    content_bytes: Option<String>,
 }
 
 #[derive(serde::Deserialize)]
@@ -1514,6 +1672,43 @@ mod tests {
         assert!(url.ends_with("/messages"));
         assert!(url.contains("%2F")); // '/' encoded, not splitting the segment
         assert!(!url.contains('?'));
+    }
+
+    #[test]
+    fn graph_folders_decodes_next_link_for_paging() {
+        // A page that carries `@odata.nextLink` (more than `$top` folders at a
+        // level) must expose it so the walk keeps paging instead of truncating.
+        let page: GraphFolders = serde_json::from_str(
+            r#"{"value":[{"id":"F1","displayName":"A"}],"@odata.nextLink":"https://graph/next"}"#,
+        )
+        .expect("parses");
+        assert_eq!(page.value.len(), 1);
+        assert_eq!(page.next_link.as_deref(), Some("https://graph/next"));
+
+        // A final page has no nextLink.
+        let last: GraphFolders =
+            serde_json::from_str(r#"{"value":[{"id":"F2","displayName":"B"}]}"#).expect("parses");
+        assert!(last.next_link.is_none());
+    }
+
+    #[test]
+    fn rewrite_cid_images_replaces_matched_refs_and_leaves_others() {
+        let mut map = HashMap::new();
+        map.insert(
+            "logo@01d".to_string(),
+            "data:image/png;base64,AAAA".to_string(),
+        );
+        // Case/brackets differ between the body ref and the contentId — must match.
+        let html = r#"<img src="cid:LOGO@01D"><img src='cid:missing@x'>"#;
+        let out = rewrite_cid_images(html, &map);
+        assert!(out.contains(r#"src="data:image/png;base64,AAAA""#));
+        assert!(out.contains("cid:missing@x")); // unmatched ref untouched
+    }
+
+    #[test]
+    fn normalize_cid_strips_brackets_and_lowercases() {
+        assert_eq!(normalize_cid("<Logo@01D>"), "logo@01d");
+        assert_eq!(normalize_cid(" image001.png "), "image001.png");
     }
 
     #[test]

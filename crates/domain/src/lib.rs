@@ -112,6 +112,10 @@ pub struct MessageBody {
     pub to: Vec<String>,
     pub to_addresses: Vec<String>,
     pub cc_addresses: Vec<String>,
+    /// Bare `Reply-To` addresses, when the message sets that header (mailing
+    /// lists, ticketing systems). A reply should go here in preference to the
+    /// raw `From`. Empty when the header is absent.
+    pub reply_to_addresses: Vec<String>,
     /// ISO-8601 timestamp as returned by the provider.
     pub received: String,
     /// Sanitized HTML, always safe to render in a sandboxed frame.
@@ -162,6 +166,7 @@ pub struct OutgoingAttachment {
 pub struct OutgoingMessage {
     pub to: Vec<String>,
     pub cc: Vec<String>,
+    pub bcc: Vec<String>,
     pub subject: String,
     pub body_html: String,
     pub attachments: Vec<OutgoingAttachment>,
@@ -174,8 +179,13 @@ pub struct OutgoingMessage {
 pub struct DraftPrefill {
     pub to: Vec<String>,
     pub cc: Vec<String>,
+    pub bcc: Vec<String>,
     pub subject: String,
     pub body_html: String,
+    /// True when the draft has attachments stored on the server. WattMail can't
+    /// edit or remove them (drafts don't carry attachments through the editor),
+    /// so the compose UI warns that they will be sent with the message.
+    pub has_attachments: bool,
 }
 
 /// Errors surfaced across the [`MailProvider`] contract.
@@ -343,11 +353,21 @@ pub trait MailProvider: Send + Sync {
     /// Set a message's follow-up flag state.
     async fn set_flag(&self, id: &str, flagged: bool) -> Result<(), MailError>;
 
-    /// Delete a message (moves it to Deleted Items).
-    async fn delete_message(&self, id: &str) -> Result<(), MailError>;
+    /// Delete a message. When `permanent` is false this moves it to Deleted
+    /// Items (recoverable); when true it is deleted outright (used only when the
+    /// message already lives in Deleted Items).
+    async fn delete_message(&self, id: &str, permanent: bool) -> Result<(), MailError>;
 
     /// Move a message to another folder.
     async fn move_message(&self, id: &str, destination_folder_id: &str) -> Result<(), MailError>;
+
+    /// Whether the message carries attachments WattMail can't forward (embedded
+    /// messages / cloud-reference links — anything that isn't a plain file
+    /// attachment). Lets the forward UI show a "can't be forwarded" notice.
+    /// Defaults to `false` for providers that don't distinguish attachment kinds.
+    async fn has_unforwardable_attachments(&self, _message_id: &str) -> Result<bool, MailError> {
+        Ok(false)
+    }
 
     /// The user's mail folders.
     async fn folders(&self) -> Result<Vec<Folder>, MailError>;
