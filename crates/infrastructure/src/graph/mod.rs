@@ -678,8 +678,7 @@ impl MailProvider for GraphClient {
         // changes), returning HTTP 410 Gone (`syncStateNotFound`/`resyncRequired`).
         // When that happens while resuming from a stored cursor, discard the dead
         // cursor and the partial accumulation and restart a fresh full enumeration
-        // once — the replay converges via upsert-by-id. Mirrors the Gmail backend's
-        // 404 -> full_sync fallback. A fresh enumeration (no stored token) that
+        // once — the replay converges via upsert-by-id. A fresh enumeration (no stored token) that
         // itself 410s is propagated; retrying it identically would loop.
         let mut recovered = since.is_none();
 

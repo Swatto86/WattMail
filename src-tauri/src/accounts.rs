@@ -40,23 +40,17 @@ const PENDING_KEYRING_PREFIX: &str = "auth:pending";
 // * Office 365 — the existing single-tenant SWATTO.CO.UK app (works as-is).
 // * Outlook.com (consumer) — needs an Entra app that allows *personal* Microsoft
 //   accounts (multitenant + personal). The single-tenant O365 app will NOT work.
-// * Gmail — a Google Cloud "Desktop app" OAuth client (id + secret). The secret
-//   is not confidential for installed apps but is required at Google's token
-//   endpoint.
 //
 // Replace the placeholders before enabling those providers in a release.
 const O365_TENANT_ID: &str = "652459b1-612f-4586-b424-a0069d51cc32";
 const O365_CLIENT_ID: &str = "60d6101b-3d8a-4a09-8718-ad90c0d88f13";
 const OUTLOOK_CONSUMER_CLIENT_ID: &str = "REPLACE_WITH_CONSUMER_CLIENT_ID";
-const GOOGLE_CLIENT_ID: &str = "REPLACE_WITH_GOOGLE_CLIENT_ID";
-const GOOGLE_CLIENT_SECRET: &str = "REPLACE_WITH_GOOGLE_CLIENT_SECRET";
 
 /// The OAuth configuration for a provider, built from the app credentials above.
 fn oauth_config_for(provider: ProviderKind) -> OAuthConfig {
     match provider {
         ProviderKind::Office365 => OAuthConfig::office365(O365_TENANT_ID, O365_CLIENT_ID),
         ProviderKind::OutlookConsumer => OAuthConfig::outlook_consumer(OUTLOOK_CONSUMER_CLIENT_ID),
-        ProviderKind::Gmail => OAuthConfig::google(GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET),
     }
 }
 
@@ -67,9 +61,6 @@ fn is_provider_configured(provider: ProviderKind) -> bool {
     match provider {
         ProviderKind::Office365 => is_real_credential(O365_CLIENT_ID),
         ProviderKind::OutlookConsumer => is_real_credential(OUTLOOK_CONSUMER_CLIENT_ID),
-        ProviderKind::Gmail => {
-            is_real_credential(GOOGLE_CLIENT_ID) && is_real_credential(GOOGLE_CLIENT_SECRET)
-        }
     }
 }
 
@@ -97,8 +88,8 @@ fn provider_supports_rules(provider: ProviderKind) -> bool {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AccountRecord {
-    /// Stable account id (Entra object id / Google `sub` for accounts added in the
-    /// multi-account era; `default` for the adopted legacy mailbox).
+    /// Stable account id (Entra object id for accounts added in the multi-account
+    /// era; `default` for the adopted legacy mailbox).
     pub id: String,
     /// The provider this account is signed in with. Defaults to `Office365` so a
     /// pre-provider record (no `provider` field) loads as the original backend.
@@ -123,7 +114,7 @@ struct PersistedAccounts {
 #[serde(rename_all = "camelCase")]
 pub struct AccountSummary {
     pub id: String,
-    /// Provider slug (`office365` / `outlook` / `gmail`) for UI logic.
+    /// Provider slug (`office365` / `outlook`) for UI logic.
     pub provider: String,
     /// Human-readable provider name for display.
     pub provider_label: String,
@@ -573,7 +564,7 @@ mod tests {
 
     #[test]
     fn placeholder_credentials_are_not_real() {
-        assert!(!is_real_credential("REPLACE_WITH_GOOGLE_CLIENT_ID"));
+        assert!(!is_real_credential("REPLACE_WITH_CONSUMER_CLIENT_ID"));
         assert!(!is_real_credential(""));
         assert!(is_real_credential("60d6101b-3d8a-4a09-8718-ad90c0d88f13"));
     }

@@ -16,19 +16,16 @@ use std::sync::Mutex;
 
 /// Static OAuth configuration for one identity provider. Provider-neutral: the
 /// endpoints, scopes, and any extra authorize parameters are explicit, so the
-/// same PKCE loopback flow drives Microsoft, Google, and others.
+/// same PKCE loopback flow can drive multiple providers.
 #[derive(Debug, Clone)]
 pub struct OAuthConfig {
     pub client_id: String,
-    /// Installed-app client secret. `None` for true public clients (Microsoft);
-    /// `Some` for providers that still require it at the token endpoint (Google
-    /// "Desktop app" clients — the secret is not confidential for installed apps).
+    /// Installed-app client secret. `None` for true public clients (Microsoft).
     pub client_secret: Option<String>,
     pub authorize_endpoint: String,
     pub token_endpoint: String,
     pub scopes: Vec<String>,
-    /// Extra query parameters appended to the authorize URL (e.g. Google's
-    /// `access_type=offline` + `prompt=consent` to reliably get a refresh token).
+    /// Extra query parameters appended to the authorize URL.
     pub extra_authorize_params: Vec<(String, String)>,
 }
 
@@ -66,30 +63,6 @@ impl OAuthConfig {
                 "Calendars.ReadWrite",
             ],
         )
-    }
-
-    /// Gmail via Google OAuth + the Gmail API (`gmail.modify` for read/write,
-    /// `userinfo.email` for identity). Installed-app flow: PKCE + client secret,
-    /// `access_type=offline` & `prompt=consent` for a durable refresh token.
-    pub fn google(client_id: impl Into<String>, client_secret: impl Into<String>) -> Self {
-        Self {
-            client_id: client_id.into(),
-            client_secret: Some(client_secret.into()),
-            authorize_endpoint: "https://accounts.google.com/o/oauth2/v2/auth".to_string(),
-            token_endpoint: "https://oauth2.googleapis.com/token".to_string(),
-            scopes: [
-                "https://www.googleapis.com/auth/gmail.modify",
-                "https://www.googleapis.com/auth/userinfo.email",
-                "openid",
-            ]
-            .iter()
-            .map(|s| (*s).to_string())
-            .collect(),
-            extra_authorize_params: vec![
-                ("access_type".to_string(), "offline".to_string()),
-                ("prompt".to_string(), "consent".to_string()),
-            ],
-        }
     }
 
     fn microsoft(tenant_id: &str, client_id: impl Into<String>, scopes: &[&str]) -> Self {
@@ -354,8 +327,8 @@ impl AuthService {
     }
 
     async fn post_token(&self, mut params: Vec<(&str, &str)>) -> Result<TokenSet, AuthError> {
-        // Installed-app providers (Google) require the client secret at the token
-        // endpoint; public clients (Microsoft) omit it.
+        // Public clients omit this; providers that require a token-endpoint
+        // secret can set it in the OAuth config.
         if let Some(secret) = self.config.client_secret.as_deref() {
             params.push(("client_secret", secret));
         }

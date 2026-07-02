@@ -30,7 +30,7 @@ use wattmail_infrastructure::{build_calendar_provider, build_mail_provider, Prov
 
 /// Resolve the active account and a mail provider authenticated for it — the
 /// common preamble for every command that talks to the server. The provider is
-/// the right backend for the account (Graph or Gmail). Holding the returned
+/// the right backend for the account. Holding the returned
 /// `Arc` keeps the account's cache available for write-through.
 async fn active_provider(
     accounts: &AccountManager,
@@ -45,9 +45,7 @@ async fn active_provider(
     Ok((account, provider))
 }
 
-/// Resolve the active account and a *calendar* provider for it. Errors when the
-/// active account's provider has no calendar backend (e.g. Gmail), so calendar
-/// commands degrade with a clear message instead of a generic failure.
+/// Resolve the active account and a *calendar* provider for it.
 async fn active_calendar_provider(
     accounts: &AccountManager,
 ) -> Result<(Arc<ManagedAccount>, Box<dyn CalendarProvider>), String> {
@@ -57,8 +55,7 @@ async fn active_calendar_provider(
         .access_token()
         .await
         .map_err(|e| e.to_string())?;
-    let provider = build_calendar_provider(account.record.provider, token)
-        .ok_or_else(|| "This account does not support calendar.".to_string())?;
+    let provider = build_calendar_provider(account.record.provider, token);
     Ok((account, provider))
 }
 
@@ -144,7 +141,7 @@ pub fn list_accounts(accounts: State<'_, AccountManager>) -> Vec<AccountSummary>
 
 /// Interactively sign in and add a new account for `provider` (browser login),
 /// making it the active account. Re-signing into an existing account just
-/// refreshes it. `provider` is a tag: `office365`, `outlook_consumer`, or `gmail`.
+/// refreshes it. `provider` is a tag: `office365` or `outlook_consumer`.
 #[tauri::command]
 pub async fn add_account(
     accounts: State<'_, AccountManager>,
@@ -155,7 +152,7 @@ pub async fn add_account(
     accounts.add_account(kind).await
 }
 
-/// Provider tags (`office365` / `outlook_consumer` / `gmail`) whose OAuth
+/// Provider tags (`office365` / `outlook_consumer`) whose OAuth
 /// credentials are configured in this build, so the picker offers only
 /// providers that can actually complete sign-in.
 #[tauri::command]
@@ -1089,8 +1086,8 @@ fn calendar_event_dto(e: wattmail_domain::CalendarEvent) -> CalendarEventDto {
     }
 }
 
-/// Whether the active account's provider has a calendar (so the UI can hide the
-/// Calendar tab for mail-only accounts). False when nothing is signed in.
+/// Whether the active account's provider has a calendar. False when nothing is
+/// signed in.
 #[tauri::command]
 pub fn account_supports_calendar(accounts: State<'_, AccountManager>) -> bool {
     accounts

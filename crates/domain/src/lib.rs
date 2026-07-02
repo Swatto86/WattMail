@@ -431,7 +431,7 @@ pub trait MailProvider: Send + Sync {
     // ---- Server-side inbox rules (optional per provider) ----
     //
     // Only Exchange/Graph backends support server-side message rules. Providers
-    // without them (Gmail, IMAP, …) inherit these defaults: an empty list on
+    // without them inherit these defaults: an empty list on
     // read, and `Unsupported` on mutation, so the UI can degrade gracefully.
 
     /// List the user's server-side inbox rules.

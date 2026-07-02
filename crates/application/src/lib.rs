@@ -413,7 +413,7 @@ pub struct ComposePrefill {
 /// The reply target is the message's `Reply-To` addresses when present (mailing
 /// lists, ticketing systems), otherwise the raw `From`. Reply-all keeps the
 /// original `To` recipients on the `To` line (rather than demoting them to `Cc`,
-/// which breaks recipients' filters and diverges from Outlook/Gmail), and the
+/// which breaks recipients' filters and diverges from normal mail clients), and the
 /// original `Cc` on `Cc` — always excluding the sender and de-duplicating.
 pub fn compose_reply(message: &MessageBody, self_email: &str, reply_all: bool) -> ComposePrefill {
     let mut to: Vec<String> = Vec::new();

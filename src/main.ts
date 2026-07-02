@@ -23,7 +23,7 @@ interface Account {
 }
 interface AccountSummary {
   id: string;
-  provider: string; // slug: office365 | outlook | gmail
+  provider: string; // slug: office365 | outlook
   providerLabel: string;
   email: string;
   displayName: string;
@@ -734,7 +734,7 @@ function reflectView(): void {
   viewNav
     .querySelectorAll<HTMLButtonElement>("button[data-view]")
     .forEach((b) => b.classList.toggle("active", b.dataset.view === appMode));
-  // Hide the Calendar tab for mail-only accounts (e.g. Gmail).
+  // Hide the Calendar tab while no signed-in provider reports calendar support.
   viewCalendarBtn.classList.toggle("hidden", !calendarSupported);
 }
 
@@ -786,9 +786,8 @@ function showSignedIn(): void {
   reflectView();
 }
 
-// Refresh the active account's calendar capability (whether its provider has a
-// calendar backend), updating the tab. If the calendar tab is open but the new
-// account is mail-only, fall back to mail.
+// Refresh the active account's calendar capability, updating the tab. If the
+// calendar tab is open but unsupported, fall back to mail.
 async function refreshCalendarCapability(): Promise<void> {
   try {
     calendarSupported = await invoke<boolean>("account_supports_calendar");
@@ -2552,7 +2551,6 @@ async function loadActiveAccount(): Promise<void> {
 const PROVIDERS: { tag: string; label: string; hint: string }[] = [
   { tag: "office365", label: "Office 365", hint: "Work or school (Microsoft)" },
   { tag: "outlook_consumer", label: "Outlook.com / Hotmail", hint: "Personal Microsoft account" },
-  { tag: "gmail", label: "Gmail", hint: "Google account" },
 ];
 
 let providerResolve: ((tag: string | null) => void) | null = null;

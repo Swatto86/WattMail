@@ -11,7 +11,7 @@ rest.
 The code is cross-platform-capable (paths and the keychain backend are abstracted
 per-OS) but macOS and Linux are only compile-checked in CI — not built or run live.
 
-> Status: **v0.2.9** — functional and actively developed. See [`CONTEXT.md`](CONTEXT.md)
+> Status: **v0.2.10** — functional and actively developed. See [`CONTEXT.md`](CONTEXT.md)
 > for the live progress log, architecture decisions, and roadmap.
 
 ## Features
@@ -20,11 +20,10 @@ per-OS) but macOS and Linux are only compile-checked in CI — not built or run 
 - **Multiple accounts** — add and switch between several mailboxes from the toolbar,
   each with its own keychain-isolated credentials and encrypted cache, so mail and
   tokens never cross between accounts. **Office 365** is the only provider live in a
-  default build; **Outlook.com / Hotmail** (consumer Graph) and **Gmail** (Gmail REST
-  API) have provider code in `main` but are **gated off** behind placeholder client
-  IDs — supply real `OUTLOOK_CONSUMER_CLIENT_ID` / `GOOGLE_CLIENT_ID` /
-  `GOOGLE_CLIENT_SECRET` and live-test the flows to enable them. Generic **IMAP/SMTP**
-  is not present in the current repository.
+  default build; **Outlook.com / Hotmail** (consumer Graph) has provider code in
+  `main` but is **gated off** behind a placeholder client ID — supply a real
+  `OUTLOOK_CONSUMER_CLIENT_ID` and live-test the flow to enable it. Generic
+  **IMAP/SMTP** is not present in the current repository.
 - **Outlook-style message list** — date section headers (Today / Yesterday / This Week /
   Last Week / This Month / Last Month / older months), quick filters (All / Unread /
   Flagged), and a group-by-date toggle (on by default for date-ordered sorts).
@@ -84,7 +83,7 @@ A Cargo workspace with strict, inward-pointing layers:
 
 The transport sits behind a provider-agnostic `MailProvider` trait, so additional
 backends slot in without touching the application or presentation layers. Current
-backends in `main` are Microsoft Graph (Office 365 / Outlook.com) and Gmail REST.
+backends in `main` use Microsoft Graph (Office 365 / Outlook.com).
 
 Frontend: **Vite + TypeScript + Tailwind + DaisyUI**, vanilla TS (no framework) for
 fast startup.
@@ -129,10 +128,6 @@ npm run tauri build    # NSIS installer under target/release/bundle/
 - **Outlook.com / Hotmail**: Microsoft Graph consumer-provider code exists, but the
   committed build still has a placeholder OAuth client ID. It needs a real consumer
   Microsoft app registration, release-secret wiring, and live sign-in/send/sync tests.
-- **Gmail**: Gmail REST provider code exists, but the committed build still has
-  placeholder Google OAuth credentials. It needs a real Google Desktop OAuth client,
-  release-secret wiring, and live sign-in/send/sync tests. Gmail is mail-only here;
-  there is no Gmail calendar backend.
 - **Generic IMAP/SMTP**: not present in the current repository or remote branches.
   It still needs implementation or re-import, credentials UX, autodiscovery, live
   mailbox testing, and release wiring.
