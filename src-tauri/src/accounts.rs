@@ -156,36 +156,50 @@ impl AccountManager {
     /// install when present, and normalize the active selection.
     pub fn load() -> Self {
         let persisted = read_persisted();
+        let original_active = persisted.active_id.clone();
 
         let mut accounts: Vec<Arc<ManagedAccount>> = Vec::new();
+        let mut all_loaded = true;
         for record in persisted.accounts {
             match open_account(record) {
                 Ok(account) => accounts.push(Arc::new(account)),
-                Err(e) => eprintln!("WattMail: skipping unloadable account: {e}"),
+                Err(e) => {
+                    // A transient open failure (e.g. a briefly-locked cache DB)
+                    // must not delete the account. Keep it in accounts.json (by
+                    // not persisting below) so the next launch retries it.
+                    all_loaded = false;
+                    eprintln!("WattMail: skipping unloadable account (kept for retry): {e}");
+                }
             }
         }
 
+        let mut adopted = false;
         if accounts.is_empty() {
             if let Some(account) = adopt_legacy() {
                 accounts.push(Arc::new(account));
+                adopted = true;
             }
         }
 
         // Keep the persisted active id only if it still resolves; otherwise fall
         // back to the first account (or none when there are no accounts).
-        let active_id = persisted
-            .active_id
+        let active_id = original_active
+            .clone()
             .filter(|id| accounts.iter().any(|a| &a.record.id == id))
             .or_else(|| accounts.first().map(|a| a.record.id.clone()));
 
         let manager = Self {
             inner: RwLock::new(Inner {
                 accounts,
-                active_id,
+                active_id: active_id.clone(),
             }),
         };
-        // Persist any adoption / normalization done above.
-        manager.persist();
+        // Persist only when the durable list actually changed AND every account
+        // loaded — so a transient failure never rewrites accounts.json without
+        // the skipped record.
+        if all_loaded && (adopted || active_id != original_active) {
+            manager.persist();
+        }
         manager
     }
 
@@ -338,8 +352,26 @@ impl AccountManager {
 
         // Best-effort teardown — a failure here must not leave the account half
         // removed from the in-memory/persisted list.
+        let db = db_path(removed.record.provider, id);
         let _ = removed.auth.sign_out();
-        let _ = std::fs::remove_file(db_path(removed.record.provider, id));
+        // Close the SQLite connection BEFORE deleting the file: on Windows an
+        // open handle makes the delete fail with a sharing violation (the cache
+        // would then linger on disk with the user's mail). Dropping the last Arc
+        // drops the store, closing the connection.
+        drop(removed);
+        for suffix in ["", "-wal", "-shm"] {
+            let mut path = db.clone().into_os_string();
+            path.push(suffix);
+            let path = PathBuf::from(path);
+            if let Err(e) = std::fs::remove_file(&path) {
+                if path.exists() {
+                    eprintln!(
+                        "WattMail: could not delete cache file {}: {e}",
+                        path.display()
+                    );
+                }
+            }
+        }
         self.persist();
         Ok(())
     }

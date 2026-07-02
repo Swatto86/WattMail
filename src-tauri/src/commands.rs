@@ -14,8 +14,9 @@ use wattmail_application::{
     delete_event as app_delete_event, delete_folder as app_delete_folder,
     delete_message as app_delete_message, download_attachment,
     export_message as app_export_message, folder_from_cache as app_folder_from_cache,
-    list_attachments, list_folders as app_list_folders, load_draft as app_load_draft,
-    load_older as app_load_older, move_message as app_move_message, read_headers, read_message,
+    has_unforwardable_attachments as app_has_unforwardable_attachments, list_attachments,
+    list_folders as app_list_folders, load_draft as app_load_draft, load_older as app_load_older,
+    move_message as app_move_message, read_headers, read_message,
     rename_folder as app_rename_folder, respond_to_event as app_respond_to_event,
     save_draft as app_save_draft, search_messages as app_search_messages,
     send_draft as app_send_draft, send_message as app_send_message, set_flag as app_set_flag,
@@ -367,11 +368,42 @@ pub async fn set_flag(
         .map_err(|e| e.to_string())
 }
 
-/// Delete a message (moves it to Deleted Items) and drop it from the cache.
+/// Delete a message and drop it from the cache. `permanent` false moves it to
+/// Deleted Items (recoverable); true deletes it outright (only when it already
+/// lives in Deleted Items).
 #[tauri::command]
-pub async fn delete_message(accounts: State<'_, AccountManager>, id: String) -> Result<(), String> {
+pub async fn delete_message(
+    accounts: State<'_, AccountManager>,
+    id: String,
+    permanent: bool,
+) -> Result<(), String> {
     let (account, provider) = active_provider(&accounts).await?;
-    app_delete_message(&*provider, &account.store, &id)
+    app_delete_message(&*provider, &account.store, &id, permanent)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Re-authenticate the active account after its session expired. Runs an
+/// interactive browser sign-in (the only place, besides add-account, that does).
+#[tauri::command]
+pub async fn reauthenticate_account(accounts: State<'_, AccountManager>) -> Result<(), String> {
+    let account = accounts.active()?;
+    account
+        .auth
+        .reauthenticate()
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Whether a message carries attachments WattMail can't forward (embedded
+/// messages / cloud references), so the forward UI can show a notice.
+#[tauri::command]
+pub async fn message_has_unforwardable_attachments(
+    accounts: State<'_, AccountManager>,
+    message_id: String,
+) -> Result<bool, String> {
+    let (_account, provider) = active_provider(&accounts).await?;
+    app_has_unforwardable_attachments(&*provider, &message_id)
         .await
         .map_err(|e| e.to_string())
 }
@@ -499,6 +531,10 @@ pub struct ForwardedAttachmentDto {
     pub attachment_id: String,
     pub name: String,
     pub content_type: String,
+    /// The attachment's size in bytes (known to the frontend from the reader's
+    /// attachment list), used for the pre-send size guard without downloading it.
+    #[serde(default)]
+    pub size: u64,
 }
 
 /// Send a message (compose / reply / forward), saved to Sent Items.
@@ -510,6 +546,7 @@ pub async fn send_message(
     accounts: State<'_, AccountManager>,
     to: Vec<String>,
     cc: Vec<String>,
+    bcc: Vec<String>,
     subject: String,
     body_html: String,
     attachment_paths: Vec<String>,
@@ -517,6 +554,28 @@ pub async fn send_message(
     forwarded_attachments: Vec<ForwardedAttachmentDto>,
 ) -> Result<(), String> {
     let (_account, provider) = active_provider(&accounts).await?;
+
+    // Guard against Graph's ~3-4 MB simple-send cap BEFORE downloading forwarded
+    // attachments or building the payload (upload sessions are out of scope), so
+    // an oversized send fails fast with a readable message instead of a raw 413.
+    let mut total_bytes: u64 = 0;
+    for path in &attachment_paths {
+        total_bytes += std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+    }
+    for image in &inline_images {
+        // base64 decodes to ~3/4 of its length; a safe upper bound for the guard.
+        total_bytes += (image.data_base64.len() as u64) * 3 / 4;
+    }
+    for fwd in &forwarded_attachments {
+        total_bytes += fwd.size;
+    }
+    const MAX_ATTACHMENT_BYTES: u64 = 2_500_000;
+    if total_bytes > MAX_ATTACHMENT_BYTES {
+        return Err(format!(
+            "Attachments total {:.1} MB — messages with more than ~2.5 MB of attachments can't be sent yet.",
+            total_bytes as f64 / 1_000_000.0
+        ));
+    }
 
     let mut attachments = Vec::new();
     for path in &attachment_paths {
@@ -570,6 +629,7 @@ pub async fn send_message(
     let message = OutgoingMessage {
         to,
         cc,
+        bcc,
         subject,
         body_html,
         attachments,
@@ -627,6 +687,7 @@ pub async fn save_draft(
     id: Option<String>,
     to: Vec<String>,
     cc: Vec<String>,
+    bcc: Vec<String>,
     subject: String,
     body_html: String,
 ) -> Result<String, String> {
@@ -634,6 +695,7 @@ pub async fn save_draft(
     let message = OutgoingMessage {
         to,
         cc,
+        bcc,
         subject,
         body_html,
         attachments: Vec::new(),
@@ -657,8 +719,10 @@ pub async fn send_draft(accounts: State<'_, AccountManager>, id: String) -> Resu
 pub struct DraftPrefillDto {
     pub to: Vec<String>,
     pub cc: Vec<String>,
+    pub bcc: Vec<String>,
     pub subject: String,
     pub body_html: String,
+    pub has_attachments: bool,
 }
 
 /// Load a draft for editing, with its raw (unsanitized) body.
@@ -674,8 +738,10 @@ pub async fn load_draft(
     Ok(DraftPrefillDto {
         to: draft.to,
         cc: draft.cc,
+        bcc: draft.bcc,
         subject: draft.subject,
         body_html: draft.body_html,
+        has_attachments: draft.has_attachments,
     })
 }
 
@@ -758,10 +824,13 @@ pub fn set_close_to_tray(state: State<'_, SettingsState>, value: bool) -> Result
     settings::save(&updated).map_err(|e| e.to_string())
 }
 
-/// Update the tray icon + tooltip to reflect the inbox unread count.
+/// Update the tray icon + tooltip to reflect the inbox unread count. `silent`
+/// suppresses the new-mail chime — set for user-initiated updates (marking a
+/// message unread, switching accounts, initial load), so only genuinely new mail
+/// arriving via the auto-sync tick makes a sound.
 #[tauri::command]
-pub fn set_unread(app: tauri::AppHandle, count: u32) {
-    crate::update_tray(&app, count);
+pub fn set_unread(app: tauri::AppHandle, count: u32, silent: bool) {
+    crate::update_tray(&app, count, silent);
 }
 
 /// Whether desktop notifications for new mail are enabled.
@@ -810,16 +879,43 @@ pub async fn check_new_mail(
         return Ok(None);
     }
 
-    // Filter to unread messages newer than the last-notified timestamp.
+    // Notification dedup state is keyed per account so switching mailboxes never
+    // compares one account's mail against another's timestamp.
+    let account_id = app
+        .state::<AccountManager>()
+        .active()
+        .map(|a| a.record.id.clone())
+        .unwrap_or_default();
+
+    // The newest received timestamp among the passed messages — used both to
+    // seed a first-seen account and to advance the watermark.
+    let newest_overall = messages.iter().map(|m| m.received.as_str()).max();
+
     let last = notif_state
         .last_notified_at
         .read()
         .map_err(|_| "notification state lock poisoned".to_string())?
-        .clone();
+        .get(&account_id)
+        .cloned();
 
+    // First check for this account (e.g. right after launch): seed the watermark
+    // from the newest message and DON'T notify — otherwise every pre-existing
+    // unread message would fire a spurious "N new messages" toast on every start.
+    let Some(last) = last else {
+        if let Some(newest) = newest_overall {
+            notif_state
+                .last_notified_at
+                .write()
+                .map_err(|_| "notification state lock poisoned".to_string())?
+                .insert(account_id, newest.to_string());
+        }
+        return Ok(None);
+    };
+
+    // Filter to unread messages newer than the last-notified timestamp.
     let mut new_messages: Vec<&NewMailMessage> = messages
         .iter()
-        .filter(|m| !m.is_read && last.as_deref().is_none_or(|l| m.received.as_str() > l))
+        .filter(|m| !m.is_read && m.received.as_str() > last.as_str())
         .collect();
     if new_messages.is_empty() {
         return Ok(None);
@@ -836,12 +932,12 @@ pub async fn check_new_mail(
         newest_subject: newest.subject.clone(),
     };
 
-    // Update the last-notified timestamp to the newest message we saw.
-    let mut guard = notif_state
+    // Advance this account's watermark to the newest message we saw.
+    notif_state
         .last_notified_at
         .write()
-        .map_err(|_| "notification state lock poisoned".to_string())?;
-    *guard = Some(newest.received.clone());
+        .map_err(|_| "notification state lock poisoned".to_string())?
+        .insert(account_id, newest.received.clone());
 
     Ok(Some(batch))
 }

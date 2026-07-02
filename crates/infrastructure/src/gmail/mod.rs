@@ -344,6 +344,9 @@ impl MailProvider for GmailClient {
             to,
             to_addresses: addresses_from_list(&to_raw),
             cc_addresses: addresses_from_list(&cc_raw),
+            reply_to_addresses: addresses_from_list(
+                &header_value(headers, "Reply-To").unwrap_or_default(),
+            ),
             received: internal_date_to_iso(message.internal_date.as_deref()),
             html: sanitized.html,
             remote_content_blocked: sanitized.remote_content_blocked,
@@ -390,9 +393,9 @@ impl MailProvider for GmailClient {
         }
     }
 
-    async fn delete_message(&self, id: &str) -> Result<(), MailError> {
-        // `trash` is the soft delete (moves to Trash), matching Graph's DELETE
-        // semantics of moving to Deleted Items.
+    async fn delete_message(&self, id: &str, _permanent: bool) -> Result<(), MailError> {
+        // `trash` is the soft delete (moves to Trash). Gmail is gated off, so the
+        // `permanent` distinction is unused here — always trash.
         let mut url = message_endpoint(id);
         url.path_segments_mut()
             .expect("base URL is a proper path")
@@ -559,8 +562,10 @@ impl MailProvider for GmailClient {
         Ok(DraftPrefill {
             to: addresses_from_list(&to_raw),
             cc: addresses_from_list(&cc_raw),
+            bcc: addresses_from_list(&header_value(headers, "Bcc").unwrap_or_default()),
             subject,
             body_html,
+            has_attachments: false,
         })
     }
 
@@ -856,6 +861,9 @@ fn build_raw_message(message: &OutgoingMessage) -> String {
     }
     if !message.cc.is_empty() {
         headers.push_str(&format!("Cc: {}\r\n", message.cc.join(", ")));
+    }
+    if !message.bcc.is_empty() {
+        headers.push_str(&format!("Bcc: {}\r\n", message.bcc.join(", ")));
     }
     headers.push_str(&format!("Subject: {}\r\n", message.subject));
     headers.push_str("MIME-Version: 1.0\r\n");
