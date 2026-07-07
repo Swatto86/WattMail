@@ -888,6 +888,49 @@ function highlightSelected(): void {
   });
 }
 
+// ---- Multi-select (Ctrl/Shift+click) ----
+// `checkedIds` is the bulk-action selection, distinct from `selectedId` (the
+// opened message) and `cursorId` (keyboard cursor). Plain click clears it;
+// right-clicking a selected row acts on the whole selection.
+const checkedIds = new Set<string>();
+// Range-select anchor: the last plain- or Ctrl-clicked row.
+let checkAnchorId: string | null = null;
+
+function reflectChecked(): void {
+  listEl.querySelectorAll<HTMLElement>(".msg").forEach((el) => {
+    el.classList.toggle("checked", checkedIds.has(el.dataset.id ?? ""));
+  });
+}
+function clearChecked(): void {
+  checkAnchorId = null;
+  if (checkedIds.size === 0) return;
+  checkedIds.clear();
+  reflectChecked();
+}
+// After a re-render, drop selected ids that no longer have a row (filtered
+// out, deleted, or a different folder/search view) so bulk actions only ever
+// cover rows the user can see.
+function pruneChecked(): void {
+  if (checkedIds.size === 0) return;
+  const rendered = new Set(rowEls().map((el) => el.dataset.id));
+  for (const id of [...checkedIds]) {
+    if (!rendered.has(id)) checkedIds.delete(id);
+  }
+  reflectChecked();
+}
+function announceChecked(): void {
+  statusEl.textContent = checkedIds.size
+    ? `${checkedIds.size} selected — right-click a selected message to act on all`
+    : "";
+}
+// Escape clears the multi-selection — but not on the press that dismisses a
+// context menu or a dialog (registered before the menus' own Escape handlers,
+// so this still sees them visible and leaves the selection alone).
+document.addEventListener("keydown", (e) => {
+  if (e.key !== "Escape") return;
+  if (!document.querySelector(".ctx-menu:not(.hidden)") && !isDialogOpen()) clearChecked();
+});
+
 // ---- Keyboard-navigation cursor ----
 // The rendered rows in display order — the basis for cursor movement, so j/k
 // follow the same order the user sees (sort/search aware).
@@ -899,6 +942,8 @@ function highlightCursor(): void {
 }
 // Re-anchor the cursor after a list re-render: keep it on the same message if it
 // survived, else fall back to the first row (or clear it when the list is empty).
+// The multi-selection is reconciled here too — every list re-render funnels
+// through this, so both stay consistent with the rendered rows.
 function syncCursor(): void {
   const rows = rowEls();
   if (rows.length === 0) {
@@ -907,6 +952,7 @@ function syncCursor(): void {
     cursorId = rows[0].dataset.id ?? null;
   }
   highlightCursor();
+  pruneChecked();
 }
 // Move the cursor by a signed step, clamped to the list bounds, scrolling the
 // new row into view. No-op when the list is empty.
@@ -1368,6 +1414,31 @@ async function saveMessageAsEml(id: string, subject: string): Promise<void> {
     statusEl.textContent = "Saved message as .eml";
   } catch (e) {
     statusEl.textContent = `Save failed: ${e}`;
+  }
+}
+
+type DesktopExport = { saved: number; failed: number; error: string | null };
+
+// Save one or more messages straight to the Desktop as .eml files — no dialog.
+// The backend derives safe, de-duplicated filenames from the subjects and
+// keeps going past per-message failures, so a batch reports a partial result
+// instead of dying on the first error.
+async function saveToDesktop(ids: string[]): Promise<void> {
+  const items = ids.map((id) => ({
+    id,
+    subject: rowFor(id)?.querySelector<HTMLElement>(".msg-subject")?.title ?? "",
+  }));
+  const noun = items.length === 1 ? "message" : `${items.length} messages`;
+  statusEl.textContent = `Saving ${noun} to Desktop…`;
+  try {
+    const r = await invoke<DesktopExport>("export_messages_to_desktop", { items });
+    statusEl.textContent =
+      r.failed > 0
+        ? `Saved ${r.saved} of ${items.length} to Desktop — ${r.failed} failed${r.error ? `: ${r.error}` : ""}`
+        : `Saved ${noun} to Desktop`;
+    if (r.failed === 0) clearChecked();
+  } catch (e) {
+    statusEl.textContent = `Save to Desktop failed: ${e}`;
   }
 }
 
@@ -3650,12 +3721,42 @@ listEl.addEventListener("click", (e) => {
   }
   const row = target.closest<HTMLElement>(".msg");
   if (!row?.dataset.id) return;
-  cursorId = row.dataset.id; // keep the keyboard cursor on the clicked row
+  const id = row.dataset.id;
+  cursorId = id; // keep the keyboard cursor on the clicked row
   highlightCursor();
+  // Ctrl/Cmd+click toggles the row in the multi-selection; Shift+click selects
+  // the range from the anchor row. Neither opens the message.
+  if (e.ctrlKey || e.metaKey) {
+    if (!checkedIds.delete(id)) checkedIds.add(id);
+    checkAnchorId = id;
+    reflectChecked();
+    announceChecked();
+    return;
+  }
+  if (e.shiftKey && checkAnchorId) {
+    const ids = rowEls().map((el) => el.dataset.id ?? "");
+    const a = ids.indexOf(checkAnchorId);
+    const b = ids.indexOf(id);
+    if (a !== -1 && b !== -1) {
+      checkedIds.clear();
+      for (const rangeId of ids.slice(Math.min(a, b), Math.max(a, b) + 1)) {
+        checkedIds.add(rangeId);
+      }
+      reflectChecked();
+      announceChecked();
+      return;
+    }
+  }
+  clearChecked();
+  checkAnchorId = id;
   // In Drafts, a click resumes editing in compose rather than opening the reader.
   // (Search results are never drafts here — they render with the sender form.)
-  if (!searchActive && currentFolderIsDrafts()) void resumeDraft(row.dataset.id);
-  else void openMessage(row.dataset.id);
+  if (!searchActive && currentFolderIsDrafts()) void resumeDraft(id);
+  else void openMessage(id);
+});
+// Shift+click range-selects; stop the browser's shift-click text selection.
+listEl.addEventListener("mousedown", (e) => {
+  if (e.shiftKey) e.preventDefault();
 });
 
 // ---- Email right-click context menu ----
@@ -3693,6 +3794,7 @@ function renderMainMenu(unread: boolean, flagged: boolean): void {
     { act: "replyAll", label: "Reply all" },
     { act: "forward", label: "Forward" },
     { act: "saveEml", label: "Save as EML…" },
+    { act: "saveDesktop", label: "Save to Desktop" },
     "sep",
     { act: "toggleRead", label: unread ? "Mark as read" : "Mark as unread" },
     { act: "toggleFlag", label: flagged ? "Clear flag" : "Flag" },
@@ -3725,11 +3827,21 @@ function renderFolderMenu(): void {
     `<div class="ctx-folders">${list}</div>`;
 }
 
+// Menu for a right-click on a multi-selected row: bulk actions only, so the
+// per-message items can't silently apply to just one of the selection.
+function renderBulkMenu(count: number): void {
+  ctxMenu.innerHTML =
+    `<button class="ctx-item" data-act="saveDesktop">Save ${count} messages to Desktop</button>` +
+    `<div class="ctx-sep"></div>` +
+    `<button class="ctx-item" data-act="clearSel">Clear selection</button>`;
+}
+
 function showCtxMenu(x: number, y: number, id: string, unread: boolean, flagged: boolean): void {
   ctxTargetId = id;
   ctxX = x;
   ctxY = y;
-  renderMainMenu(unread, flagged);
+  if (checkedIds.size > 1 && checkedIds.has(id)) renderBulkMenu(checkedIds.size);
+  else renderMainMenu(unread, flagged);
   ctxMenu.classList.remove("hidden");
   placeMenu();
   rowFor(id)?.classList.add("ctx-target");
@@ -3799,6 +3911,14 @@ ctxMenu.addEventListener("click", (e) => {
       void saveMessageAsEml(id, subject);
       break;
     }
+    case "saveDesktop": {
+      const ids = checkedIds.size > 1 && checkedIds.has(id) ? [...checkedIds] : [id];
+      void saveToDesktop(ids);
+      break;
+    }
+    case "clearSel":
+      clearChecked();
+      break;
     case "toggleRead":
       void setRead(id, unread); // unread → mark read; read → mark unread
       break;

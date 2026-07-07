@@ -94,6 +94,41 @@ Entra app registration (public, not secret):
 
 ## Progress log
 
+### 2026-07-07 — Multi-select + bulk "Save to Desktop" (v0.2.11)
+Ctrl/Cmd+click toggles rows into a multi-selection and Shift+click
+range-selects from the anchor row (the last plain/Ctrl-clicked one); neither
+opens the message. The selection (`checkedIds`, styled `.msg.checked`) is
+distinct from the opened message and the j/k cursor, and is reconciled against
+the rendered rows on every list re-render (piggybacked on `syncCursor`), so a
+folder switch, filter, or search prunes it automatically. Right-clicking a
+selected row swaps the context menu for a bulk menu — "Save N messages to
+Desktop" / "Clear selection" — so per-message actions can't silently apply to
+one of many; right-clicking an unselected row (and the single-message menu's
+new "Save to Desktop" item) acts on that row alone. Esc clears the selection,
+except on the press that dismisses a context menu or dialog.
+
+Backend: new `export_messages_to_desktop` command loops the existing
+`raw_mime`/`export_message` seam (Graph `/$value`, already live-proven — no new
+wire code) and writes each message to `dirs::desktop_dir()` as `.eml`.
+Filenames derive from subjects **backend-side** (the subject crosses the IPC
+trust boundary): illegal chars dropped, whitespace collapsed, trailing
+dots/spaces trimmed, 120-char cap, Windows reserved device names (CON, LPT1, …)
+suffixed, empty → "message"; collisions numbered Windows-style
+(`subject (2).eml`). The batch continues past per-message failures and returns
+`{saved, failed, error}` (first error) for an honest partial-result status
+line. 4 new unit tests (filename sanitisation + collision numbering); all
+gates green (fmt, clippy `--all-targets -D warnings`, `cargo test --workspace`,
+tsc + vite). Compile-verified only — the bulk path wasn't live-run, but it
+composes two live-proven pieces (multi-row DOM state + the shipped .eml
+export).
+
+Environment note (not committed): the machine's PATH puts a standalone
+"C:\Program Files\Rust stable GNU 1.96" install ahead of `~/.cargo/bin`, so
+bare `cargo` resolves to a GNU-target toolchain whose mingw linker cannot link
+the app's cdylib ("export ordinal too large" — >64k exports overflow PE's
+16-bit ordinals). Local builds/tests must go through rustup's shims (prepend
+`~/.cargo/bin` to PATH or `rustup run`); CI is unaffected.
+
 ### 2026-07-02 — Bug-sweep implementation: 34 user-facing fixes (v0.2.8)
 Implemented the full `BUGSWEEP.md` work order (a five-area sweep of user-facing
 actions, each finding verified against both sides of the contract). 34 items

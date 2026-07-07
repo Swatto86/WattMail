@@ -803,6 +803,106 @@ pub async fn export_message(
     std::fs::write(&dest_path, bytes).map_err(|e| e.to_string())
 }
 
+/// Windows reserved device names — a filename whose base matches one (any
+/// case) can't be created, so [`safe_filename`] dodges them.
+const RESERVED_NAMES: [&str; 22] = [
+    "CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8",
+    "COM9", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
+];
+
+/// Build a safe filename base from a message subject: drop characters illegal
+/// in Windows/POSIX filenames, collapse whitespace, trim trailing dots/spaces,
+/// dodge Windows reserved device names, and cap the length. Runs here — not in
+/// the webview — because the subject crosses the IPC trust boundary and the
+/// result must be provably a single path component.
+fn safe_filename(subject: &str) -> String {
+    let cleaned: String = subject
+        .chars()
+        .map(|c| match c {
+            '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*' => ' ',
+            c if (c as u32) < 0x20 => ' ',
+            c => c,
+        })
+        .collect();
+    let collapsed = cleaned.split_whitespace().collect::<Vec<_>>().join(" ");
+    let capped: String = collapsed.chars().take(120).collect();
+    let base = capped.trim_end_matches(['.', ' ']);
+    if base.is_empty() {
+        return "message".into();
+    }
+    if RESERVED_NAMES.iter().any(|r| base.eq_ignore_ascii_case(r)) {
+        return format!("{base}_");
+    }
+    base.to_string()
+}
+
+/// First non-existing `<base>.eml` path in `dir`, numbering duplicates
+/// Windows-style: `base.eml`, `base (2).eml`, `base (3).eml`, …
+fn unique_eml_path(dir: &std::path::Path, base: &str) -> std::path::PathBuf {
+    let mut path = dir.join(format!("{base}.eml"));
+    let mut n = 2u32;
+    while path.exists() {
+        path = dir.join(format!("{base} ({n}).eml"));
+        n += 1;
+    }
+    path
+}
+
+/// One message in a bulk desktop export: its id plus the subject that seeds
+/// the filename.
+#[derive(Deserialize)]
+pub struct ExportItem {
+    pub id: String,
+    pub subject: String,
+}
+
+/// Outcome of a bulk desktop export. `error` carries the first failure so a
+/// partial result is still actionable in the status bar.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DesktopExportDto {
+    pub saved: u32,
+    pub failed: u32,
+    pub error: Option<String>,
+}
+
+/// Save each message to the user's Desktop as a raw RFC 5322 `.eml` file (the
+/// same faithful bytes as [`export_message`]), with subject-derived filenames
+/// de-duplicated Windows-style. Continues past per-message failures and
+/// reports them rather than aborting the batch.
+#[tauri::command]
+pub async fn export_messages_to_desktop(
+    accounts: State<'_, AccountManager>,
+    items: Vec<ExportItem>,
+) -> Result<DesktopExportDto, String> {
+    let desktop = dirs::desktop_dir().ok_or("could not resolve the Desktop folder")?;
+    let (_account, provider) = active_provider(&accounts).await?;
+    let mut saved = 0u32;
+    let mut failed = 0u32;
+    let mut error: Option<String> = None;
+    for item in &items {
+        let result = match app_export_message(&*provider, &item.id).await {
+            Ok(bytes) => {
+                let path = unique_eml_path(&desktop, &safe_filename(&item.subject));
+                std::fs::write(&path, bytes).map_err(|e| e.to_string())
+            }
+            Err(e) => Err(e.to_string()),
+        };
+        match result {
+            Ok(()) => saved += 1,
+            Err(e) => {
+                failed += 1;
+                error.get_or_insert(e);
+            }
+        }
+    }
+    Ok(DesktopExportDto {
+        saved,
+        failed,
+        error,
+    })
+}
+
 #[tauri::command]
 pub fn get_close_to_tray(state: State<'_, SettingsState>) -> bool {
     state.0.read().map(|s| s.close_to_tray).unwrap_or(true)
@@ -1193,4 +1293,47 @@ pub async fn delete_event(accounts: State<'_, AccountManager>, id: String) -> Re
 #[tauri::command]
 pub fn started_hidden(flag: State<'_, crate::StartHidden>) -> bool {
     flag.0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{safe_filename, unique_eml_path};
+
+    #[test]
+    fn safe_filename_strips_illegal_characters_and_collapses_whitespace() {
+        assert_eq!(safe_filename("Re: Q3 <report>?"), "Re Q3 report");
+        assert_eq!(safe_filename("a/b\\c|d*e\"f"), "a b c d e f");
+        assert_eq!(safe_filename("tab\tand\nnewline"), "tab and newline");
+    }
+
+    #[test]
+    fn safe_filename_trims_trailing_dots_and_falls_back_when_empty() {
+        assert_eq!(safe_filename("subject..."), "subject");
+        assert_eq!(safe_filename(""), "message");
+        assert_eq!(safe_filename("???"), "message");
+        assert_eq!(safe_filename("   "), "message");
+    }
+
+    #[test]
+    fn safe_filename_caps_length_and_dodges_reserved_device_names() {
+        assert_eq!(safe_filename(&"x".repeat(300)).chars().count(), 120);
+        assert_eq!(safe_filename("CON"), "CON_");
+        assert_eq!(safe_filename("lpt1"), "lpt1_");
+        assert_eq!(safe_filename("CONTRACT"), "CONTRACT"); // prefix ≠ reserved
+    }
+
+    #[test]
+    fn unique_eml_path_numbers_collisions_windows_style() {
+        let dir = std::env::temp_dir().join(format!("wattmail-eml-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let first = unique_eml_path(&dir, "subject");
+        assert_eq!(first.file_name().unwrap(), "subject.eml");
+        std::fs::write(&first, b"x").unwrap();
+        let second = unique_eml_path(&dir, "subject");
+        assert_eq!(second.file_name().unwrap(), "subject (2).eml");
+        std::fs::write(&second, b"x").unwrap();
+        let third = unique_eml_path(&dir, "subject");
+        assert_eq!(third.file_name().unwrap(), "subject (3).eml");
+        std::fs::remove_dir_all(&dir).ok();
+    }
 }

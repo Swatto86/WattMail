@@ -142,6 +142,19 @@ body,
     inset 3px 0 0 oklch(var(--p)),
     inset 0 0 0 2px oklch(var(--p) / 0.55);
 }
+/* Multi-selected rows (Ctrl/Shift+click) — the bulk-action selection, lighter
+   than the opened (.selected) message. */
+.msg.checked,
+.msg.checked:hover {
+  background: oklch(var(--p) / 0.12);
+  box-shadow: inset 3px 0 0 oklch(var(--p) / 0.55);
+}
+.msg.cursor.checked,
+.msg.cursor.checked:hover {
+  box-shadow:
+    inset 3px 0 0 oklch(var(--p) / 0.55),
+    inset 0 0 0 2px oklch(var(--p) / 0.55);
+}
 .msg-dot {
   width: 10px;
   flex-shrink: 0;
