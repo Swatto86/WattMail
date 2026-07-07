@@ -80,10 +80,12 @@ npm run tauri dev
 # Console auth proof
 cargo run -p auth-spike
 
-# Verify (run before declaring done)
-npm run build                              # tsc --noEmit + vite build
-cargo fmt --all
-cargo clippy --all-targets -- -D warnings  # never --lib
+# Verify (run before declaring done) — one entry point, also used by the
+# global stop-gate hook. Routes through rustup's shims (see the PATH gotcha
+# in the 2026-07-07 progress entry) and runs:
+#   npm run build; cargo fmt --check; clippy --all-targets -D warnings;
+#   cargo test --workspace
+bash scripts/verify.sh
 ```
 
 Entra app registration (public, not secret):
