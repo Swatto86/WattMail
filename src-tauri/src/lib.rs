@@ -137,6 +137,8 @@ pub fn run() {
             commands::set_notification_setting,
             commands::get_signature,
             commands::set_signature,
+            commands::upload_draft_attachments,
+            commands::delete_draft_attachment,
             commands::check_new_mail,
             commands::list_message_rules,
             commands::create_message_rule,

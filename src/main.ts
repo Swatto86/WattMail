@@ -3163,6 +3163,15 @@ let composeAttachPaths: string[] = [];
 // we only carry refs in the editor. The order matches `composeAttachPaths`
 // when both kinds are present, so each chip can be removed independently.
 let composeForwardedAtts: ForwardedAttachmentInfo[] = [];
+// Attachments already living ON the server draft (uploaded by a "Save draft",
+// or found on a resumed draft). They ride along automatically when the draft
+// is sent; removing one deletes it from the draft immediately.
+interface ServerAttachment {
+  id: string;
+  name: string;
+  size: number;
+}
+let composeServerAtts: ServerAttachment[] = [];
 // The draft currently open in the compose modal, if any. Set when resuming a
 // draft or after the first "Save draft"; null for a fresh compose/reply/forward.
 let currentDraftId: string | null = null;
@@ -3253,16 +3262,57 @@ function renderComposeAttachments(): void {
         `<button class="attach-remove" data-kind="fwd" data-i="${i}" type="button" title="Remove">&times;</button></span>`,
     )
     .join("");
-  cAttachments.innerHTML = localChips + fwdChips;
+  // Attachments already saved on the server draft — removing one deletes it
+  // from the draft right away (it's server state, not a pending local file).
+  const srvChips = composeServerAtts
+    .map(
+      (a, i) =>
+        `<span class="attach-chip-c" title="Saved with draft">` +
+        `${esc(a.name)} <span class="attach-chip-size">${fmtBytes(a.size)}</span> ` +
+        `<button class="attach-remove" data-kind="srv" data-i="${i}" type="button" title="Remove">&times;</button></span>`,
+    )
+    .join("");
+  cAttachments.innerHTML = localChips + fwdChips + srvChips;
   cAttachments.querySelectorAll<HTMLButtonElement>(".attach-remove").forEach((b) => {
     b.addEventListener("click", () => {
       const kind = b.dataset.kind;
       const i = Number(b.dataset.i);
+      if (kind === "srv") {
+        const att = composeServerAtts[i];
+        if (!att || !currentDraftId) return;
+        b.disabled = true;
+        invoke("delete_draft_attachment", {
+          draftId: currentDraftId,
+          attachmentId: att.id,
+        })
+          .then(() => {
+            composeServerAtts.splice(i, 1);
+            renderComposeAttachments();
+          })
+          .catch((e) => {
+            b.disabled = false;
+            composeMsg.dataset.error = "1";
+            composeMsg.textContent = `Could not remove attachment: ${e}`;
+          });
+        return;
+      }
       if (kind === "local") composeAttachPaths.splice(i, 1);
       else if (kind === "fwd") composeForwardedAtts.splice(i, 1);
       renderComposeAttachments();
     });
   });
+}
+
+// The forwarded-attachment refs in the wire shape the backend commands expect
+// (camelCase DTO fields), shared by the send and draft-upload paths.
+function forwardedAttachmentDtos(): Record<string, unknown>[] {
+  return composeForwardedAtts.map((a) => ({
+    messageId: a.messageId,
+    attachmentId: a.attachmentId,
+    name: a.name,
+    contentType: a.contentType,
+    size: a.size,
+  }));
 }
 
 async function pickAttachments(): Promise<void> {
@@ -3329,6 +3379,7 @@ function openCompose(opts: {
   }
   composeAttachPaths = [];
   composeForwardedAtts = opts.forwardedAtts ? [...opts.forwardedAtts] : [];
+  composeServerAtts = [];
   renderComposeAttachments();
   composeMsg.textContent = "";
   delete composeMsg.dataset.error;
@@ -3624,11 +3675,20 @@ async function resumeDraft(id: string): Promise<void> {
       draftId: id,
       draftIsResumed: true,
     });
-    // A foreign draft (e.g. from Outlook) may carry attachments WattMail can't
-    // edit or remove; warn that Send will include them.
+    // Attachments saved on the draft (by WattMail or another client) come in
+    // as removable server chips; on a listing failure, fall back to a notice
+    // so the user still knows Send will include them.
     if (d.hasAttachments) {
-      composeMsg.textContent =
-        "This draft has attachments saved on the server — they will be sent with it.";
+      try {
+        const atts = await invoke<
+          { id: string; name: string; contentType: string; size: number }[]
+        >("attachments", { messageId: id });
+        composeServerAtts = atts.map((a) => ({ id: a.id, name: a.name, size: a.size }));
+        renderComposeAttachments();
+      } catch {
+        composeMsg.textContent =
+          "This draft has attachments saved on the server — they will be sent with it.";
+      }
     }
   } catch (e) {
     statusEl.textContent = `Could not open draft: ${e}`;
@@ -3683,30 +3743,13 @@ async function syncDraftsFolder(): Promise<void> {
   await loadFolders();
 }
 
-// True when the compose carries attachments (local, forwarded, or inline images)
-// that a draft can't persist. Used to warn on the explicit "Save draft" button.
-function composeHasUnsaveableAttachments(): boolean {
-  return (
-    composeAttachPaths.length > 0 ||
-    composeForwardedAtts.length > 0 ||
-    cBodyInput.querySelector('img[src^="data:image/"]') !== null
-  );
-}
-
 // Save the compose modal as a draft: create on first save, update thereafter.
 // Tracks the new draft id so subsequent saves (and a later Send) reuse it. This
-// is the EXPLICIT "Save draft" button — it warns about attachments (drafts don't
-// carry them); the silent autosave (#34) skips that dialog by design.
+// is the EXPLICIT "Save draft" button — unlike the silent autosave (#34) it
+// also uploads pending local/forwarded attachments onto the draft so they
+// survive resume. Inline data: images stay in the body (they round-trip
+// through the draft body and are converted to cid: attachments at send).
 async function saveDraft(): Promise<void> {
-  // Warn before dropping attachments the draft can't keep (mirrors the send-time
-  // guard, but here so the user isn't surprised when they resume a chip-less draft).
-  if (composeHasUnsaveableAttachments()) {
-    const ok = await showConfirm(
-      "Attachments aren't saved with drafts yet — save the message without them?",
-      { okLabel: "Save anyway" },
-    );
-    if (!ok) return;
-  }
   if (composeSaveInFlight) return; // a save/send is already running (#30)
   composeSaveInFlight = true;
   cancelAutosave();
@@ -3722,6 +3765,26 @@ async function saveDraft(): Promise<void> {
       bodyHtml: cBodyInput.innerHTML,
     });
     currentDraftId = id;
+    if (composeAttachPaths.length > 0 || composeForwardedAtts.length > 0) {
+      const uploaded = await invoke<ServerAttachment[]>("upload_draft_attachments", {
+        draftId: id,
+        attachmentPaths: composeAttachPaths,
+        inlineImages: [],
+        forwardedAttachments: forwardedAttachmentDtos(),
+      });
+      // The files now live on the draft — turn their chips into server chips
+      // so a later save/send can't upload them again.
+      composeServerAtts.push(...uploaded);
+      composeAttachPaths = [];
+      composeForwardedAtts = [];
+      renderComposeAttachments();
+    }
+    // The draft (and its attachments) now lives in Drafts — from here treat it
+    // like a resumed draft: send via the draft path so the server attachments
+    // ride along, and never delete it on discard. (A reply saved this way
+    // sends without threading headers — the draft path can't thread.)
+    currentDraftIsResumed = true;
+    captureComposeBaseline();
     delete composeMsg.dataset.error;
     composeMsg.textContent = "Draft saved.";
     await syncDraftsFolder();
@@ -3770,25 +3833,44 @@ async function sendCompose(): Promise<void> {
   // its attachments/inline images ride along); its autosaved draft is deleted
   // afterward.
   const resumed = currentDraftIsResumed;
-  if (resumed && (composeAttachPaths.length > 0 || composeForwardedAtts.length > 0)) {
-    composeMsg.textContent =
-      "Attachments aren't supported on drafts yet — remove them or start a fresh message to attach files.";
-    composeSendBtn.disabled = false;
-    composeSaveInFlight = false;
-    return;
-  }
-  if (resumed && cBodyInput.querySelector('img[src^="data:image/"]')) {
-    composeMsg.textContent =
-      "Inline images aren't supported on drafts yet — remove them or start a fresh message to embed images.";
-    composeSendBtn.disabled = false;
-    composeSaveInFlight = false;
-    return;
-  }
   try {
     if (resumed && draftId) {
-      // Resuming a draft: flush edits, then send via /send so the draft is
+      // Sending a draft: flush edits, then send via /send so the draft is
       // consumed (moved to Sent) rather than duplicated by a separate sendMail.
-      await invoke("save_draft", { id: draftId, to, cc, bcc, subject, bodyHtml });
+      // Inline data: images become cid: inline attachments, and any pending
+      // local/forwarded files are uploaded first — server attachments already
+      // on the draft ride along on their own.
+      const { html, images } = extractInlineImages(bodyHtml);
+      const sizeProblem = inlineImagesSizeProblem(images);
+      if (sizeProblem) {
+        composeMsg.textContent = sizeProblem;
+        return; // finally re-enables the buttons
+      }
+      if (composeAttachPaths.length > 0 || composeForwardedAtts.length > 0 || images.length > 0) {
+        const uploaded = await invoke<ServerAttachment[]>("upload_draft_attachments", {
+          draftId,
+          attachmentPaths: composeAttachPaths,
+          inlineImages: images,
+          forwardedAttachments: forwardedAttachmentDtos(),
+        });
+        // Converting to server state up front makes a failed send retry-safe:
+        // nothing re-uploads, the cid: body already references the uploads.
+        // (A partial upload failure can leave already-uploaded files on the
+        // draft; a retry then re-uploads the batch — rare enough to accept.)
+        composeServerAtts.push(...uploaded);
+        composeAttachPaths = [];
+        composeForwardedAtts = [];
+        if (images.length > 0) cBodyInput.innerHTML = html;
+        renderComposeAttachments();
+      }
+      await invoke("save_draft", {
+        id: draftId,
+        to,
+        cc,
+        bcc,
+        subject,
+        bodyHtml: images.length > 0 ? html : bodyHtml,
+      });
       await invoke("send_draft", { id: draftId });
       currentDraftId = null;
     } else {
@@ -3814,14 +3896,8 @@ async function sendCompose(): Promise<void> {
         attachmentPaths: composeAttachPaths,
         inlineImages: images,
         // Server-side refs — the Rust `send_message` command fetches the
-        // bytes per ref. Match the DTO's camelCase field names exactly.
-        forwardedAttachments: composeForwardedAtts.map((a) => ({
-          messageId: a.messageId,
-          attachmentId: a.attachmentId,
-          name: a.name,
-          contentType: a.contentType,
-          size: a.size,
-        })),
+        // bytes per ref.
+        forwardedAttachments: forwardedAttachmentDtos(),
         replyToId: currentReplyToId,
       });
       // A fresh send that had an autosaved draft: remove the leftover so Drafts

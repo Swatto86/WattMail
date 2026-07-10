@@ -6,7 +6,7 @@
 use wattmail_domain::{
     Attachment, CalendarEvent, CalendarProvider, DraftPrefill, Folder, InviteResponse, MailError,
     MailProvider, MailStore, MessageBody, MessageChange, MessageHeader, MessageSummary, NewEvent,
-    OutgoingMessage, SyncToken, UserProfile,
+    OutgoingAttachment, OutgoingMessage, SyncToken, UserProfile,
 };
 
 const ACCOUNT_NAME_KEY: &str = "account.displayName";
@@ -341,6 +341,26 @@ pub async fn save_draft(
 /// Send an existing draft (moves it to Sent Items, consuming the draft).
 pub async fn send_draft(provider: &dyn MailProvider, id: &str) -> Result<(), MailError> {
     provider.send_draft(id).await
+}
+
+/// Add one attachment to an existing draft, returning its new attachment id.
+pub async fn add_draft_attachment(
+    provider: &dyn MailProvider,
+    draft_id: &str,
+    attachment: &OutgoingAttachment,
+) -> Result<String, MailError> {
+    provider.add_draft_attachment(draft_id, attachment).await
+}
+
+/// Remove one attachment from an existing draft.
+pub async fn delete_draft_attachment(
+    provider: &dyn MailProvider,
+    draft_id: &str,
+    attachment_id: &str,
+) -> Result<(), MailError> {
+    provider
+        .delete_draft_attachment(draft_id, attachment_id)
+        .await
 }
 
 /// Load a draft for editing, with its raw (unsanitized) body.

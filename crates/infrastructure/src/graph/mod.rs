@@ -882,6 +882,36 @@ impl MailProvider for GraphClient {
         Ok(())
     }
 
+    async fn add_draft_attachment(
+        &self,
+        draft_id: &str,
+        attachment: &OutgoingAttachment,
+    ) -> Result<String, MailError> {
+        self.add_attachment(draft_id, attachment).await
+    }
+
+    async fn delete_draft_attachment(
+        &self,
+        draft_id: &str,
+        attachment_id: &str,
+    ) -> Result<(), MailError> {
+        let mut url = message_endpoint(draft_id);
+        {
+            let mut segments = url.path_segments_mut().expect("base URL is a proper path");
+            segments.push("attachments");
+            segments.push(attachment_id);
+        }
+        let response = self
+            .http
+            .delete(url.as_str())
+            .bearer_auth(&self.access_token)
+            .send()
+            .await
+            .map_err(|e| MailError::Network(e.to_string()))?;
+        check_status(response).await?;
+        Ok(())
+    }
+
     async fn send_draft(&self, id: &str) -> Result<(), MailError> {
         // POST /me/messages/{id}/send sends the existing draft (no body); Graph
         // moves it to Sent Items. We must NOT also call sendMail — that would

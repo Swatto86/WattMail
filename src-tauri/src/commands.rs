@@ -9,10 +9,11 @@ use tauri::{Manager, State};
 use crate::accounts::{AccountManager, AccountSummary, ManagedAccount};
 use crate::settings::{self, SettingsState};
 use wattmail_application::{
-    cached_folders as app_cached_folders, calendar_view as app_calendar_view, compose_forward,
-    compose_reply, create_event as app_create_event, create_folder as app_create_folder,
-    delete_event as app_delete_event, delete_folder as app_delete_folder,
-    delete_message as app_delete_message, download_attachment,
+    add_draft_attachment as app_add_draft_attachment, cached_folders as app_cached_folders,
+    calendar_view as app_calendar_view, compose_forward, compose_reply,
+    create_event as app_create_event, create_folder as app_create_folder,
+    delete_draft_attachment as app_delete_draft_attachment, delete_event as app_delete_event,
+    delete_folder as app_delete_folder, delete_message as app_delete_message, download_attachment,
     export_message as app_export_message, folder_from_cache as app_folder_from_cache,
     has_unforwardable_attachments as app_has_unforwardable_attachments, list_attachments,
     list_folders as app_list_folders, load_draft as app_load_draft, load_older as app_load_older,
@@ -567,12 +568,43 @@ pub async fn send_message(
     reply_to_id: Option<String>,
 ) -> Result<(), String> {
     let (_account, provider) = active_provider(&accounts).await?;
+    let attachments = collect_attachments(
+        &*provider,
+        &attachment_paths,
+        inline_images,
+        forwarded_attachments,
+    )
+    .await?;
 
-    // Guard against Graph's ~3-4 MB simple-send cap BEFORE downloading forwarded
-    // attachments or building the payload (upload sessions are out of scope), so
-    // an oversized send fails fast with a readable message instead of a raw 413.
+    let message = OutgoingMessage {
+        to,
+        cc,
+        bcc,
+        subject,
+        body_html,
+        attachments,
+    };
+    match reply_to_id {
+        Some(original_id) => app_send_reply(&*provider, &original_id, &message).await,
+        None => app_send_message(&*provider, &message).await,
+    }
+    .map_err(|e| e.to_string())
+}
+
+/// Materialize a compose's attachments — local file paths (read from disk),
+/// inline images (base64 from the editor), and forwarded refs (downloaded from
+/// the provider so multi-MB files don't cross the IPC bridge twice) — into
+/// outgoing attachments, guarding Graph's ~3-4 MB simple-attach cap up front
+/// (upload sessions are out of scope) so an oversized batch fails fast with a
+/// readable message instead of a raw 413.
+async fn collect_attachments(
+    provider: &dyn MailProvider,
+    attachment_paths: &[String],
+    inline_images: Vec<InlineImageDto>,
+    forwarded_attachments: Vec<ForwardedAttachmentDto>,
+) -> Result<Vec<OutgoingAttachment>, String> {
     let mut total_bytes: u64 = 0;
-    for path in &attachment_paths {
+    for path in attachment_paths {
         total_bytes += std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
     }
     for image in &inline_images {
@@ -591,7 +623,7 @@ pub async fn send_message(
     }
 
     let mut attachments = Vec::new();
-    for path in &attachment_paths {
+    for path in attachment_paths {
         let bytes = std::fs::read(path).map_err(|e| format!("could not read {path}: {e}"))?;
         let name = std::path::Path::new(path)
             .file_name()
@@ -622,12 +654,8 @@ pub async fn send_message(
         });
     }
 
-    // Forwarded attachments are downloaded from the provider at send time so a
-    // multi-MB file doesn't cross the IPC bridge twice. Sequential — typical
-    // forwards have a handful of files; if large forwards become common, switch
-    // to `futures::future::join_all` to fan out the GETs.
     for fwd in forwarded_attachments {
-        let bytes = download_attachment(&*provider, &fwd.message_id, &fwd.attachment_id)
+        let bytes = download_attachment(provider, &fwd.message_id, &fwd.attachment_id)
             .await
             .map_err(|e| format!("could not fetch forwarded attachment \"{}\": {e}", fwd.name))?;
         attachments.push(OutgoingAttachment {
@@ -638,20 +666,68 @@ pub async fn send_message(
             is_inline: false,
         });
     }
+    Ok(attachments)
+}
 
-    let message = OutgoingMessage {
-        to,
-        cc,
-        bcc,
-        subject,
-        body_html,
-        attachments,
-    };
-    match reply_to_id {
-        Some(original_id) => app_send_reply(&*provider, &original_id, &message).await,
-        None => app_send_message(&*provider, &message).await,
+/// An attachment uploaded onto a draft, echoed back so the compose UI can turn
+/// its local chip into a removable server chip.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UploadedAttachmentDto {
+    pub id: String,
+    pub name: String,
+    pub size: u64,
+}
+
+/// Upload a compose's pending attachments onto an existing draft, so the draft
+/// carries them server-side (they survive resume and ride along on send).
+/// Returns one entry per uploaded attachment, in input order (paths, then
+/// inline images, then forwarded refs).
+#[tauri::command]
+pub async fn upload_draft_attachments(
+    accounts: State<'_, AccountManager>,
+    draft_id: String,
+    attachment_paths: Vec<String>,
+    inline_images: Vec<InlineImageDto>,
+    forwarded_attachments: Vec<ForwardedAttachmentDto>,
+) -> Result<Vec<UploadedAttachmentDto>, String> {
+    let (_account, provider) = active_provider(&accounts).await?;
+    let attachments = collect_attachments(
+        &*provider,
+        &attachment_paths,
+        inline_images,
+        forwarded_attachments,
+    )
+    .await?;
+    // ponytail: the ~2.5 MB guard covers this upload batch only — attachments
+    // already on the draft aren't counted, so a draft grown across several
+    // saves can exceed the send cap; Graph then rejects the send with an error
+    // the compose surfaces. Track a running total if that ever bites.
+    let mut uploaded = Vec::new();
+    for attachment in &attachments {
+        let id = app_add_draft_attachment(&*provider, &draft_id, attachment)
+            .await
+            .map_err(|e| e.to_string())?;
+        uploaded.push(UploadedAttachmentDto {
+            id,
+            name: attachment.name.clone(),
+            size: attachment.bytes.len() as u64,
+        });
     }
-    .map_err(|e| e.to_string())
+    Ok(uploaded)
+}
+
+/// Remove one attachment from an existing draft.
+#[tauri::command]
+pub async fn delete_draft_attachment(
+    accounts: State<'_, AccountManager>,
+    draft_id: String,
+    attachment_id: String,
+) -> Result<(), String> {
+    let (_account, provider) = active_provider(&accounts).await?;
+    app_delete_draft_attachment(&*provider, &draft_id, &attachment_id)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 fn guess_content_type(name: &str) -> String {

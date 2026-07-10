@@ -425,6 +425,25 @@ pub trait MailProvider: Send + Sync {
     /// Update an existing draft's subject/body/recipients in place.
     async fn update_draft(&self, id: &str, message: &OutgoingMessage) -> Result<(), MailError>;
 
+    /// Add one attachment to an existing draft, returning the new attachment's
+    /// id so it can later be removed with [`Self::delete_draft_attachment`].
+    async fn add_draft_attachment(
+        &self,
+        _draft_id: &str,
+        _attachment: &OutgoingAttachment,
+    ) -> Result<String, MailError> {
+        Err(MailError::Unsupported)
+    }
+
+    /// Remove one attachment from an existing draft.
+    async fn delete_draft_attachment(
+        &self,
+        _draft_id: &str,
+        _attachment_id: &str,
+    ) -> Result<(), MailError> {
+        Err(MailError::Unsupported)
+    }
+
     /// Send an existing draft (moves it to Sent Items, consuming the draft).
     async fn send_draft(&self, id: &str) -> Result<(), MailError>;
 
