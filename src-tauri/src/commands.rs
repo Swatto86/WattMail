@@ -19,8 +19,8 @@ use wattmail_application::{
     move_message as app_move_message, read_headers, read_message,
     rename_folder as app_rename_folder, respond_to_event as app_respond_to_event,
     save_draft as app_save_draft, search_messages as app_search_messages,
-    send_draft as app_send_draft, send_message as app_send_message, set_flag as app_set_flag,
-    set_read as app_set_read, sync_folder as app_sync_folder,
+    send_draft as app_send_draft, send_message as app_send_message, send_reply as app_send_reply,
+    set_flag as app_set_flag, set_read as app_set_read, sync_folder as app_sync_folder,
 };
 use wattmail_domain::{
     CalendarProvider, EventDateTime, Folder, InviteResponse, MailProvider, MessageRule,
@@ -546,7 +546,10 @@ pub struct ForwardedAttachmentDto {
     pub size: u64,
 }
 
-/// Send a message (compose / reply / forward), saved to Sent Items.
+/// Send a message (compose / reply / forward), saved to Sent Items. When
+/// `reply_to_id` names the message being replied to, the send goes through the
+/// provider's threading-preserving reply path (In-Reply-To/References), so the
+/// reply threads correctly in recipients' clients.
 // Arity mirrors the compose IPC surface; bundling into a struct would only
 // move the field list and churn the JS invoke shape.
 #[tauri::command]
@@ -561,6 +564,7 @@ pub async fn send_message(
     attachment_paths: Vec<String>,
     inline_images: Vec<InlineImageDto>,
     forwarded_attachments: Vec<ForwardedAttachmentDto>,
+    reply_to_id: Option<String>,
 ) -> Result<(), String> {
     let (_account, provider) = active_provider(&accounts).await?;
 
@@ -643,9 +647,11 @@ pub async fn send_message(
         body_html,
         attachments,
     };
-    app_send_message(&*provider, &message)
-        .await
-        .map_err(|e| e.to_string())
+    match reply_to_id {
+        Some(original_id) => app_send_reply(&*provider, &original_id, &message).await,
+        None => app_send_message(&*provider, &message).await,
+    }
+    .map_err(|e| e.to_string())
 }
 
 fn guess_content_type(name: &str) -> String {

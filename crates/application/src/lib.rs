@@ -312,6 +312,15 @@ pub async fn send_message(
     provider.send_message(message).await
 }
 
+/// Send a message as a threading-preserving reply to an existing message.
+pub async fn send_reply(
+    provider: &dyn MailProvider,
+    original_id: &str,
+    message: &OutgoingMessage,
+) -> Result<(), MailError> {
+    provider.send_reply(original_id, message).await
+}
+
 /// Save a draft: create a new one when `id` is `None`, otherwise update the
 /// existing draft in place. Returns the draft's id so the caller can track it
 /// for subsequent saves and sends.

@@ -405,6 +405,19 @@ pub trait MailProvider: Send + Sync {
     /// Send a message (saved to Sent Items).
     async fn send_message(&self, message: &OutgoingMessage) -> Result<(), MailError>;
 
+    /// Send `message` as a reply to `original_id`, preserving the threading
+    /// headers (`In-Reply-To`/`References`/conversation) where the backend
+    /// supports it, so the reply threads correctly in recipients' clients.
+    /// The message content (subject/body/recipients/attachments) is used
+    /// as-is. The default sends without threading.
+    async fn send_reply(
+        &self,
+        _original_id: &str,
+        message: &OutgoingMessage,
+    ) -> Result<(), MailError> {
+        self.send_message(message).await
+    }
+
     /// Create a draft from `message` (subject/body/recipients only — attachments
     /// are not persisted on the draft), returning the new draft's id.
     async fn create_draft(&self, message: &OutgoingMessage) -> Result<String, MailError>;

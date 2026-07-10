@@ -62,6 +62,34 @@ impl GraphClient {
         Ok(response)
     }
 
+    /// POST one attachment onto an existing (draft) message, returning the new
+    /// attachment's id. Bytes ride inline as base64 — callers enforce the
+    /// ~3 MB simple-attach cap; larger files would need an upload session.
+    pub(super) async fn add_attachment(
+        &self,
+        message_id: &str,
+        attachment: &OutgoingAttachment,
+    ) -> Result<String, MailError> {
+        let mut url = message_endpoint(message_id);
+        url.path_segments_mut()
+            .expect("base URL is a proper path")
+            .push("attachments");
+        let response = self
+            .http
+            .post(url.as_str())
+            .bearer_auth(&self.access_token)
+            .json(&attachment_json(attachment))
+            .send()
+            .await
+            .map_err(|e| MailError::Network(e.to_string()))?;
+        let created: GraphCreatedDraft = check_status(response)
+            .await?
+            .json()
+            .await
+            .map_err(|e| MailError::Decode(e.to_string()))?;
+        Ok(created.id)
+    }
+
     /// Fetch the immediate child folders of `parent` (`None` = top level).
     async fn fetch_child_folders(
         &self,
@@ -776,6 +804,50 @@ impl MailProvider for GraphClient {
         Ok(())
     }
 
+    async fn send_reply(
+        &self,
+        original_id: &str,
+        message: &OutgoingMessage,
+    ) -> Result<(), MailError> {
+        // POST /me/messages/{id}/createReply drafts a reply that carries the
+        // threading headers (In-Reply-To/References/conversation) a bare
+        // sendMail never sets. The draft's Graph-generated content is then
+        // replaced wholesale with the client-composed message (PATCH),
+        // attachments are added, and the draft is sent — consuming it into
+        // Sent Items exactly like a resumed-draft send.
+        let mut url = message_endpoint(original_id);
+        url.path_segments_mut()
+            .expect("base URL is a proper path")
+            .push("createReply");
+        let response = self
+            .http
+            .post(url.as_str())
+            .bearer_auth(&self.access_token)
+            .send()
+            .await
+            .map_err(|e| MailError::Network(e.to_string()))?;
+        let draft: GraphCreatedDraft = check_status(response)
+            .await?
+            .json()
+            .await
+            .map_err(|e| MailError::Decode(e.to_string()))?;
+
+        // From here the draft exists server-side: on any failure, best-effort
+        // delete it so an aborted send doesn't leave a skeleton in Drafts.
+        let result = async {
+            self.update_draft(&draft.id, message).await?;
+            for attachment in &message.attachments {
+                self.add_attachment(&draft.id, attachment).await?;
+            }
+            self.send_draft(&draft.id).await
+        }
+        .await;
+        if result.is_err() {
+            let _ = self.delete_message(&draft.id, true).await;
+        }
+        result
+    }
+
     async fn create_draft(&self, message: &OutgoingMessage) -> Result<String, MailError> {
         // POST /me/messages creates a draft (subject/body/recipients only;
         // attachments on drafts are out of scope) and returns it with its new id.
@@ -1081,7 +1153,8 @@ struct GraphBody {
     content: String,
 }
 
-/// The created-draft response from `POST /me/messages` — we only need its id.
+/// A created-object response (draft, reply draft, or attachment) — we only
+/// need its id.
 #[derive(serde::Deserialize)]
 struct GraphCreatedDraft {
     id: String,
@@ -1280,34 +1353,34 @@ fn draft_body_json(message: &OutgoingMessage) -> serde_json::Value {
     })
 }
 
-/// Build the Graph attachment array for an outgoing message (base64 file content).
-/// Inline images (`is_inline`) additionally carry `isInline` and, when present, a
-/// `contentId` so the body's `cid:` references resolve.
+/// Build the Graph JSON for one outgoing attachment (base64 file content).
+/// Inline images (`is_inline`) additionally carry `isInline` and, when present,
+/// a `contentId` so the body's `cid:` references resolve.
+fn attachment_json(a: &OutgoingAttachment) -> serde_json::Value {
+    let mut attachment = serde_json::json!({
+        "@odata.type": "#microsoft.graph.fileAttachment",
+        "name": a.name,
+        "contentType": a.content_type,
+        "contentBytes": base64::engine::general_purpose::STANDARD.encode(&a.bytes),
+    });
+    if a.is_inline {
+        let object = attachment
+            .as_object_mut()
+            .expect("json! built an object above");
+        object.insert("isInline".to_string(), serde_json::Value::Bool(true));
+        if let Some(content_id) = &a.content_id {
+            object.insert(
+                "contentId".to_string(),
+                serde_json::Value::String(content_id.clone()),
+            );
+        }
+    }
+    attachment
+}
+
+/// Build the Graph attachment array for an outgoing message.
 fn attachments_json(attachments: &[OutgoingAttachment]) -> Vec<serde_json::Value> {
-    attachments
-        .iter()
-        .map(|a| {
-            let mut attachment = serde_json::json!({
-                "@odata.type": "#microsoft.graph.fileAttachment",
-                "name": a.name,
-                "contentType": a.content_type,
-                "contentBytes": base64::engine::general_purpose::STANDARD.encode(&a.bytes),
-            });
-            if a.is_inline {
-                let object = attachment
-                    .as_object_mut()
-                    .expect("json! built an object above");
-                object.insert("isInline".to_string(), serde_json::Value::Bool(true));
-                if let Some(content_id) = &a.content_id {
-                    object.insert(
-                        "contentId".to_string(),
-                        serde_json::Value::String(content_id.clone()),
-                    );
-                }
-            }
-            attachment
-        })
-        .collect()
+    attachments.iter().map(attachment_json).collect()
 }
 
 #[derive(serde::Deserialize)]
@@ -1586,6 +1659,46 @@ impl From<GraphMessage> for MessageSummary {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn plain_file_attachment_json_has_no_inline_fields() {
+        let json = attachment_json(&OutgoingAttachment {
+            name: "report.pdf".into(),
+            content_type: "application/pdf".into(),
+            bytes: vec![1, 2, 3],
+            content_id: None,
+            is_inline: false,
+        });
+        assert_eq!(json["@odata.type"], "#microsoft.graph.fileAttachment");
+        assert_eq!(json["name"], "report.pdf");
+        assert_eq!(json["contentBytes"], "AQID"); // base64 of [1,2,3]
+        assert!(json.get("isInline").is_none());
+        assert!(json.get("contentId").is_none());
+    }
+
+    #[test]
+    fn inline_image_attachment_json_carries_content_id() {
+        let json = attachment_json(&OutgoingAttachment {
+            name: "img.png".into(),
+            content_type: "image/png".into(),
+            bytes: vec![0xFF],
+            content_id: Some("cid123".into()),
+            is_inline: true,
+        });
+        assert_eq!(json["isInline"], true);
+        assert_eq!(json["contentId"], "cid123");
+    }
+
+    #[test]
+    fn created_object_response_decodes_to_its_id() {
+        // The shape returned by POST /createReply and POST /attachments alike —
+        // a full resource, of which only the id matters.
+        let created: GraphCreatedDraft = serde_json::from_str(
+            r##"{"id":"ATT_1","name":"report.pdf","@odata.type":"#microsoft.graph.fileAttachment"}"##,
+        )
+        .expect("parses");
+        assert_eq!(created.id, "ATT_1");
+    }
 
     #[test]
     fn flags_only_delta_notification_is_not_a_content_upsert() {

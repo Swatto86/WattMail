@@ -3169,6 +3169,9 @@ let currentDraftId: string | null = null;
 // True when the open draft was resumed from the Drafts folder (as opposed to
 // auto-created this session). A resumed draft is never deleted on discard.
 let currentDraftIsResumed = false;
+// The message the open compose replies to (null = not a reply). The send path
+// hands it to the backend so the reply carries threading headers.
+let currentReplyToId: string | null = null;
 // A save (manual, send, or autosave) is in flight — serialize the three so a
 // Send during an in-flight save can't create a duplicate, and an autosave never
 // races a send.
@@ -3295,6 +3298,9 @@ function openCompose(opts: {
   draftId?: string | null;
   // Whether the draft was resumed from the Drafts folder (never deleted on discard).
   draftIsResumed?: boolean;
+  // The message being replied to — the send then preserves threading headers.
+  // Not carried across a draft save/resume: a resumed reply sends unthreaded.
+  replyToId?: string;
   // Non-inline file attachments from the original message (forward only).
   // The user can remove any of these individually before sending.
   forwardedAtts?: ForwardedAttachmentInfo[];
@@ -3302,6 +3308,7 @@ function openCompose(opts: {
   void loadCorrespondentSuggestions();
   currentDraftId = opts.draftId ?? null;
   currentDraftIsResumed = opts.draftIsResumed ?? false;
+  currentReplyToId = opts.replyToId ?? null;
   composeTitle.textContent = opts.title;
   cToInput.value = opts.to.join(", ");
   cCcInput.value = opts.cc.join(", ");
@@ -3533,6 +3540,7 @@ async function replyTo(replyAll: boolean, id?: string): Promise<void> {
       cc: p.cc,
       subject: p.subject,
       quotedHtml: p.quotedHtml,
+      replyToId: targetId,
     });
   } catch (e) {
     statusEl.textContent = `Could not prepare reply: ${e}`;
@@ -3814,6 +3822,7 @@ async function sendCompose(): Promise<void> {
           contentType: a.contentType,
           size: a.size,
         })),
+        replyToId: currentReplyToId,
       });
       // A fresh send that had an autosaved draft: remove the leftover so Drafts
       // isn't left holding a copy of the message we just sent.
