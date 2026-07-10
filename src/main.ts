@@ -529,6 +529,8 @@ appRoot.innerHTML = /* html */ `
         <button id="compose-cancel" class="btn btn-sm">Cancel</button>
         <button id="compose-savedraft" class="btn btn-sm">Save draft</button>
         <button id="compose-send" class="btn btn-sm btn-primary">Send</button>
+        <button id="compose-undo" class="btn btn-sm hidden">Undo</button>
+        <button id="compose-sendnow" class="btn btn-sm btn-primary hidden">Send now</button>
       </div>
       <div id="compose-resize" class="compose-resize" title="Drag to resize" aria-hidden="true"></div>
     </div>
@@ -666,6 +668,8 @@ const composeMsg = document.querySelector<HTMLDivElement>("#compose-msg")!;
 const composeCancel = document.querySelector<HTMLButtonElement>("#compose-cancel")!;
 const composeSaveDraftBtn = document.querySelector<HTMLButtonElement>("#compose-savedraft")!;
 const composeSendBtn = document.querySelector<HTMLButtonElement>("#compose-send")!;
+const composeUndoBtn = document.querySelector<HTMLButtonElement>("#compose-undo")!;
+const composeSendNowBtn = document.querySelector<HTMLButtonElement>("#compose-sendnow")!;
 const cAttachBtn = document.querySelector<HTMLButtonElement>("#c-attach")!;
 const cAttachments = document.querySelector<HTMLDivElement>("#c-attachments")!;
 const headersOverlay = document.querySelector<HTMLDivElement>("#headers-overlay")!;
@@ -3375,10 +3379,57 @@ function composeIsDirty(): boolean {
   );
 }
 
+// ---- Undo send ----
+// A short countdown between clicking Send and the message actually leaving, so
+// a mis-send can be caught. Undo (or Esc/backdrop) returns to editing; "Send
+// now" skips the wait. The body stays editable during the countdown — field
+// values are read after it, so what you see when it fires is what sends.
+const UNDO_SEND_SECONDS = 10;
+// Set while a countdown is running; calling it cancels the pending send.
+let undoSendCancel: (() => void) | null = null;
+
+function undoSendCountdown(): Promise<boolean> {
+  return new Promise((resolve) => {
+    const setCounting = (counting: boolean) => {
+      composeCancel.classList.toggle("hidden", counting);
+      composeSaveDraftBtn.classList.toggle("hidden", counting);
+      composeSendBtn.classList.toggle("hidden", counting);
+      composeUndoBtn.classList.toggle("hidden", !counting);
+      composeSendNowBtn.classList.toggle("hidden", !counting);
+    };
+    let remaining = UNDO_SEND_SECONDS;
+    const timer = window.setInterval(() => {
+      remaining -= 1;
+      if (remaining <= 0) finish(true);
+      else composeMsg.textContent = `Sending in ${remaining}s…`;
+    }, 1000);
+    const finish = (send: boolean) => {
+      window.clearInterval(timer);
+      undoSendCancel = null;
+      composeUndoBtn.onclick = null;
+      composeSendNowBtn.onclick = null;
+      setCounting(false);
+      composeMsg.textContent = send ? "" : "Send cancelled.";
+      resolve(send);
+    };
+    setCounting(true);
+    composeMsg.textContent = `Sending in ${remaining}s…`;
+    composeUndoBtn.onclick = () => finish(false);
+    composeSendNowBtn.onclick = () => finish(true);
+    undoSendCancel = () => finish(false);
+  });
+}
+
 // The single close path for every dismiss (Esc, Cancel, backdrop). Confirms
 // before discarding an edited message so a stray keypress/click can't destroy
 // it; deletes an auto-created draft on confirmed discard (never a resumed one).
 async function requestCloseCompose(): Promise<void> {
+  // A dismiss during the undo-send countdown cancels the pending send and
+  // returns to editing — it never discards the message.
+  if (undoSendCancel) {
+    undoSendCancel();
+    return;
+  }
   if (composeIsDirty()) {
     const ok = await showConfirm("Discard this message?", {
       danger: true,
@@ -3692,6 +3743,9 @@ async function sendCompose(): Promise<void> {
     return;
   }
   if (composeSaveInFlight) return; // a draft save is in flight (#30) — don't double-send
+  // Undo-send window: give the user a moment to catch a mis-send. Resolves
+  // false when undone (stay in the editor with everything intact).
+  if (!(await undoSendCountdown())) return;
   composeSaveInFlight = true;
   cancelAutosave();
   composeSendBtn.disabled = true;
