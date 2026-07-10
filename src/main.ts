@@ -3279,14 +3279,19 @@ function renderComposeAttachments(): void {
       const i = Number(b.dataset.i);
       if (kind === "srv") {
         const att = composeServerAtts[i];
-        if (!att || !currentDraftId) return;
+        // Skip while a save/send is running — a concurrent DELETE could race
+        // the send and drop an attachment the sent copy was meant to carry.
+        if (!att || !currentDraftId || composeSaveInFlight) return;
         b.disabled = true;
         invoke("delete_draft_attachment", {
           draftId: currentDraftId,
           attachmentId: att.id,
         })
           .then(() => {
-            composeServerAtts.splice(i, 1);
+            // Splice by id, not the captured index — another removal may have
+            // shifted the array while this request was in flight.
+            const idx = composeServerAtts.findIndex((x) => x.id === att.id);
+            if (idx >= 0) composeServerAtts.splice(idx, 1);
             renderComposeAttachments();
           })
           .catch((e) => {
@@ -3683,11 +3688,16 @@ async function resumeDraft(id: string): Promise<void> {
         const atts = await invoke<
           { id: string; name: string; contentType: string; size: number }[]
         >("attachments", { messageId: id });
+        // The compose may have moved on to another draft (or a fresh message)
+        // while the listing was in flight — never stamp chips onto it.
+        if (currentDraftId !== id) return;
         composeServerAtts = atts.map((a) => ({ id: a.id, name: a.name, size: a.size }));
         renderComposeAttachments();
       } catch {
-        composeMsg.textContent =
-          "This draft has attachments saved on the server — they will be sent with it.";
+        if (currentDraftId === id) {
+          composeMsg.textContent =
+            "This draft has attachments saved on the server — they will be sent with it.";
+        }
       }
     }
   } catch (e) {
@@ -3786,7 +3796,11 @@ async function saveDraft(): Promise<void> {
     currentDraftIsResumed = true;
     captureComposeBaseline();
     delete composeMsg.dataset.error;
-    composeMsg.textContent = "Draft saved.";
+    // Surface the threading tradeoff instead of leaving it to a code comment.
+    composeMsg.textContent =
+      currentReplyToId !== null
+        ? "Draft saved. A reply sent from a saved draft won't thread with the original conversation."
+        : "Draft saved.";
     await syncDraftsFolder();
   } catch (e) {
     composeMsg.dataset.error = "1";
@@ -3797,32 +3811,49 @@ async function saveDraft(): Promise<void> {
   }
 }
 
-async function sendCompose(): Promise<void> {
-  // Validate recipients up front so a garbage token (or a typo) is reported
-  // clearly rather than surfacing as a raw Graph 400.
+// Parse + validate the three recipient fields, reporting any problem in
+// composeMsg. Returns null when the compose can't be sent as-is.
+function readSendRecipients(): { to: string[]; cc: string[]; bcc: string[] } | null {
   const toParsed = parseAndValidate(cToInput.value);
   const ccParsed = parseAndValidate(cCcInput.value);
   const bccParsed = parseAndValidate(cBccInput.value);
   const badToken = toParsed.bad ?? ccParsed.bad ?? bccParsed.bad;
   if (badToken) {
     composeMsg.textContent = `"${badToken}" is not a valid email address.`;
-    return;
+    return null;
   }
-  const to = toParsed.addresses;
-  if (to.length === 0) {
+  if (toParsed.addresses.length === 0) {
     composeMsg.textContent = "Add at least one recipient.";
-    return;
+    return null;
   }
+  return { to: toParsed.addresses, cc: ccParsed.addresses, bcc: bccParsed.addresses };
+}
+
+async function sendCompose(): Promise<void> {
+  // Validate recipients up front so a garbage token (or a typo) is reported
+  // clearly rather than surfacing as a raw Graph 400 — and before the undo
+  // window opens, so the wait can't end in an avoidable validation error.
+  if (readSendRecipients() === null) return;
   if (composeSaveInFlight) return; // a draft save is in flight (#30) — don't double-send
-  // Undo-send window: give the user a moment to catch a mis-send. Resolves
-  // false when undone (stay in the editor with everything intact).
-  if (!(await undoSendCountdown())) return;
+  // Hold the save/send lock through the undo window so a debounced autosave
+  // can't interleave with the send (runAutosave sees the flag and requeues);
+  // release it when the user undoes.
   composeSaveInFlight = true;
   cancelAutosave();
+  if (!(await undoSendCountdown())) {
+    composeSaveInFlight = false;
+    return;
+  }
+  // The compose stays editable during the countdown, so read every field —
+  // recipients included — after it, never before: what you see is what sends.
+  const recipients = readSendRecipients();
+  if (recipients === null) {
+    composeSaveInFlight = false;
+    return;
+  }
   composeSendBtn.disabled = true;
   composeMsg.textContent = "Sending…";
-  const cc = ccParsed.addresses;
-  const bcc = bccParsed.addresses;
+  const { to, cc, bcc } = recipients;
   const subject = cSubjectInput.value;
   const bodyHtml = cBodyInput.innerHTML;
   const draftId = currentDraftId;

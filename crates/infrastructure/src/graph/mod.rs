@@ -832,20 +832,25 @@ impl MailProvider for GraphClient {
             .await
             .map_err(|e| MailError::Decode(e.to_string()))?;
 
-        // From here the draft exists server-side: on any failure, best-effort
+        // The draft now exists server-side: if preparing it fails, best-effort
         // delete it so an aborted send doesn't leave a skeleton in Drafts.
-        let result = async {
+        let prepared: Result<(), MailError> = async {
             self.update_draft(&draft.id, message).await?;
             for attachment in &message.attachments {
                 self.add_attachment(&draft.id, attachment).await?;
             }
-            self.send_draft(&draft.id).await
+            Ok(())
         }
         .await;
-        if result.is_err() {
+        if let Err(e) = prepared {
             let _ = self.delete_message(&draft.id, true).await;
+            return Err(e);
         }
-        result
+        // NO cleanup once the send is attempted: a send whose response is lost
+        // (network blip) may still have succeeded server-side, and deleting the
+        // draft then could destroy a message that was actually sent. A genuine
+        // send failure just leaves the finished reply in Drafts to retry.
+        self.send_draft(&draft.id).await
     }
 
     async fn create_draft(&self, message: &OutgoingMessage) -> Result<String, MailError> {
