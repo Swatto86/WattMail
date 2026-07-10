@@ -96,6 +96,66 @@ Entra app registration (public, not secret):
 
 ## Progress log
 
+### 2026-07-10 — Mail-gaps batch: signatures, undo send, reply threading, draft attachments (v0.3.0)
+- **Signature** — `settings.signature` (plain text, one global; ponytail: per-account
+  rich signatures if multi-account use demands them) edited via a Settings textarea;
+  inserted as an escaped-HTML block (`signatureHtml()`) below a blank typing line and
+  above any quoted original in new/reply/forward composes. Resumed drafts never
+  re-insert (their signature is already in the body).
+- **Undo send** — Send arms a 10s countdown inside the compose panel (Undo /
+  Send now swap in for the normal buttons; `undoSendCountdown()`). Every dismiss
+  during the window (Esc, backdrop, Cancel) = undo, via a guard at the top of
+  `requestCloseCompose`. The compose stays editable during the wait, so **all**
+  fields — recipients included — are read *after* it (`readSendRecipients()`
+  runs twice: fail-fast before, final truth after). The save/send lock
+  (`composeSaveInFlight`) is held through the window so the debounced autosave
+  can't interleave (`runAutosave` sees it and requeues).
+- **Reply threading** — new `MailProvider::send_reply(original_id, message)`
+  (default = plain unthreaded send, so future providers still work); Graph
+  override drafts via `POST /me/messages/{id}/createReply` (which carries
+  In-Reply-To/References/conversation — the headers a bare sendMail never sets),
+  PATCHes the client-composed subject/body/recipients over the skeleton, uploads
+  any attachments, then `POST /send`. The skeleton draft is best-effort deleted
+  when *preparing* it fails, but deliberately **never after the send is
+  attempted** — a lost HTTP response can mask a send that succeeded server-side,
+  and deleting then would destroy a sent message; a genuine send failure leaves
+  the finished reply in Drafts to retry. Frontend threads `replyToId` from
+  `replyTo()` → compose state → the `send_message` command. A reply explicitly
+  saved as a draft and then sent goes out unthreaded (the draft path can't
+  thread) — the save notice tells the user so.
+- **Draft attachments** — trait methods `add_draft_attachment` /
+  `delete_draft_attachment` (defaults `Unsupported`; Graph:
+  `POST`/`DELETE /me/messages/{id}/attachments[/{attachmentId}]`, single-item
+  `attachment_json` factored out of `attachments_json`). Command
+  `upload_draft_attachments` reuses the `collect_attachments` helper factored
+  from `send_message` (local paths + inline images + forwarded refs, same
+  ~2.5 MB batch guard). Explicit "Save draft" uploads pending local/forwarded
+  files, turns their chips into removable **server chips** (`composeServerAtts`,
+  spliced by id — never by captured index — so overlapping removals can't
+  corrupt the list), recaptures the dirty baseline, and flips the compose to the
+  draft-send path (`currentDraftIsResumed = true`). Resume lists the draft's
+  server attachments as chips (stale-session guarded). A resumed send extracts
+  inline `data:` images → uploads them as `cid:` inline attachments → saves the
+  cid-rewritten body → `/send`s; uploads convert to server state *before* the
+  send so a failed send retries without re-uploading. Both old "attachments
+  aren't supported on drafts" guards are gone; the silent autosave still saves
+  body/recipients only. Ceilings (accepted, in code comments): the size guard is
+  per-batch, not cumulative across saves; a partial upload followed by a retry
+  can duplicate an attachment; quitting the app mid-countdown drops the pending
+  send (the autosaved draft remains).
+- **Adversarial review** (3 independent finder lenses over the whole diff, every
+  candidate verified against the code): 10 real findings → 6 fixed (stale
+  recipients captured before the undo window; autosave/send interleave; over-eager
+  send_reply cleanup; chip-removal index race; stale resume attachment fetch;
+  threading tradeoff invisible to the user), 4 accepted as the documented
+  ceilings above.
+- **Verification level: compile + full workspace tests + tsc/vite green + the
+  review above; NOT live-run.** The new Graph wire surface (createReply,
+  attachment POST/DELETE) reuses proven request helpers and decodes only `{id}`
+  (unit-tested), so the v0.1.13-class decode risk is low — but reply threading
+  and draft-attachment round-trips should be sanity-checked against the real
+  mailbox on first use.
+
 ### 2026-07-07 — Multi-select + bulk "Save to Desktop" (v0.2.11)
 Ctrl/Cmd+click toggles rows into a multi-selection and Shift+click
 range-selects from the anchor row (the last plain/Ctrl-clicked one); neither
@@ -1232,12 +1292,14 @@ pending (needs a signed-in window).
   `fileAttachment`s (`cid:`/`isInline`) under the same ~3 MB cap (enforced client-side at send).
   Only `fileAttachment`s are listed — `itemAttachment` (embedded messages) and `referenceAttachment`
   (links) aren't shown. Outgoing MIME type is guessed from the file extension.
-- **Reply threading** — replies go via `sendMail`, so they don't set `In-Reply-To`/`References`
-  and won't thread into the conversation in the recipient's client (the `Re:` subject groups
-  loosely). Still deferred. (Rich-text compose, attachments, an editable quoted original,
-  **drafts**, a **resizable/maximizable** window, **sanitized rich-HTML paste** and **inline
-  images** are all done — v0.1.11–0.1.12. Drafts deferral: file *and* inline-image attachments
-  aren't saved on a draft yet; compose warns/blocks rather than dropping them silently.)
+- **Reply threading — ✓ resolved (v0.3.0):** replies now send via Graph `createReply` →
+  PATCH → send, carrying `In-Reply-To`/`References` (see the v0.3.0 progress entry).
+  Residual: a reply explicitly saved as a draft then sent goes out unthreaded (the
+  draft-send path can't thread); the save notice says so.
+- **Draft attachments — ✓ resolved (v0.3.0):** explicit "Save draft" persists
+  local/forwarded attachments onto the server draft; resume lists them as removable
+  chips; resumed sends convert inline images to `cid:` attachments. Residual ceilings:
+  per-batch size guard only; partial-upload retry can duplicate an attachment.
 - **Multi-account model** — ✓ resolved (v0.1.16/0.1.17): full per-account isolation —
   each account has its own keyring namespace + `cache-{slug}-{id}.db`, behind the
   `AccountManager` composition root, with legacy single-account adoption on first launch.
@@ -1346,18 +1408,21 @@ folder-switch frontend races; prod CSP. See the v0.1.18 progress entry.
   non-null assertion can run post-sign-out (main.ts:1870-1876); main.ts is a
   3300-line monolith with the security-sensitive paste sanitizer buried in it.
 
-**Feature gaps (prioritized, none done):** *Now* — per-account signatures + templates
-(M); reply threading headers In-Reply-To/References (M, still broken — cheapest via
-Graph `createReply`); junk/block-sender (S, reuses rules + move). *Next* — unified
-inbox across accounts (L, registry already holds all accounts); recipient autocomplete
-(L, needs `People.Read`); bulk multi-select (M); undo-send (S, client-side). *Later* —
-conversation/threaded view (L, blocked on whole-folder server-side date sort),
-large-attachment upload sessions (L), snooze (L).
+**Feature gaps (prioritized):** *Done in v0.3.0* — signature (global), reply
+threading (`createReply`), undo-send, draft attachments. *Remaining* —
+junk/block-sender (S, reuses rules + move); templates (S); unified inbox across
+accounts (L); conversation/threaded view (L, blocked on whole-folder server-side
+date sort); large-attachment upload sessions (L, only if the ~2.5 MB cap bites);
+snooze (L). Next major direction per 2026-07-10 planning: **calendar completion**
+(in-email meeting-invite RSVP, event reminders, event editing, week/month grid).
 
 **Shipped in v0.2.12 (2026-07-10):** Compose To/Cc/Bcc fields suggest unique
 email addresses seen in the active account's encrypted local message cache
 (incoming senders and outgoing recipient summaries), without adding a provider
 contacts permission. Suggestions remain optional if the cache is unavailable.
+
+**Shipped in v0.3.0 (2026-07-10):** the mail-gaps batch — signature, undo send,
+reply threading, draft attachments (details in the progress log).
 
 ---
 
