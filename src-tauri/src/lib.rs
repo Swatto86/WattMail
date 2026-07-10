@@ -135,6 +135,8 @@ pub fn run() {
             commands::started_hidden,
             commands::get_notification_setting,
             commands::set_notification_setting,
+            commands::get_signature,
+            commands::set_signature,
             commands::check_new_mail,
             commands::list_message_rules,
             commands::create_message_rule,

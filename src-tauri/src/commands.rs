@@ -972,6 +972,30 @@ pub fn set_notification_setting(
     settings::save(&updated).map_err(|e| e.to_string())
 }
 
+/// The user's plain-text signature ("" = none).
+#[tauri::command]
+pub fn get_signature(state: State<'_, SettingsState>) -> String {
+    state
+        .0
+        .read()
+        .map(|s| s.signature.clone())
+        .unwrap_or_default()
+}
+
+/// Set the plain-text signature, persisting the setting.
+#[tauri::command]
+pub fn set_signature(state: State<'_, SettingsState>, value: String) -> Result<(), String> {
+    let updated = {
+        let mut guard = state
+            .0
+            .write()
+            .map_err(|_| "settings lock poisoned".to_string())?;
+        guard.signature = value;
+        guard.clone()
+    };
+    settings::save(&updated).map_err(|e| e.to_string())
+}
+
 /// Check the Inbox cache for messages newer than the last-notified timestamp and
 /// return info about the new batch so the frontend can show a notification.
 /// Returns `None` when notifications are disabled or there are no new messages.

@@ -441,6 +441,10 @@ appRoot.innerHTML = /* html */ `
         <span>Show notifications for new mail<br /><span class="hint">A desktop alert when unread messages arrive in the Inbox</span></span>
         <input type="checkbox" id="set-notifications" class="toggle toggle-sm toggle-primary" />
       </label>
+      <label class="settings-row">
+        <span>Signature<br /><span class="hint">Added to new messages, replies, and forwards</span></span>
+        <textarea id="set-signature" class="textarea textarea-bordered textarea-sm signature-input" rows="3" placeholder="None"></textarea>
+      </label>
       <div class="settings-row" id="rules-row">
         <span>Inbox rules<br /><span class="hint">Server-side rules that move or mark messages on arrival</span></span>
         <button id="rules-btn" class="btn btn-sm">Rules&hellip;</button>
@@ -673,6 +677,7 @@ const headersCloseBtn = document.querySelector<HTMLButtonElement>("#headers-clos
 
 // ---- Notification / rules / shortcuts element refs ----
 const setNotifications = document.querySelector<HTMLInputElement>("#set-notifications")!;
+const setSignature = document.querySelector<HTMLTextAreaElement>("#set-signature")!;
 const rulesBtn = document.querySelector<HTMLButtonElement>("#rules-btn")!;
 const rulesOverlay = document.querySelector<HTMLDivElement>("#rules-overlay")!;
 const rulesMsg = document.querySelector<HTMLDivElement>("#rules-msg")!;
@@ -2810,6 +2815,9 @@ function openSettings(): void {
   invoke<boolean>("get_notification_setting")
     .then((v) => (setNotifications.checked = v))
     .catch(() => {});
+  invoke<string>("get_signature")
+    .then((v) => (setSignature.value = v))
+    .catch(() => {});
   settingsOverlay.classList.remove("hidden");
 }
 function closeSettings(): void {
@@ -3257,6 +3265,18 @@ async function pickAttachments(): Promise<void> {
   renderComposeAttachments();
 }
 
+// The user's signature, cached at boot (and on save) so the synchronous
+// openCompose can insert it without an await.
+let signatureText = "";
+
+// The signature as safe HTML: escaped plain-text lines joined with <br>,
+// wrapped in a div so it sits as its own block above any quoted original.
+function signatureHtml(): string {
+  const text = signatureText.trim();
+  if (!text) return "";
+  return `<div>${text.split("\n").map((line) => esc(line.trimEnd())).join("<br>")}</div>`;
+}
+
 function openCompose(opts: {
   title: string;
   to: string[];
@@ -3290,7 +3310,11 @@ function openCompose(opts: {
   if (opts.bodyHtml !== undefined) {
     cBodyInput.innerHTML = sanitizeHtml(opts.bodyHtml);
   } else {
-    cBodyInput.innerHTML = opts.quotedHtml ? `<p><br></p>${opts.quotedHtml}` : "";
+    // Blank line for typing, then the signature, then any quoted original.
+    // A resumed draft (bodyHtml) never re-inserts — its signature is already in.
+    const sig = signatureHtml();
+    const rest = `${sig}${opts.quotedHtml ?? ""}`;
+    cBodyInput.innerHTML = rest ? `<p><br></p>${rest}` : "";
   }
   composeAttachPaths = [];
   composeForwardedAtts = opts.forwardedAtts ? [...opts.forwardedAtts] : [];
@@ -4601,6 +4625,12 @@ setNotifications.addEventListener("change", async () => {
     setNotifications.checked = !want;
   }
 });
+setSignature.addEventListener("change", () => {
+  const value = setSignature.value;
+  invoke("set_signature", { value })
+    .then(() => (signatureText = value))
+    .catch((e) => (settingsMsg.textContent = `Could not save signature: ${e}`));
+});
 rulesBtn.addEventListener("click", () => void openRules());
 settingsOverlay.addEventListener("click", (e) => {
   if (e.target === settingsOverlay) closeSettings();
@@ -4799,6 +4829,9 @@ async function boot(): Promise<void> {
   } catch {
     /* version unavailable in dev is fine */
   }
+  invoke<string>("get_signature")
+    .then((v) => (signatureText = v))
+    .catch(() => {});
   try {
     const signedIn = await invoke<boolean>("is_signed_in");
     if (signedIn) {

@@ -14,6 +14,11 @@ pub struct Settings {
     pub close_to_tray: bool,
     /// Show a native OS notification when new unread mail arrives.
     pub notifications_enabled: bool,
+    /// Plain-text signature appended to new messages, replies, and forwards.
+    /// Empty = no signature. Converted to HTML (escaped, line breaks) at insert.
+    // ponytail: plain text + one global signature; per-account rich-HTML
+    // signatures if multi-account use ever demands them.
+    pub signature: String,
 }
 
 impl Default for Settings {
@@ -21,6 +26,7 @@ impl Default for Settings {
         Self {
             close_to_tray: true,
             notifications_enabled: true,
+            signature: String::new(),
         }
     }
 }

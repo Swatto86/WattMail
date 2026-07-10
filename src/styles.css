@@ -393,6 +393,12 @@ body,
   font-size: 11px;
   opacity: 0.6;
 }
+.signature-input {
+  width: 15rem;
+  flex-shrink: 0;
+  resize: vertical;
+  font-size: 12px;
+}
 .settings-msg {
   min-height: 18px;
   font-size: 12px;
