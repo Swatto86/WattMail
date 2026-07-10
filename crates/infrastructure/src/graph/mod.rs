@@ -1055,7 +1055,7 @@ fn flag_is_flagged(flag: Option<&GraphFlag>) -> bool {
         .unwrap_or(false)
 }
 
-#[derive(serde::Deserialize)]
+#[derive(Clone, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(super) struct GraphRecipient {
     pub(super) email_address: GraphEmailAddress,
@@ -1367,12 +1367,9 @@ fn recipients_summary(recipients: Option<Vec<GraphRecipient>>) -> String {
     let Some(first) = recipients.first() else {
         return "(no recipient)".to_string();
     };
-    let label = first
-        .email_address
-        .name
-        .clone()
-        .or_else(|| first.email_address.address.clone())
-        .unwrap_or_else(|| "(unknown)".to_string());
+    // Preserve the address so cached Sent Items can feed compose autocomplete
+    // without requesting a separate contacts/People permission.
+    let label = format_recipient(Some(first.clone()));
     if recipients.len() > 1 {
         format!("{label} +{}", recipients.len() - 1)
     } else {
@@ -1457,7 +1454,7 @@ pub(super) fn format_recipient(recipient: Option<GraphRecipient>) -> String {
         .unwrap_or_else(|| "(unknown)".to_string())
 }
 
-#[derive(serde::Deserialize)]
+#[derive(Clone, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(super) struct GraphEmailAddress {
     pub(super) name: Option<String>,

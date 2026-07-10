@@ -145,6 +145,48 @@ impl SqliteStore {
             .ok()?;
         encrypted.and_then(|v| self.cipher.try_decrypt(&v))
     }
+
+    /// Recently seen incoming senders and outgoing recipients.
+    pub async fn correspondent_suggestions(&self) -> Result<Vec<String>, MailError> {
+        let encrypted = self
+            .run(|conn| {
+                let mut stmt =
+                    conn.prepare("SELECT sender, recipients FROM messages ORDER BY received DESC")?;
+                let rows = stmt.query_map([], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                })?;
+                rows.collect::<rusqlite::Result<Vec<_>>>()
+            })
+            .await?;
+        let values = encrypted.into_iter().flat_map(|(sender, recipients)| {
+            [
+                self.cipher.decrypt(&sender),
+                self.cipher.decrypt(&recipients),
+            ]
+        });
+        Ok(unique_email_addresses(values))
+    }
+}
+
+fn unique_email_addresses(values: impl IntoIterator<Item = String>) -> Vec<String> {
+    let mut seen = std::collections::HashSet::new();
+    let mut addresses = Vec::new();
+    for value in values {
+        for token in value.split([',', ';']) {
+            let candidate = token
+                .split_once('<')
+                .and_then(|(_, tail)| tail.split_once('>').map(|(address, _)| address))
+                .unwrap_or(token)
+                .trim();
+            if candidate.contains('@')
+                && !candidate.contains(char::is_whitespace)
+                && seen.insert(candidate.to_ascii_lowercase())
+            {
+                addresses.push(candidate.to_string());
+            }
+        }
+    }
+    addresses
 }
 
 /// Create the schema, dropping and rebuilding on a version mismatch.
@@ -453,6 +495,19 @@ fn storage_err(e: impl std::fmt::Display) -> MailError {
 mod tests {
     use super::*;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn correspondent_addresses_are_extracted_and_deduplicated() {
+        let values = vec![
+            "Ada Lovelace <ada@example.com>".to_string(),
+            "ada@example.com, Bob <bob@example.net>".to_string(),
+            "(no recipient)".to_string(),
+        ];
+        assert_eq!(
+            unique_email_addresses(values),
+            vec!["ada@example.com", "bob@example.net"]
+        );
+    }
 
     fn temp_db(name: &str) -> std::path::PathBuf {
         let nanos = SystemTime::now()

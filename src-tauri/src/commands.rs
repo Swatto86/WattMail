@@ -465,6 +465,18 @@ pub struct ComposeDto {
     pub quoted_html: String,
 }
 
+#[tauri::command]
+pub async fn correspondent_suggestions(
+    accounts: State<'_, AccountManager>,
+) -> Result<Vec<String>, String> {
+    let account = accounts.active()?;
+    account
+        .store
+        .correspondent_suggestions()
+        .await
+        .map_err(|e| e.to_string())
+}
+
 /// Build a reply / reply-all prefill from a message.
 #[tauri::command]
 pub async fn prepare_reply(

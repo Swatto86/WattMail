@@ -1354,6 +1354,11 @@ inbox across accounts (L, registry already holds all accounts); recipient autoco
 conversation/threaded view (L, blocked on whole-folder server-side date sort),
 large-attachment upload sessions (L), snooze (L).
 
+**Shipped in v0.2.12 (2026-07-10):** Compose To/Cc/Bcc fields suggest unique
+email addresses seen in the active account's encrypted local message cache
+(incoming senders and outgoing recipient summaries), without adding a provider
+contacts permission. Suggestions remain optional if the cache is unavailable.
+
 ---
 
 ## IMAP / SMTP — built, parked on `feature/imap-accounts`

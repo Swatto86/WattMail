@@ -504,6 +504,7 @@ appRoot.innerHTML = /* html */ `
       <input id="c-to" class="input input-bordered input-sm compose-input" placeholder="To (comma-separated)" autocomplete="off" />
       <input id="c-cc" class="input input-bordered input-sm compose-input" placeholder="Cc" autocomplete="off" />
       <input id="c-bcc" class="input input-bordered input-sm compose-input" placeholder="Bcc" autocomplete="off" />
+      <div id="correspondents" class="correspondent-suggestions hidden" role="listbox"></div>
       <input id="c-subject" class="input input-bordered input-sm compose-input" placeholder="Subject" autocomplete="off" />
       <div id="c-toolbar" class="compose-toolbar">
         <button type="button" data-cmd="bold" title="Bold"><b>B</b></button>
@@ -653,6 +654,7 @@ const composeTitle = document.querySelector<HTMLDivElement>("#compose-title")!;
 const cToInput = document.querySelector<HTMLInputElement>("#c-to")!;
 const cCcInput = document.querySelector<HTMLInputElement>("#c-cc")!;
 const cBccInput = document.querySelector<HTMLInputElement>("#c-bcc")!;
+const correspondentsList = document.querySelector<HTMLDivElement>("#correspondents")!;
 const cSubjectInput = document.querySelector<HTMLInputElement>("#c-subject")!;
 const cBodyInput = document.querySelector<HTMLDivElement>("#c-body")!;
 const composeToolbar = document.querySelector<HTMLDivElement>("#c-toolbar")!;
@@ -3159,6 +3161,62 @@ let currentDraftIsResumed = false;
 // Send during an in-flight save can't create a duplicate, and an autosave never
 // races a send.
 let composeSaveInFlight = false;
+let correspondentsLoadedFor = "";
+let correspondentAddresses: string[] = [];
+
+async function loadCorrespondentSuggestions(): Promise<void> {
+  if (correspondentsLoadedFor === accountEmail) return;
+  try {
+    const addresses = await invoke<string[]>("correspondent_suggestions");
+    correspondentAddresses = addresses.filter(
+      (address) => address.toLowerCase() !== accountEmail.toLowerCase(),
+    );
+    correspondentsLoadedFor = accountEmail;
+  } catch {
+    // Cache suggestions are optional; composing must remain available offline.
+  }
+}
+
+function hideCorrespondentSuggestions(): void {
+  correspondentsList.classList.add("hidden");
+}
+
+function showCorrespondentSuggestions(input: HTMLInputElement): void {
+  const start = Math.max(input.value.lastIndexOf(","), input.value.lastIndexOf(";")) + 1;
+  const query = input.value.slice(start).trim().toLowerCase();
+  const existing = new Set(parseAddresses(input.value).map((a) => a.toLowerCase()));
+  const matches = correspondentAddresses
+    .filter((address) => !existing.has(address.toLowerCase()) && address.toLowerCase().includes(query))
+    .slice(0, 8);
+  if (!matches.length) {
+    hideCorrespondentSuggestions();
+    return;
+  }
+  correspondentsList.replaceChildren(
+    ...matches.map((address) => {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.role = "option";
+      button.textContent = address;
+      button.addEventListener("mousedown", (event) => {
+        event.preventDefault();
+        const prefix = input.value.slice(0, start);
+        input.value = `${prefix}${prefix ? " " : ""}${address}, `;
+        input.dispatchEvent(new Event("input", { bubbles: true }));
+        hideCorrespondentSuggestions();
+        input.focus();
+      });
+      return button;
+    }),
+  );
+  const rect = input.getBoundingClientRect();
+  Object.assign(correspondentsList.style, {
+    left: `${rect.left}px`,
+    top: `${rect.bottom + 2}px`,
+    width: `${rect.width}px`,
+  });
+  correspondentsList.classList.remove("hidden");
+}
 
 function renderComposeAttachments(): void {
   // Local file attachments (any compose mode can add them via the picker).
@@ -3217,6 +3275,7 @@ function openCompose(opts: {
   // The user can remove any of these individually before sending.
   forwardedAtts?: ForwardedAttachmentInfo[];
 }): void {
+  void loadCorrespondentSuggestions();
   currentDraftId = opts.draftId ?? null;
   currentDraftIsResumed = opts.draftIsResumed ?? false;
   composeTitle.textContent = opts.title;
@@ -4375,6 +4434,14 @@ cAttachBtn.addEventListener("click", () => void pickAttachments());
 // litter Drafts until the user actually types.
 for (const field of [cToInput, cCcInput, cBccInput, cSubjectInput]) {
   field.addEventListener("input", scheduleAutosave);
+}
+for (const field of [cToInput, cCcInput, cBccInput]) {
+  field.addEventListener("focus", () => showCorrespondentSuggestions(field));
+  field.addEventListener("input", () => showCorrespondentSuggestions(field));
+  field.addEventListener("blur", () => setTimeout(hideCorrespondentSuggestions));
+  field.addEventListener("keydown", (event) => {
+    if (event.key === "Escape") hideCorrespondentSuggestions();
+  });
 }
 cBodyInput.addEventListener("input", scheduleAutosave);
 // Rich-text editing via execCommand (deprecated but universally supported in the

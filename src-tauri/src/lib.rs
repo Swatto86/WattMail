@@ -113,6 +113,7 @@ pub fn run() {
             commands::message_headers,
             commands::prepare_reply,
             commands::prepare_forward,
+            commands::correspondent_suggestions,
             commands::send_message,
             commands::save_draft,
             commands::send_draft,
