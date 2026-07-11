@@ -683,6 +683,19 @@ pub trait CalendarProvider: Send + Sync {
         time_zone: &str,
     ) -> Result<CalendarEvent, MailError>;
 
+    /// Replace an existing event's editable fields (subject, times, location,
+    /// body, attendees) with `event`, times interpreted in `time_zone`. Returns
+    /// the updated event (in `time_zone`). The caller should only offer this
+    /// for events the user organizes. Default: unsupported.
+    async fn update_event(
+        &self,
+        _id: &str,
+        _event: &NewEvent,
+        _time_zone: &str,
+    ) -> Result<CalendarEvent, MailError> {
+        Err(MailError::Unsupported)
+    }
+
     /// Reply to a meeting invitation. `comment` is an optional note to the
     /// organizer; `send_response` controls whether a reply email is sent.
     async fn respond_to_event(

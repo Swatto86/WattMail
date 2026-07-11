@@ -410,6 +410,16 @@ pub async fn create_event(
     provider.create_event(event, time_zone).await
 }
 
+/// Replace an existing event's editable fields, times interpreted in `time_zone`.
+pub async fn update_event(
+    provider: &dyn CalendarProvider,
+    id: &str,
+    event: &NewEvent,
+    time_zone: &str,
+) -> Result<CalendarEvent, MailError> {
+    provider.update_event(id, event, time_zone).await
+}
+
 /// Reply to a meeting invitation (accept / tentative / decline).
 pub async fn respond_to_event(
     provider: &dyn CalendarProvider,

@@ -100,35 +100,12 @@ impl CalendarProvider for GraphClient {
         let tz = sanitize_timezone(time_zone);
         let prefer = format!("outlook.timezone=\"{tz}\", outlook.body-content-type=\"html\"");
 
-        let attendees: Vec<serde_json::Value> = event
-            .attendees
-            .iter()
-            .map(|a| a.trim())
-            .filter(|a| !a.is_empty())
-            .map(|address| {
-                serde_json::json!({
-                    "emailAddress": { "address": address },
-                    "type": "required",
-                })
-            })
-            .collect();
-
-        let payload = serde_json::json!({
-            "subject": event.subject,
-            "body": { "contentType": "HTML", "content": event.body_html },
-            "start": { "dateTime": event.start.date_time, "timeZone": tz },
-            "end": { "dateTime": event.end.date_time, "timeZone": tz },
-            "isAllDay": event.is_all_day,
-            "location": { "displayName": event.location },
-            "attendees": attendees,
-        });
-
         let response = self
             .http()
             .post(format!("{GRAPH_BASE}/me/events"))
             .bearer_auth(self.token())
             .header("Prefer", &prefer)
-            .json(&payload)
+            .json(&event_payload(event, &tz))
             .send()
             .await
             .map_err(|e| MailError::Network(e.to_string()))?;
@@ -139,6 +116,36 @@ impl CalendarProvider for GraphClient {
             .map_err(|e| MailError::Decode(e.to_string()))?;
 
         Ok(to_domain_event(created, &tz))
+    }
+
+    async fn update_event(
+        &self,
+        id: &str,
+        event: &NewEvent,
+        time_zone: &str,
+    ) -> Result<CalendarEvent, MailError> {
+        let tz = sanitize_timezone(time_zone);
+        let prefer = format!("outlook.timezone=\"{tz}\", outlook.body-content-type=\"html\"");
+
+        // PATCH /me/events/{id} replaces the supplied fields in place (the
+        // attendee list is replaced wholesale); Graph returns the updated
+        // event and, for a meeting, sends attendees an update.
+        let response = self
+            .http()
+            .patch(event_endpoint(id).as_str())
+            .bearer_auth(self.token())
+            .header("Prefer", &prefer)
+            .json(&event_payload(event, &tz))
+            .send()
+            .await
+            .map_err(|e| MailError::Network(e.to_string()))?;
+        let updated: GraphEvent = check_status(response)
+            .await?
+            .json()
+            .await
+            .map_err(|e| MailError::Decode(e.to_string()))?;
+
+        Ok(to_domain_event(updated, &tz))
     }
 
     async fn respond_to_event(
@@ -185,6 +192,34 @@ impl CalendarProvider for GraphClient {
         check_status(response).await?;
         Ok(())
     }
+}
+
+/// The Graph JSON for an event's editable fields, shared by create (POST) and
+/// update (PATCH — Graph replaces exactly the fields present, so both send the
+/// same full set).
+fn event_payload(event: &NewEvent, tz: &str) -> serde_json::Value {
+    let attendees: Vec<serde_json::Value> = event
+        .attendees
+        .iter()
+        .map(|a| a.trim())
+        .filter(|a| !a.is_empty())
+        .map(|address| {
+            serde_json::json!({
+                "emailAddress": { "address": address },
+                "type": "required",
+            })
+        })
+        .collect();
+
+    serde_json::json!({
+        "subject": event.subject,
+        "body": { "contentType": "HTML", "content": event.body_html },
+        "start": { "dateTime": event.start.date_time, "timeZone": tz },
+        "end": { "dateTime": event.end.date_time, "timeZone": tz },
+        "isAllDay": event.is_all_day,
+        "location": { "displayName": event.location },
+        "attendees": attendees,
+    })
 }
 
 /// Build the `/me/events/{id}` endpoint with the opaque id encoded as a single
@@ -570,6 +605,36 @@ mod tests {
         assert_eq!(http_url(Some("ms-msdt:/id".to_string())), None);
         assert_eq!(http_url(Some(String::new())), None);
         assert_eq!(http_url(None), None);
+    }
+
+    #[test]
+    fn event_payload_carries_zoned_times_and_required_attendees() {
+        let event = NewEvent {
+            subject: "Standup".into(),
+            start: EventDateTime {
+                date_time: "2026-07-13T09:00:00".into(),
+                time_zone: "Europe/London".into(),
+            },
+            end: EventDateTime {
+                date_time: "2026-07-13T09:15:00".into(),
+                time_zone: "Europe/London".into(),
+            },
+            is_all_day: false,
+            location: "Room 2".into(),
+            body_html: "<p>Notes</p>".into(),
+            attendees: vec!["a@x.io".into(), " ".into(), "b@y.io".into()],
+        };
+        let json = event_payload(&event, "Europe/London");
+        assert_eq!(json["subject"], "Standup");
+        assert_eq!(json["start"]["dateTime"], "2026-07-13T09:00:00");
+        assert_eq!(json["start"]["timeZone"], "Europe/London");
+        assert_eq!(json["isAllDay"], false);
+        assert_eq!(json["location"]["displayName"], "Room 2");
+        // Blank attendee tokens are dropped; the rest are required invitees.
+        let attendees = json["attendees"].as_array().expect("array");
+        assert_eq!(attendees.len(), 2);
+        assert_eq!(attendees[0]["emailAddress"]["address"], "a@x.io");
+        assert_eq!(attendees[0]["type"], "required");
     }
 
     #[test]

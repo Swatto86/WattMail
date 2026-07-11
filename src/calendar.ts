@@ -62,6 +62,7 @@ let loadSeq = 0; // guards against out-of-order responses on rapid nav
 
 // Create-event modal refs (built once, appended to <body>).
 let eventOverlay: HTMLDivElement;
+let evTitle: HTMLDivElement;
 let evSubject: HTMLInputElement;
 let evAllDay: HTMLInputElement;
 let evStartDate: HTMLInputElement;
@@ -73,6 +74,13 @@ let evAttendees: HTMLInputElement;
 let evBody: HTMLTextAreaElement;
 let evMsg: HTMLDivElement;
 let evSave: HTMLButtonElement;
+// The event being edited (null = the modal is creating a new event). While
+// editing, the description textarea holds the body as plain text; if the user
+// leaves it untouched we send back the original HTML so a rich body written in
+// Outlook isn't flattened by a time-only edit.
+let editingId: string | null = null;
+let editingBodyText = "";
+let editingBodyHtml = "";
 // The two time <input>s only — hidden in all-day mode. NOT their .settings-row,
 // which also wraps the date pickers (those must stay visible for all-day events).
 let evTimeInputs: HTMLInputElement[] = [];
@@ -447,7 +455,13 @@ function renderDetail(ev: CalendarEvent): void {
         <button class="btn btn-xs" data-rsvp="decline">Decline</button>
       </div>`;
   } else if (ev.isOrganizer) {
-    actions = `<div class="cal-rsvp"><button class="btn btn-xs btn-error" data-cal-delete="1">Delete event</button></div>`;
+    // Recurrence editing is out of scope: occurrences/exceptions get no Edit
+    // (a PATCH on an occurrence id would fork it in surprising ways).
+    const edit =
+      !ev.isRecurring && !ev.isCancelled
+        ? `<button class="btn btn-xs" data-cal-edit="1">Edit</button>`
+        : "";
+    actions = `<div class="cal-rsvp">${edit}<button class="btn btn-xs btn-error" data-cal-delete="1">Delete event</button></div>`;
   }
 
   const join = ev.onlineMeetingUrl
@@ -502,6 +516,9 @@ function renderDetail(ev: CalendarEvent): void {
   });
   detailEl.querySelector<HTMLButtonElement>("[data-cal-delete]")?.addEventListener("click", () => {
     void deleteEvent(ev);
+  });
+  detailEl.querySelector<HTMLButtonElement>("[data-cal-edit]")?.addEventListener("click", () => {
+    openEventModal(ev);
   });
 }
 
@@ -613,6 +630,7 @@ function buildEventModal(): void {
     </div>`;
   document.body.appendChild(eventOverlay);
 
+  evTitle = eventOverlay.querySelector<HTMLDivElement>(".settings-title")!;
   evSubject = eventOverlay.querySelector<HTMLInputElement>("#ev-subject")!;
   evAllDay = eventOverlay.querySelector<HTMLInputElement>("#ev-allday")!;
   evStartDate = eventOverlay.querySelector<HTMLInputElement>("#ev-start-date")!;
@@ -644,29 +662,58 @@ function reflectAllDay(): void {
   evTimeInputs.forEach((el) => el.classList.toggle("hidden", allDay));
 }
 
-function openEventModal(): void {
+// Extract readable plain text from an HTML body, for the edit textarea. The
+// input is the server-sanitized body (no scripts), parsed inert via DOMParser.
+function htmlToPlainText(html: string): string {
+  const doc = new DOMParser().parseFromString(html, "text/html");
+  return (doc.body.textContent ?? "").trim();
+}
+
+// Open the modal to create a new event, or — given `ev` — to edit it in place.
+function openEventModal(ev?: CalendarEvent): void {
+  editingId = ev?.id ?? null;
+  evTitle.textContent = ev ? "Edit event" : "New event";
+  evSave.textContent = ev ? "Save changes" : "Create event";
   evMsg.textContent = "";
-  evSubject.value = "";
-  evLocation.value = "";
-  evAttendees.value = "";
-  evBody.value = "";
-  evAllDay.checked = false;
+  evSubject.value = ev?.subject ?? "";
+  evLocation.value = ev?.location ?? "";
+  evAttendees.value = ev ? ev.attendees.map((a) => a.email).join(", ") : "";
+  editingBodyHtml = ev?.bodyHtml ?? "";
+  editingBodyText = ev ? htmlToPlainText(ev.bodyHtml) : "";
+  evBody.value = editingBodyText;
+  evAllDay.checked = ev?.isAllDay ?? false;
   reflectAllDay();
 
-  // Default to the first visible day, next round hour, 1-hour duration.
-  const base = new Date(rangeStart);
-  const now = new Date();
-  if (dayKey(base) === dayKey(startOfToday())) {
-    base.setHours(now.getHours() + 1, 0, 0, 0);
+  if (ev) {
+    const start = parseLocal(ev.start);
+    const end = parseLocal(ev.end);
+    evStartDate.value = dayKey(start);
+    evStartTime.value = `${pad(start.getHours())}:${pad(start.getMinutes())}`;
+    if (ev.isAllDay) {
+      // The stored all-day end is the exclusive next midnight; the form shows
+      // the inclusive last day (save adds the day back).
+      evEndDate.value = dayKey(addDays(end, -1));
+      evEndTime.value = "10:00";
+    } else {
+      evEndDate.value = dayKey(end);
+      evEndTime.value = `${pad(end.getHours())}:${pad(end.getMinutes())}`;
+    }
   } else {
-    base.setHours(9, 0, 0, 0);
+    // Default to the first visible day, next round hour, 1-hour duration.
+    const base = new Date(rangeStart);
+    const now = new Date();
+    if (dayKey(base) === dayKey(startOfToday())) {
+      base.setHours(now.getHours() + 1, 0, 0, 0);
+    } else {
+      base.setHours(9, 0, 0, 0);
+    }
+    const end = new Date(base);
+    end.setHours(base.getHours() + 1);
+    evStartDate.value = dayKey(base);
+    evStartTime.value = `${pad(base.getHours())}:${pad(base.getMinutes())}`;
+    evEndDate.value = dayKey(end);
+    evEndTime.value = `${pad(end.getHours())}:${pad(end.getMinutes())}`;
   }
-  const end = new Date(base);
-  end.setHours(base.getHours() + 1);
-  evStartDate.value = dayKey(base);
-  evStartTime.value = `${pad(base.getHours())}:${pad(base.getMinutes())}`;
-  evEndDate.value = dayKey(end);
-  evEndTime.value = `${pad(end.getHours())}:${pad(end.getMinutes())}`;
 
   eventOverlay.classList.remove("hidden");
   evSubject.focus();
@@ -733,31 +780,41 @@ async function saveEvent(): Promise<void> {
     attendees.push(addr);
   }
 
+  // An untouched description round-trips the original (sanitized) HTML, so a
+  // time-only edit never flattens a rich body to plain text.
+  const bodyHtml =
+    editingId && evBody.value.trim() === editingBodyText
+      ? editingBodyHtml
+      : plainToHtml(evBody.value);
+  const payload = {
+    event: {
+      subject,
+      start,
+      end,
+      isAllDay: allDay,
+      location: evLocation.value.trim(),
+      bodyHtml,
+      attendees,
+    },
+    timeZone: IANA_ZONE,
+  };
+
   evSave.disabled = true;
-  evMsg.textContent = "Creating…";
+  evMsg.textContent = editingId ? "Saving…" : "Creating…";
   try {
-    const created = await invoke<CalendarEvent>("create_event", {
-      event: {
-        subject,
-        start,
-        end,
-        isAllDay: allDay,
-        location: evLocation.value.trim(),
-        bodyHtml: plainToHtml(evBody.value),
-        attendees,
-      },
-      timeZone: IANA_ZONE,
-    });
+    const saved = editingId
+      ? await invoke<CalendarEvent>("update_event", { id: editingId, ...payload })
+      : await invoke<CalendarEvent>("create_event", payload);
     closeEventModal();
-    // Jump the view to the new event's week so it's visible, then select it.
-    const startDate = parseLocal(created.start);
+    // Jump the view to the event's week so it's visible, then select it.
+    const startDate = parseLocal(saved.start);
     if (!isNaN(startDate.getTime())) {
       rangeStart = startOfDay(startDate);
     }
-    selectedId = created.id;
+    selectedId = saved.id;
     await loadCalendar();
   } catch (e) {
-    evMsg.textContent = `Could not create event: ${String(e)}`;
+    evMsg.textContent = `Could not ${editingId ? "save" : "create"} event: ${String(e)}`;
   } finally {
     evSave.disabled = false;
   }

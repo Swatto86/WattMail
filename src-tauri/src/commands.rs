@@ -22,6 +22,7 @@ use wattmail_application::{
     save_draft as app_save_draft, search_messages as app_search_messages,
     send_draft as app_send_draft, send_message as app_send_message, send_reply as app_send_reply,
     set_flag as app_set_flag, set_read as app_set_read, sync_folder as app_sync_folder,
+    update_event as app_update_event,
 };
 use wattmail_domain::{
     CalendarProvider, EventDateTime, Folder, InviteResponse, MailProvider, MessageRule,
@@ -1346,6 +1347,24 @@ pub struct NewEventDto {
     pub attendees: Vec<String>,
 }
 
+fn new_event_from_dto(event: NewEventDto, time_zone: &str) -> NewEvent {
+    NewEvent {
+        subject: event.subject,
+        start: EventDateTime {
+            date_time: event.start,
+            time_zone: time_zone.to_string(),
+        },
+        end: EventDateTime {
+            date_time: event.end,
+            time_zone: time_zone.to_string(),
+        },
+        is_all_day: event.is_all_day,
+        location: event.location,
+        body_html: event.body_html,
+        attendees: event.attendees,
+    }
+}
+
 /// Create an event on the default calendar; returns the created event.
 #[tauri::command]
 pub async fn create_event(
@@ -1354,25 +1373,28 @@ pub async fn create_event(
     time_zone: String,
 ) -> Result<CalendarEventDto, String> {
     let (_account, provider) = active_calendar_provider(&accounts).await?;
-    let new_event = NewEvent {
-        subject: event.subject,
-        start: EventDateTime {
-            date_time: event.start,
-            time_zone: time_zone.clone(),
-        },
-        end: EventDateTime {
-            date_time: event.end,
-            time_zone: time_zone.clone(),
-        },
-        is_all_day: event.is_all_day,
-        location: event.location,
-        body_html: event.body_html,
-        attendees: event.attendees,
-    };
+    let new_event = new_event_from_dto(event, &time_zone);
     let created = app_create_event(&*provider, &new_event, &time_zone)
         .await
         .map_err(|e| e.to_string())?;
     Ok(calendar_event_dto(created))
+}
+
+/// Replace an event's editable fields; returns the updated event. The UI
+/// offers this only for non-recurring events the user organizes.
+#[tauri::command]
+pub async fn update_event(
+    accounts: State<'_, AccountManager>,
+    id: String,
+    event: NewEventDto,
+    time_zone: String,
+) -> Result<CalendarEventDto, String> {
+    let (_account, provider) = active_calendar_provider(&accounts).await?;
+    let updated_event = new_event_from_dto(event, &time_zone);
+    let updated = app_update_event(&*provider, &id, &updated_event, &time_zone)
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(calendar_event_dto(updated))
 }
 
 /// Reply to a meeting invitation. `response` is `accept` | `tentative` | `decline`.

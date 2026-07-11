@@ -147,6 +147,7 @@ pub fn run() {
             commands::account_supports_calendar,
             commands::calendar_view,
             commands::create_event,
+            commands::update_event,
             commands::respond_to_event,
             commands::delete_event,
         ])
