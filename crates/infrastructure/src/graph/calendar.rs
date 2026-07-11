@@ -16,8 +16,8 @@ use serde::Deserialize;
 
 use super::{check_status, GraphClient, GraphEmailAddress, GraphRecipient, GRAPH_BASE};
 use wattmail_domain::{
-    Attendee, CalendarEvent, CalendarProvider, EventDateTime, InviteResponse, MailError, NewEvent,
-    ResponseStatus,
+    Attendee, CalendarEvent, CalendarProvider, EventDateTime, InviteResponse, MailError,
+    MeetingInvite, NewEvent, ResponseStatus,
 };
 
 /// Event fields the agenda needs. `body` is fetched so the detail pane can render
@@ -192,6 +192,84 @@ impl CalendarProvider for GraphClient {
         check_status(response).await?;
         Ok(())
     }
+}
+
+impl GraphClient {
+    /// The meeting invitation carried by a message: `Some` only when the
+    /// message is a meeting *request* whose linked calendar event is still
+    /// reachable. Backs [`wattmail_domain::MailProvider::meeting_invite`];
+    /// lives here beside the event wire types it reuses.
+    pub(super) async fn fetch_meeting_invite(
+        &self,
+        message_id: &str,
+        time_zone: &str,
+    ) -> Result<Option<MeetingInvite>, MailError> {
+        // 1. Classify the message. Graph annotates derived-type instances with
+        //    `@odata.type`, so a `$select=id` GET is enough to tell a meeting
+        //    request (`eventMessageRequest`) from ordinary mail and from invite
+        //    responses/cancellations — without ever `$select`ing a derived-only
+        //    property on a base-typed URL (which would 400).
+        let mut url = super::message_endpoint(message_id);
+        url.set_query(Some("$select=id"));
+        let probe: GraphTypedObject = self
+            .get(url.as_str())
+            .await?
+            .json()
+            .await
+            .map_err(|e| MailError::Decode(e.to_string()))?;
+        if probe.odata_type.as_deref() != Some("#microsoft.graph.eventMessageRequest") {
+            return Ok(None);
+        }
+
+        // 2. Follow the eventMessage cast's `event` navigation to the linked
+        //    calendar event, rendered in the user's zone. A 404 means the event
+        //    is gone (cancelled / declined-and-removed) — not an error, just no
+        //    longer respondable.
+        let tz = sanitize_timezone(time_zone);
+        let prefer = format!("outlook.timezone=\"{tz}\"");
+        let mut url = super::message_endpoint(message_id);
+        {
+            let mut segments = url.path_segments_mut().expect("base URL is a proper path");
+            segments.push("microsoft.graph.eventMessage");
+            segments.push("event");
+        }
+        url.set_query(Some("$select=id,start,end,isAllDay,responseStatus"));
+        let response = self
+            .http()
+            .get(url.as_str())
+            .bearer_auth(self.token())
+            .header("Prefer", &prefer)
+            .send()
+            .await
+            .map_err(|e| MailError::Network(e.to_string()))?;
+        if response.status() == reqwest::StatusCode::NOT_FOUND {
+            return Ok(None);
+        }
+        let event: GraphEvent = check_status(response)
+            .await?
+            .json()
+            .await
+            .map_err(|e| MailError::Decode(e.to_string()))?;
+
+        // Reuse the full event mapping (all-day midnight snap included) and
+        // keep just the fields the RSVP bar needs.
+        let domain = to_domain_event(event, &tz);
+        Ok(Some(MeetingInvite {
+            event_id: domain.id,
+            start: domain.start,
+            end: domain.end,
+            is_all_day: domain.is_all_day,
+            response_status: domain.response_status,
+        }))
+    }
+}
+
+/// A minimal decode of any Graph object, keeping only its OData type
+/// annotation (present whenever the instance is of a derived type).
+#[derive(Deserialize)]
+struct GraphTypedObject {
+    #[serde(rename = "@odata.type")]
+    odata_type: Option<String>,
 }
 
 /// The Graph JSON for an event's editable fields, shared by create (POST) and
@@ -605,6 +683,23 @@ mod tests {
         assert_eq!(http_url(Some("ms-msdt:/id".to_string())), None);
         assert_eq!(http_url(Some(String::new())), None);
         assert_eq!(http_url(None), None);
+    }
+
+    #[test]
+    fn typed_object_probe_decodes_the_odata_type_annotation() {
+        // A meeting request probed with $select=id: the derived type shows up
+        // as an annotation; a plain message carries no annotation at all.
+        let invite: GraphTypedObject = serde_json::from_str(
+            r##"{"@odata.type":"#microsoft.graph.eventMessageRequest","@odata.etag":"W/\"x\"","id":"AAA"}"##,
+        )
+        .expect("parses");
+        assert_eq!(
+            invite.odata_type.as_deref(),
+            Some("#microsoft.graph.eventMessageRequest")
+        );
+
+        let plain: GraphTypedObject = serde_json::from_str(r#"{"id":"BBB"}"#).expect("parses");
+        assert!(plain.odata_type.is_none());
     }
 
     #[test]

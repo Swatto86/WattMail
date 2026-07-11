@@ -17,8 +17,8 @@ use wattmail_application::{
     export_message as app_export_message, folder_from_cache as app_folder_from_cache,
     has_unforwardable_attachments as app_has_unforwardable_attachments, list_attachments,
     list_folders as app_list_folders, load_draft as app_load_draft, load_older as app_load_older,
-    move_message as app_move_message, read_headers, read_message,
-    rename_folder as app_rename_folder, respond_to_event as app_respond_to_event,
+    meeting_invite as app_meeting_invite, move_message as app_move_message, read_headers,
+    read_message, rename_folder as app_rename_folder, respond_to_event as app_respond_to_event,
     save_draft as app_save_draft, search_messages as app_search_messages,
     send_draft as app_send_draft, send_message as app_send_message, send_reply as app_send_reply,
     set_flag as app_set_flag, set_read as app_set_read, sync_folder as app_sync_folder,
@@ -1303,6 +1303,39 @@ fn calendar_event_dto(e: wattmail_domain::CalendarEvent) -> CalendarEventDto {
         web_link: e.web_link,
         is_organizer: e.is_organizer,
     }
+}
+
+/// A meeting invitation carried by a message, for the reading pane's RSVP bar.
+/// Times are local wall-clock strings in the requested zone.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MeetingInviteDto {
+    pub event_id: String,
+    pub start: String,
+    pub end: String,
+    pub is_all_day: bool,
+    pub response_status: String,
+}
+
+/// The meeting invitation carried by a message: `None` for ordinary mail,
+/// invite responses, cancellations, or an invite whose event is gone.
+#[tauri::command]
+pub async fn meeting_invite(
+    accounts: State<'_, AccountManager>,
+    id: String,
+    time_zone: String,
+) -> Result<Option<MeetingInviteDto>, String> {
+    let (_account, provider) = active_provider(&accounts).await?;
+    let invite = app_meeting_invite(&*provider, &id, &time_zone)
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(invite.map(|i| MeetingInviteDto {
+        event_id: i.event_id,
+        start: i.start.date_time,
+        end: i.end.date_time,
+        is_all_day: i.is_all_day,
+        response_status: i.response_status.as_str().to_string(),
+    }))
 }
 
 /// Whether the active account's provider has a calendar. False when nothing is

@@ -144,6 +144,7 @@ pub fn run() {
             commands::create_message_rule,
             commands::update_message_rule,
             commands::delete_message_rule,
+            commands::meeting_invite,
             commands::account_supports_calendar,
             commands::calendar_view,
             commands::create_event,

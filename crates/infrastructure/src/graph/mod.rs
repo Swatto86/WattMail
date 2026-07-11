@@ -961,6 +961,14 @@ impl MailProvider for GraphClient {
         })
     }
 
+    async fn meeting_invite(
+        &self,
+        message_id: &str,
+        time_zone: &str,
+    ) -> Result<Option<wattmail_domain::MeetingInvite>, MailError> {
+        self.fetch_meeting_invite(message_id, time_zone).await
+    }
+
     async fn attachments(&self, message_id: &str) -> Result<Vec<Attachment>, MailError> {
         let mut url = message_endpoint(message_id);
         {

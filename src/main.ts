@@ -1202,6 +1202,7 @@ async function openMessage(id: string, allowImages = false): Promise<void> {
     renderReader(msg);
     markRead(id);
     void loadAttachments(id);
+    void probeMeetingInvite(id);
   } catch (e) {
     readerEl.innerHTML = `<div class="reader-empty">Failed to load message: ${esc(String(e))}</div>`;
   }
@@ -1226,6 +1227,7 @@ function renderReader(msg: MessageView): void {
         <button id="headers-btn" class="btn btn-xs btn-ghost" title="View raw message headers and trace its origin">Headers</button>
       </div>
     </div>
+    <div id="reader-invite" class="reader-invite hidden"></div>
     <div id="reader-attachments" class="reader-attachments"></div>
     ${banner}
     <iframe class="reader-frame" sandbox="allow-same-origin" referrerpolicy="no-referrer"></iframe>
@@ -1261,6 +1263,106 @@ function renderReader(msg: MessageView): void {
     if (adapt) adaptPlainEmail(frame, theme);
   });
   frame.srcdoc = wrapEmailHtml(msg.html, { adapt, bg: theme.bg, fg: theme.fg });
+}
+
+// ---- In-email meeting-invite RSVP ----
+// A meeting request renders an RSVP bar above the body, wired to the calendar
+// respond endpoint via the event linked from the message. The probe runs after
+// the reader renders (best-effort, one lightweight GET per opened message).
+interface MeetingInviteInfo {
+  eventId: string;
+  start: string; // local wall-clock in this machine's zone
+  end: string;
+  isAllDay: boolean;
+  responseStatus: string;
+}
+
+const LOCAL_TZ = (() => {
+  try {
+    return Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
+  } catch {
+    return "UTC";
+  }
+})();
+
+function fmtInviteWhen(invite: MeetingInviteInfo): string {
+  const s = new Date(invite.start);
+  if (isNaN(s.getTime())) return "";
+  const day = s.toLocaleDateString(undefined, {
+    weekday: "short",
+    day: "numeric",
+    month: "short",
+  });
+  if (invite.isAllDay) return `${day} · All day`;
+  const t = (d: Date) => d.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });
+  const e = new Date(invite.end);
+  return isNaN(e.getTime()) ? `${day} · ${t(s)}` : `${day} · ${t(s)} – ${t(e)}`;
+}
+
+const INVITE_STATUS_LABEL: Record<string, string> = {
+  accepted: "You accepted this invitation.",
+  tentativelyAccepted: "You tentatively accepted this invitation.",
+  declined: "You declined this invitation.",
+};
+
+async function probeMeetingInvite(id: string): Promise<void> {
+  let invite: MeetingInviteInfo | null;
+  try {
+    invite = await invoke<MeetingInviteInfo | null>("meeting_invite", {
+      id,
+      timeZone: LOCAL_TZ,
+    });
+  } catch {
+    return; // best-effort — an invite probe failure never disturbs the reader
+  }
+  // The reader may have moved on (or re-rendered) while the probe ran.
+  if (!invite || selectedId !== id) return;
+  const bar = readerEl.querySelector<HTMLDivElement>("#reader-invite");
+  if (!bar) return;
+  renderInviteBar(bar, id, invite);
+}
+
+function renderInviteBar(bar: HTMLDivElement, messageId: string, invite: MeetingInviteInfo): void {
+  const when = fmtInviteWhen(invite);
+  const status = INVITE_STATUS_LABEL[invite.responseStatus] ?? "";
+  bar.innerHTML = `
+    <span class="reader-invite-label">&#128197; Meeting invitation${when ? ` · ${esc(when)}` : ""}</span>
+    ${status ? `<span class="reader-invite-status">${esc(status)}</span>` : ""}
+    <span class="reader-invite-actions">
+      <button class="btn btn-xs" data-invite-rsvp="accept">Accept</button>
+      <button class="btn btn-xs" data-invite-rsvp="tentative">Tentative</button>
+      <button class="btn btn-xs" data-invite-rsvp="decline">Decline</button>
+    </span>`;
+  bar.classList.remove("hidden");
+  bar.querySelectorAll<HTMLButtonElement>("[data-invite-rsvp]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const response = btn.dataset.inviteRsvp!;
+      bar.querySelectorAll<HTMLButtonElement>("button").forEach((b) => (b.disabled = true));
+      invoke("respond_to_event", {
+        id: invite.eventId,
+        response,
+        comment: null,
+        sendResponse: true,
+      })
+        .then(() => {
+          // Ignore if the reader moved on while the response was in flight.
+          if (selectedId !== messageId) return;
+          const done =
+            response === "accept"
+              ? "Accepted"
+              : response === "tentative"
+                ? "Tentatively accepted"
+                : "Declined";
+          bar.innerHTML = `<span class="reader-invite-label">&#128197; ${done} — your response was sent to the organizer.</span>`;
+        })
+        .catch((e) => {
+          if (selectedId !== messageId) return;
+          bar.querySelectorAll<HTMLButtonElement>("button").forEach((b) => (b.disabled = false));
+          const label = bar.querySelector<HTMLSpanElement>(".reader-invite-label");
+          if (label) label.textContent = `Could not send response: ${e}`;
+        });
+    });
+  });
 }
 
 // Re-render the open message after a theme change so the body re-applies the

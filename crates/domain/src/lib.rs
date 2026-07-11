@@ -450,6 +450,18 @@ pub trait MailProvider: Send + Sync {
     /// Load a draft for editing, with its raw (unsanitized) body.
     async fn load_draft(&self, id: &str) -> Result<DraftPrefill, MailError>;
 
+    /// The meeting invitation carried by `message_id`, when the message is a
+    /// meeting request whose event is still reachable on the calendar; `None`
+    /// for ordinary mail (and for invite *responses*/cancellations). Event
+    /// times are rendered in `time_zone`. Default: no invite support.
+    async fn meeting_invite(
+        &self,
+        _message_id: &str,
+        _time_zone: &str,
+    ) -> Result<Option<MeetingInvite>, MailError> {
+        Ok(None)
+    }
+
     /// List a message's non-inline file attachments.
     async fn attachments(&self, message_id: &str) -> Result<Vec<Attachment>, MailError>;
 
@@ -649,6 +661,19 @@ pub struct NewEvent {
     pub body_html: String,
     /// Required attendee email addresses to invite.
     pub attendees: Vec<String>,
+}
+
+/// The meeting invitation carried by a mail message, linking to the calendar
+/// event it proposes so the reader can RSVP without leaving the message.
+#[derive(Debug, Clone)]
+pub struct MeetingInvite {
+    /// The calendar event to respond to (via `respond_to_event`).
+    pub event_id: String,
+    pub start: EventDateTime,
+    pub end: EventDateTime,
+    pub is_all_day: bool,
+    /// The user's current response, so the UI can show an already-sent answer.
+    pub response_status: ResponseStatus,
 }
 
 /// A reply to a meeting invitation.

@@ -5,8 +5,8 @@
 
 use wattmail_domain::{
     Attachment, CalendarEvent, CalendarProvider, DraftPrefill, Folder, InviteResponse, MailError,
-    MailProvider, MailStore, MessageBody, MessageChange, MessageHeader, MessageSummary, NewEvent,
-    OutgoingAttachment, OutgoingMessage, SyncToken, UserProfile,
+    MailProvider, MailStore, MeetingInvite, MessageBody, MessageChange, MessageHeader,
+    MessageSummary, NewEvent, OutgoingAttachment, OutgoingMessage, SyncToken, UserProfile,
 };
 
 const ACCOUNT_NAME_KEY: &str = "account.displayName";
@@ -366,6 +366,16 @@ pub async fn delete_draft_attachment(
 /// Load a draft for editing, with its raw (unsanitized) body.
 pub async fn load_draft(provider: &dyn MailProvider, id: &str) -> Result<DraftPrefill, MailError> {
     provider.load_draft(id).await
+}
+
+/// The meeting invitation carried by a message, if it is a respondable
+/// meeting request (times rendered in `time_zone`).
+pub async fn meeting_invite(
+    provider: &dyn MailProvider,
+    message_id: &str,
+    time_zone: &str,
+) -> Result<Option<MeetingInvite>, MailError> {
+    provider.meeting_invite(message_id, time_zone).await
 }
 
 /// List a message's attachments.

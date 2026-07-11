@@ -393,6 +393,30 @@ body,
   font-size: 11px;
   opacity: 0.6;
 }
+.reader-invite {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 8px 12px 0;
+  padding: 8px 12px;
+  border: 1px solid oklch(var(--p) / 0.35);
+  border-left: 3px solid oklch(var(--p));
+  border-radius: 6px;
+  background: oklch(var(--p) / 0.08);
+  font-size: 12px;
+}
+.reader-invite-label {
+  font-weight: 600;
+}
+.reader-invite-status {
+  opacity: 0.75;
+}
+.reader-invite-actions {
+  display: inline-flex;
+  gap: 6px;
+  margin-left: auto;
+}
 .signature-input {
   width: 15rem;
   flex-shrink: 0;
