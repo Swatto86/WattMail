@@ -49,7 +49,7 @@ const MONTH_GRID_DAYS = 42;
 const MONTH_MAX_PILLS = 3;
 type CalView = "agenda" | "month";
 const VIEW_KEY = "wattmail.calView";
-const IANA_ZONE = (() => {
+export const IANA_ZONE = (() => {
   try {
     return Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
   } catch {
@@ -95,6 +95,10 @@ let evSave: HTMLButtonElement;
 let editingId: string | null = null;
 let editingBodyText = "";
 let editingBodyHtml = "";
+// The attendee field as prefilled: if the user leaves it untouched, the save
+// sends attendees=null so the server keeps the existing collection (with each
+// attendee's optional/required type and display name intact).
+let editingAttendeesBaseline = "";
 // The two time <input>s only — hidden in all-day mode. NOT their .settings-row,
 // which also wraps the date pickers (those must stay visible for all-day events).
 let evTimeInputs: HTMLInputElement[] = [];
@@ -410,11 +414,15 @@ function eventRowHtml(ev: CalendarEvent): string {
 // ---- Month grid rendering ----
 function renderMonth(gridStart: Date): void {
   const month = monthFirst(rangeStart).getMonth();
+  // Same clamp as the agenda: an event that started before the grid window
+  // (an ongoing multi-day stay) lands on the first cell instead of vanishing.
+  const gridStartKey = dayKey(gridStart);
   const byDay = new Map<string, CalendarEvent[]>();
   for (const ev of events) {
     const d = parseLocal(ev.start);
     if (isNaN(d.getTime())) continue;
-    const key = dayKey(d);
+    let key = dayKey(d);
+    if (key < gridStartKey) key = gridStartKey;
     const list = byDay.get(key) ?? [];
     list.push(ev);
     byDay.set(key, list);
@@ -799,9 +807,15 @@ function reflectAllDay(): void {
 
 // Extract readable plain text from an HTML body, for the edit textarea. The
 // input is the server-sanitized body (no scripts), parsed inert via DOMParser.
+// Block boundaries get a newline first so lists/rows/paragraphs don't run
+// together as one long line in the textarea.
 function htmlToPlainText(html: string): string {
-  const doc = new DOMParser().parseFromString(html, "text/html");
-  return (doc.body.textContent ?? "").trim();
+  const withBreaks = html.replace(/<(?:\/(?:p|div|li|ul|ol|tr|table|h[1-6])|br\s*\/?)>/gi, "$&\n");
+  const doc = new DOMParser().parseFromString(withBreaks, "text/html");
+  return (doc.body.textContent ?? "")
+    .replace(/[ \t]+\n/g, "\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
 }
 
 // Open the modal to create a new event, or — given `ev` — to edit it in place.
@@ -813,6 +827,7 @@ function openEventModal(ev?: CalendarEvent): void {
   evSubject.value = ev?.subject ?? "";
   evLocation.value = ev?.location ?? "";
   evAttendees.value = ev ? ev.attendees.map((a) => a.email).join(", ") : "";
+  editingAttendeesBaseline = evAttendees.value;
   editingBodyHtml = ev?.bodyHtml ?? "";
   editingBodyText = ev ? htmlToPlainText(ev.bodyHtml) : "";
   evBody.value = editingBodyText;
@@ -823,13 +838,17 @@ function openEventModal(ev?: CalendarEvent): void {
     const start = parseLocal(ev.start);
     const end = parseLocal(ev.end);
     evStartDate.value = dayKey(start);
-    evStartTime.value = `${pad(start.getHours())}:${pad(start.getMinutes())}`;
     if (ev.isAllDay) {
       // The stored all-day end is the exclusive next midnight; the form shows
-      // the inclusive last day (save adds the day back).
-      evEndDate.value = dayKey(addDays(end, -1));
+      // the inclusive last day (save adds the day back). The hidden time
+      // fields get sensible defaults — an all-day event's own times are both
+      // midnight, which would turn into a 00:00 start if "All day" is
+      // unchecked during the edit.
+      evStartTime.value = "09:00";
       evEndTime.value = "10:00";
+      evEndDate.value = dayKey(addDays(end, -1));
     } else {
+      evStartTime.value = `${pad(start.getHours())}:${pad(start.getMinutes())}`;
       evEndDate.value = dayKey(end);
       evEndTime.value = `${pad(end.getHours())}:${pad(end.getMinutes())}`;
     }
@@ -921,6 +940,10 @@ async function saveEvent(): Promise<void> {
     editingId && evBody.value.trim() === editingBodyText
       ? editingBodyHtml
       : plainToHtml(evBody.value);
+  // An untouched attendee field sends null: the server then keeps its existing
+  // attendee collection — optional/required types and display names included —
+  // instead of a wholesale replace that would flatten everyone to "required".
+  const attendeesTouched = !editingId || evAttendees.value !== editingAttendeesBaseline;
   const payload = {
     event: {
       subject,
@@ -929,7 +952,7 @@ async function saveEvent(): Promise<void> {
       isAllDay: allDay,
       location: evLocation.value.trim(),
       bodyHtml,
-      attendees,
+      attendees: attendeesTouched ? attendees : null,
     },
     timeZone: IANA_ZONE,
   };
@@ -979,9 +1002,11 @@ let reminderEvents: CalendarEvent[] = [];
 let remindersStarted = false;
 
 export function startEventReminders(): void {
-  if (remindersStarted) return; // boot can run more than once (sign-out/in)
-  remindersStarted = true;
+  // Always refresh right away: a sign-in or account SWITCH must not keep
+  // serving the previous mailbox's reminders until the next 10-min cycle.
   void refreshReminderEvents();
+  if (remindersStarted) return; // the intervals themselves are app-lifetime
+  remindersStarted = true;
   setInterval(() => void refreshReminderEvents(), REMINDER_REFRESH_MS);
   setInterval(checkReminders, REMINDER_TICK_MS);
 }
@@ -1068,6 +1093,9 @@ export function resetCalendar(): void {
   rangeStart = startOfToday();
   selectedId = null;
   events = [];
+  // The old account's reminders must stop immediately too (the switch path
+  // also calls startEventReminders, which refetches for the new account).
+  reminderEvents = [];
   loadSeq++; // cancel any in-flight load
   if (agendaEl) agendaEl.innerHTML = "";
   if (detailEl) resetDetail();

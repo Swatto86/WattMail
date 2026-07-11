@@ -1380,7 +1380,9 @@ pub struct NewEventDto {
     pub is_all_day: bool,
     pub location: String,
     pub body_html: String,
-    pub attendees: Vec<String>,
+    /// `None`/`null` = don't touch the attendee list (update keeps the
+    /// existing collection with its optional/required types intact).
+    pub attendees: Option<Vec<String>>,
 }
 
 fn new_event_from_dto(event: NewEventDto, time_zone: &str) -> NewEvent {

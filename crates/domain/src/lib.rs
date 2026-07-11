@@ -662,8 +662,11 @@ pub struct NewEvent {
     pub location: String,
     /// HTML body (may be empty). Sent verbatim; the provider stores it.
     pub body_html: String,
-    /// Required attendee email addresses to invite.
-    pub attendees: Vec<String>,
+    /// Attendee email addresses to invite (as required attendees). `None`
+    /// means "don't touch the attendee list": on update the provider leaves
+    /// the existing attendees (and their optional/required types and display
+    /// names) exactly as they are; on create it means no attendees.
+    pub attendees: Option<Vec<String>>,
 }
 
 /// The meeting invitation carried by a mail message, linking to the calendar

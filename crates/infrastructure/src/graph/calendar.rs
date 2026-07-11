@@ -234,7 +234,9 @@ impl GraphClient {
             segments.push("microsoft.graph.eventMessage");
             segments.push("event");
         }
-        url.set_query(Some("$select=id,start,end,isAllDay,responseStatus"));
+        url.set_query(Some(
+            "$select=id,start,end,isAllDay,responseStatus,isCancelled",
+        ));
         let response = self
             .http()
             .get(url.as_str())
@@ -255,6 +257,12 @@ impl GraphClient {
         // Reuse the full event mapping (all-day midnight snap included) and
         // keep just the fields the RSVP bar needs.
         let domain = to_domain_event(event, &tz);
+        // A cancelled meeting isn't respondable — and a cancellation NOTICE
+        // may (depending on Graph's typing) pass the eventMessageRequest probe
+        // above, so this guard covers both readings of the wire contract.
+        if domain.is_cancelled {
+            return Ok(None);
+        }
         Ok(Some(MeetingInvite {
             event_id: domain.id,
             start: domain.start,
@@ -275,30 +283,37 @@ struct GraphTypedObject {
 
 /// The Graph JSON for an event's editable fields, shared by create (POST) and
 /// update (PATCH — Graph replaces exactly the fields present, so both send the
-/// same full set).
+/// same set). `attendees` is omitted entirely when `None`: a PATCH then leaves
+/// the existing attendee collection untouched, preserving each attendee's
+/// optional/required type and display name (Graph replaces the collection
+/// wholesale whenever the key is present).
 fn event_payload(event: &NewEvent, tz: &str) -> serde_json::Value {
-    let attendees: Vec<serde_json::Value> = event
-        .attendees
-        .iter()
-        .map(|a| a.trim())
-        .filter(|a| !a.is_empty())
-        .map(|address| {
-            serde_json::json!({
-                "emailAddress": { "address": address },
-                "type": "required",
-            })
-        })
-        .collect();
-
-    serde_json::json!({
+    let mut payload = serde_json::json!({
         "subject": event.subject,
         "body": { "contentType": "HTML", "content": event.body_html },
         "start": { "dateTime": event.start.date_time, "timeZone": tz },
         "end": { "dateTime": event.end.date_time, "timeZone": tz },
         "isAllDay": event.is_all_day,
         "location": { "displayName": event.location },
-        "attendees": attendees,
-    })
+    });
+    if let Some(list) = &event.attendees {
+        let attendees: Vec<serde_json::Value> = list
+            .iter()
+            .map(|a| a.trim())
+            .filter(|a| !a.is_empty())
+            .map(|address| {
+                serde_json::json!({
+                    "emailAddress": { "address": address },
+                    "type": "required",
+                })
+            })
+            .collect();
+        payload
+            .as_object_mut()
+            .expect("json! built an object above")
+            .insert("attendees".to_string(), serde_json::Value::Array(attendees));
+    }
+    payload
 }
 
 /// Build the `/me/events/{id}` endpoint with the opaque id encoded as a single
@@ -732,7 +747,7 @@ mod tests {
             is_all_day: false,
             location: "Room 2".into(),
             body_html: "<p>Notes</p>".into(),
-            attendees: vec!["a@x.io".into(), " ".into(), "b@y.io".into()],
+            attendees: Some(vec!["a@x.io".into(), " ".into(), "b@y.io".into()]),
         };
         let json = event_payload(&event, "Europe/London");
         assert_eq!(json["subject"], "Standup");
@@ -745,6 +760,15 @@ mod tests {
         assert_eq!(attendees.len(), 2);
         assert_eq!(attendees[0]["emailAddress"]["address"], "a@x.io");
         assert_eq!(attendees[0]["type"], "required");
+
+        // No attendee list at all → the key is OMITTED, so a PATCH leaves the
+        // server's attendee collection (types, display names) untouched.
+        let untouched = NewEvent {
+            attendees: None,
+            ..event
+        };
+        let json = event_payload(&untouched, "Europe/London");
+        assert!(json.get("attendees").is_none());
     }
 
     #[test]

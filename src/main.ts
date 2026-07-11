@@ -12,7 +12,13 @@ import {
   isEnabled as isAutostartEnabled,
 } from "@tauri-apps/plugin-autostart";
 import { isPermissionGranted, requestPermission, sendNotification } from "@tauri-apps/plugin-notification";
-import { initCalendar, loadCalendar, resetCalendar, startEventReminders } from "./calendar";
+import {
+  IANA_ZONE,
+  initCalendar,
+  loadCalendar,
+  resetCalendar,
+  startEventReminders,
+} from "./calendar";
 import { showConfirm, showPrompt, isDialogOpen } from "./dialog";
 import "./styles.css";
 
@@ -1277,14 +1283,6 @@ interface MeetingInviteInfo {
   responseStatus: string;
 }
 
-const LOCAL_TZ = (() => {
-  try {
-    return Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
-  } catch {
-    return "UTC";
-  }
-})();
-
 function fmtInviteWhen(invite: MeetingInviteInfo): string {
   const s = new Date(invite.start);
   if (isNaN(s.getTime())) return "";
@@ -1305,15 +1303,23 @@ const INVITE_STATUS_LABEL: Record<string, string> = {
   declined: "You declined this invitation.",
 };
 
+// Probe results cached per message id for the session, so re-renders (theme
+// toggle, "load images" reload) don't re-hit the server. Message ids are
+// account-scoped, so an account switch can't collide.
+const inviteCache = new Map<string, MeetingInviteInfo | null>();
+
 async function probeMeetingInvite(id: string): Promise<void> {
-  let invite: MeetingInviteInfo | null;
-  try {
-    invite = await invoke<MeetingInviteInfo | null>("meeting_invite", {
-      id,
-      timeZone: LOCAL_TZ,
-    });
-  } catch {
-    return; // best-effort — an invite probe failure never disturbs the reader
+  let invite = inviteCache.get(id);
+  if (invite === undefined) {
+    try {
+      invite = await invoke<MeetingInviteInfo | null>("meeting_invite", {
+        id,
+        timeZone: IANA_ZONE,
+      });
+    } catch {
+      return; // best-effort — an invite probe failure never disturbs the reader
+    }
+    inviteCache.set(id, invite);
   }
   // The reader may have moved on (or re-rendered) while the probe ran.
   if (!invite || selectedId !== id) return;
@@ -1345,6 +1351,17 @@ function renderInviteBar(bar: HTMLDivElement, messageId: string, invite: Meeting
         sendResponse: true,
       })
         .then(() => {
+          // Remember the new status so a later reopen of this message shows
+          // the answered state instead of the cached pre-response one.
+          inviteCache.set(messageId, {
+            ...invite,
+            responseStatus:
+              response === "accept"
+                ? "accepted"
+                : response === "tentative"
+                  ? "tentativelyAccepted"
+                  : "declined",
+          });
           // Ignore if the reader moved on while the response was in flight.
           if (selectedId !== messageId) return;
           const done =
@@ -1374,6 +1391,9 @@ function reRenderOpenMessage(): void {
   if (!lastMessage) return;
   renderReader(lastMessage);
   void loadAttachments(lastMessage.id);
+  // The rebuild recreated an empty invite slot — restore the RSVP bar for a
+  // meeting request (served from the session cache, no extra fetch).
+  void probeMeetingInvite(lastMessage.id);
 }
 
 // Intercept clicks inside the (script-disabled, same-origin) email frame so links
