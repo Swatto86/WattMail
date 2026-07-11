@@ -1373,6 +1373,121 @@ body,
   font-size: 12px;
   color: oklch(var(--bc) / 0.4);
 }
+/* Month grid */
+.cal-viewswitch {
+  display: inline-flex;
+  gap: 2px;
+}
+.cal-agenda.cal-month-mode {
+  width: auto;
+  flex: 2;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.cal-month-week {
+  display: grid;
+  grid-template-columns: repeat(7, 1fr);
+  border-bottom: 1px solid oklch(var(--b3));
+  font-size: 11px;
+  font-weight: 600;
+  opacity: 0.7;
+  text-align: center;
+  padding: 4px 0;
+  flex-shrink: 0;
+}
+.cal-month-grid {
+  display: grid;
+  grid-template-columns: repeat(7, 1fr);
+  grid-template-rows: repeat(6, 1fr);
+  flex: 1;
+  min-height: 0;
+}
+.cal-cell {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 2px;
+  border-right: 1px solid oklch(var(--b3));
+  border-bottom: 1px solid oklch(var(--b3));
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+}
+.cal-cell:nth-child(7n) {
+  border-right: none;
+}
+.cal-cell-out {
+  background: oklch(var(--b2) / 0.5);
+}
+.cal-cell-out .cal-cell-day {
+  opacity: 0.45;
+}
+.cal-cell.is-today .cal-cell-day {
+  background: oklch(var(--p));
+  color: oklch(var(--pc));
+}
+.cal-cell-day {
+  align-self: flex-start;
+  border: none;
+  background: none;
+  font-size: 11px;
+  font-weight: 600;
+  padding: 1px 6px;
+  border-radius: 9999px;
+  cursor: pointer;
+  color: inherit;
+}
+.cal-cell-day:hover {
+  background: oklch(var(--b3));
+}
+/* Pills share .cal-event (delegated clicks + selection); the double-class
+   selector outranks the agenda row rules defined later in the file. */
+.cal-event.cal-pill {
+  display: block;
+  font-size: 11px;
+  line-height: 1.3;
+  padding: 1px 5px;
+  border-bottom: none;
+  border-radius: 4px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  background: oklch(var(--p) / 0.12);
+  border-left: 2px solid oklch(var(--p));
+  cursor: pointer;
+}
+.cal-pill-time {
+  opacity: 0.7;
+  font-variant-numeric: tabular-nums;
+}
+.cal-event.cal-pill-allday {
+  background: oklch(var(--su, var(--p)) / 0.15);
+  border-left-color: oklch(var(--su, var(--p)));
+}
+.cal-event.cal-pill.selected {
+  background: oklch(var(--p) / 0.25);
+  box-shadow: none;
+  outline: 1px solid oklch(var(--p));
+}
+.cal-event.cal-pill.cancelled {
+  text-decoration: line-through;
+  opacity: 0.6;
+}
+.cal-more {
+  border: none;
+  background: none;
+  color: oklch(var(--p));
+  font-size: 10px;
+  text-align: left;
+  padding: 0 5px;
+  cursor: pointer;
+}
+.cal-more:hover {
+  text-decoration: underline;
+}
+
 .cal-event {
   display: flex;
   gap: 10px;

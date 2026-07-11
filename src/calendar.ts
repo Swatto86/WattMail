@@ -44,6 +44,11 @@ interface CalendarEvent {
 }
 
 const RANGE_DAYS = 7;
+// Month view renders a fixed 6-week grid (stable layout across months).
+const MONTH_GRID_DAYS = 42;
+const MONTH_MAX_PILLS = 3;
+type CalView = "agenda" | "month";
+const VIEW_KEY = "wattmail.calView";
 const IANA_ZONE = (() => {
   try {
     return Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
@@ -57,8 +62,14 @@ let host: HTMLDivElement;
 let agendaEl: HTMLDivElement;
 let detailEl: HTMLDivElement;
 let rangeLabel: HTMLSpanElement;
-// First day of the visible window, at local midnight.
+// First day of the visible window, at local midnight. In month view only its
+// year/month matter (the grid always starts on the Monday on/before the 1st).
 let rangeStart = startOfToday();
+let viewMode: CalView = localStorage.getItem(VIEW_KEY) === "month" ? "month" : "agenda";
+let viewAgendaBtn: HTMLButtonElement;
+let viewMonthBtn: HTMLButtonElement;
+let prevBtn: HTMLButtonElement;
+let nextBtn: HTMLButtonElement;
 let events: CalendarEvent[] = [];
 let selectedId: string | null = null;
 let loadSeq = 0; // guards against out-of-order responses on rapid nav
@@ -107,6 +118,19 @@ function startOfToday(): Date {
 function addDays(d: Date, n: number): Date {
   const c = new Date(d);
   c.setDate(c.getDate() + n);
+  return c;
+}
+function monthFirst(d: Date): Date {
+  return new Date(d.getFullYear(), d.getMonth(), 1);
+}
+function addMonths(d: Date, n: number): Date {
+  return new Date(d.getFullYear(), d.getMonth() + n, 1);
+}
+// The Monday on or before `d`, at local midnight (grids are Monday-first).
+function mondayOnOrBefore(d: Date): Date {
+  const c = new Date(d);
+  c.setDate(c.getDate() - ((c.getDay() + 6) % 7));
+  c.setHours(0, 0, 0, 0);
   return c;
 }
 // Add days to a "YYYY-MM-DD" string, returning the same format (local calendar
@@ -193,11 +217,15 @@ export function initCalendar(hostEl: HTMLDivElement): void {
   host = hostEl;
   host.innerHTML = /* html */ `
     <div class="cal-toolbar">
-      <button id="cal-prev" class="btn btn-xs" title="Previous week" aria-label="Previous week">&#8249;</button>
+      <button id="cal-prev" class="btn btn-xs" title="Previous week" aria-label="Previous">&#8249;</button>
       <button id="cal-today" class="btn btn-xs" title="Jump to today">Today</button>
-      <button id="cal-next" class="btn btn-xs" title="Next week" aria-label="Next week">&#8250;</button>
+      <button id="cal-next" class="btn btn-xs" title="Next week" aria-label="Next">&#8250;</button>
       <span id="cal-range" class="cal-range-label"></span>
       <span class="cal-spacer"></span>
+      <span class="cal-viewswitch">
+        <button id="cal-view-agenda" class="btn btn-xs">Agenda</button>
+        <button id="cal-view-month" class="btn btn-xs">Month</button>
+      </span>
       <button id="cal-refresh" class="btn btn-xs" title="Refresh">&#8635;</button>
       <button id="cal-new" class="btn btn-xs btn-primary" title="Create event">&#43; New event</button>
     </div>
@@ -212,12 +240,17 @@ export function initCalendar(hostEl: HTMLDivElement): void {
   // Delegated so row clicks survive every agenda re-render.
   agendaEl.addEventListener("click", onAgendaClick);
 
-  host.querySelector<HTMLButtonElement>("#cal-prev")!.addEventListener("click", () => {
-    rangeStart = addDays(rangeStart, -RANGE_DAYS);
+  prevBtn = host.querySelector<HTMLButtonElement>("#cal-prev")!;
+  nextBtn = host.querySelector<HTMLButtonElement>("#cal-next")!;
+  viewAgendaBtn = host.querySelector<HTMLButtonElement>("#cal-view-agenda")!;
+  viewMonthBtn = host.querySelector<HTMLButtonElement>("#cal-view-month")!;
+  prevBtn.addEventListener("click", () => {
+    rangeStart =
+      viewMode === "month" ? addMonths(rangeStart, -1) : addDays(rangeStart, -RANGE_DAYS);
     void loadCalendar();
   });
-  host.querySelector<HTMLButtonElement>("#cal-next")!.addEventListener("click", () => {
-    rangeStart = addDays(rangeStart, RANGE_DAYS);
+  nextBtn.addEventListener("click", () => {
+    rangeStart = viewMode === "month" ? addMonths(rangeStart, 1) : addDays(rangeStart, RANGE_DAYS);
     void loadCalendar();
   });
   host.querySelector<HTMLButtonElement>("#cal-today")!.addEventListener("click", () => {
@@ -230,17 +263,53 @@ export function initCalendar(hostEl: HTMLDivElement): void {
   host.querySelector<HTMLButtonElement>("#cal-new")!.addEventListener("click", () => {
     openEventModal();
   });
+  viewAgendaBtn.addEventListener("click", () => setViewMode("agenda"));
+  viewMonthBtn.addEventListener("click", () => setViewMode("month"));
 
+  reflectViewMode();
   resetDetail();
   buildEventModal();
+}
+
+function setViewMode(mode: CalView): void {
+  viewMode = mode;
+  try {
+    localStorage.setItem(VIEW_KEY, mode);
+  } catch {
+    /* persistence is best-effort */
+  }
+  reflectViewMode();
+  void loadCalendar();
+}
+
+function reflectViewMode(): void {
+  const month = viewMode === "month";
+  viewAgendaBtn.classList.toggle("btn-active", !month);
+  viewMonthBtn.classList.toggle("btn-active", month);
+  prevBtn.title = month ? "Previous month" : "Previous week";
+  nextBtn.title = month ? "Next month" : "Next week";
+  agendaEl.classList.toggle("cal-month-mode", month);
 }
 
 // Load (or reload) the current range from the backend and render it.
 export async function loadCalendar(): Promise<void> {
   const seq = ++loadSeq;
-  const start = new Date(rangeStart);
-  const end = addDays(start, RANGE_DAYS); // exclusive
-  rangeLabel.textContent = fmtRangeLabel(start, addDays(end, -1));
+  let start: Date;
+  let end: Date; // exclusive
+  if (viewMode === "month") {
+    // Fetch the whole 6-week grid so leading/trailing out-of-month cells show
+    // their events too; the label names the anchor month.
+    start = mondayOnOrBefore(monthFirst(rangeStart));
+    end = addDays(start, MONTH_GRID_DAYS);
+    rangeLabel.textContent = monthFirst(rangeStart).toLocaleDateString(undefined, {
+      month: "long",
+      year: "numeric",
+    });
+  } else {
+    start = new Date(rangeStart);
+    end = addDays(start, RANGE_DAYS);
+    rangeLabel.textContent = fmtRangeLabel(start, addDays(end, -1));
+  }
   agendaEl.innerHTML = `<div class="cal-empty">Loading…</div>`;
   try {
     const result = await invoke<CalendarEvent[]>("calendar_view", {
@@ -256,7 +325,8 @@ export async function loadCalendar(): Promise<void> {
     });
     if (seq !== loadSeq) return; // a newer load superseded this one
     events = result;
-    renderAgenda(start);
+    if (viewMode === "month") renderMonth(start);
+    else renderAgenda(start);
     // Keep the open event selected if it's still present; else clear detail.
     if (selectedId && events.some((e) => e.id === selectedId)) {
       selectEvent(selectedId);
@@ -337,8 +407,70 @@ function eventRowHtml(ev: CalendarEvent): string {
     </div>`;
 }
 
-// Event row clicks (delegated, so re-renders don't drop listeners).
+// ---- Month grid rendering ----
+function renderMonth(gridStart: Date): void {
+  const month = monthFirst(rangeStart).getMonth();
+  const byDay = new Map<string, CalendarEvent[]>();
+  for (const ev of events) {
+    const d = parseLocal(ev.start);
+    if (isNaN(d.getTime())) continue;
+    const key = dayKey(d);
+    const list = byDay.get(key) ?? [];
+    list.push(ev);
+    byDay.set(key, list);
+  }
+  const todayKey = dayKey(startOfToday());
+
+  let head = "";
+  for (let i = 0; i < 7; i++) {
+    head += `<span>${esc(
+      addDays(gridStart, i).toLocaleDateString(undefined, { weekday: "short" }),
+    )}</span>`;
+  }
+
+  let cells = "";
+  for (let i = 0; i < MONTH_GRID_DAYS; i++) {
+    const day = addDays(gridStart, i);
+    const key = dayKey(day);
+    const dayEvents = (byDay.get(key) ?? []).slice().sort(sortEvents);
+    const pills = dayEvents.slice(0, MONTH_MAX_PILLS).map(monthPillHtml).join("");
+    const more =
+      dayEvents.length > MONTH_MAX_PILLS
+        ? `<button class="cal-more" data-goto-day="${key}">+${dayEvents.length - MONTH_MAX_PILLS} more</button>`
+        : "";
+    const classes = ["cal-cell"];
+    if (day.getMonth() !== month) classes.push("cal-cell-out");
+    if (key === todayKey) classes.push("is-today");
+    cells += `<div class="${classes.join(" ")}"><button class="cal-cell-day" data-goto-day="${key}" title="Open this day's agenda">${day.getDate()}</button>${pills}${more}</div>`;
+  }
+
+  agendaEl.innerHTML = `<div class="cal-month-week">${head}</div><div class="cal-month-grid">${cells}</div>`;
+}
+
+// A compact event pill for a month cell. Shares the .cal-event class so the
+// delegated click handler and selection highlight work unchanged.
+function monthPillHtml(ev: CalendarEvent): string {
+  const selected = ev.id === selectedId ? " selected" : "";
+  const cancelled = ev.isCancelled ? " cancelled" : "";
+  const allday = ev.isAllDay ? " cal-pill-allday" : "";
+  const time = ev.isAllDay
+    ? ""
+    : `<span class="cal-pill-time">${esc(fmtTime(parseLocal(ev.start)))}</span> `;
+  return `<div class="cal-event cal-pill${selected}${cancelled}${allday}" data-id="${esc(
+    ev.id,
+  )}" role="button" tabindex="0" title="${esc(ev.subject)}">${time}${esc(ev.subject)}</div>`;
+}
+
+// Event row / pill / day-number clicks (delegated, so re-renders don't drop
+// listeners). A day number or "+N more" jumps to that day's agenda.
 function onAgendaClick(e: Event): void {
+  const goto = (e.target as HTMLElement).closest<HTMLElement>("[data-goto-day]");
+  if (goto?.dataset.gotoDay) {
+    const [y, m, d] = goto.dataset.gotoDay.split("-").map(Number);
+    rangeStart = new Date(y, m - 1, d);
+    setViewMode("agenda");
+    return;
+  }
   const row = (e.target as HTMLElement).closest<HTMLElement>(".cal-event");
   if (!row) return;
   const id = row.dataset.id;
