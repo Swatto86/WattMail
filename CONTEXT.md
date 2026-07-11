@@ -96,6 +96,71 @@ Entra app registration (public, not secret):
 
 ## Progress log
 
+### 2026-07-11 — Calendar completion: editing, in-email RSVP, reminders, month grid (v0.4.0)
+- **Event editing** — `CalendarProvider::update_event` (default `Unsupported`);
+  Graph `PATCH /me/events/{id}` sharing a factored `event_payload` with create.
+  The detail pane gains **Edit** for events the user organizes, *except*
+  recurring occurrences (recurrence editing stays out of scope) and cancelled
+  events. The create modal is reused (`openEventModal(ev?)`): title/save-label
+  swap, fields prefilled; the all-day end date shows the inclusive last day
+  (save re-adds the exclusive day); the hidden time fields default to
+  09:00/10:00 when prefilled from an all-day event so unchecking "All day"
+  doesn't yield a midnight meeting. Two no-clobber protections: an untouched
+  description round-trips the original sanitized HTML (a time-only edit never
+  flattens a rich body), and an untouched attendee field sends
+  `attendees: null` → the PATCH **omits the attendees key entirely**, so Graph
+  keeps the existing collection with optional/required types + display names
+  intact (`NewEvent.attendees: Option<Vec<String>>`; present list = wholesale
+  replace, all required). Editing the description itself still flattens rich
+  HTML to plain text — the form is a textarea, accepted MVP ceiling.
+- **In-email meeting-invite RSVP** — `MailProvider::meeting_invite(message_id,
+  tz)` (default `None`). Graph: probe `GET /me/messages/{id}?$select=id` and
+  read the **`@odata.type` annotation** (derived-type instances are annotated;
+  never `$select` a derived-only property on a base-typed URL — that 400s);
+  only `#microsoft.graph.eventMessageRequest` proceeds, then
+  `GET /me/messages/{id}/microsoft.graph.eventMessage/event` (cast-navigation)
+  fetches the linked event (404 → None; `isCancelled` → None, guarding against
+  cancellation notices that may share the request typing). The reading pane
+  probes after render (one lightweight GET per opened message, results cached
+  per message id for the session) and shows an RSVP bar (when + current
+  response + Accept/Tentative/Decline) wired to the existing
+  `respond_to_event`; the cache updates on respond and the bar survives theme
+  re-renders. **Wire risk note:** the `@odata.type` probe and cast-nav URL are
+  compile+decode-tested but not live-verified — first live invite open should
+  confirm.
+- **Event reminders** — `CalendarEvent.reminder_minutes_before_start:
+  Option<u32>` (from `isReminderOn`/`reminderMinutesBeforeStart`, default lead
+  15 min, clamped ≤ 4 weeks; `None` = off). A frontend loop (started from
+  `loadActiveAccount`, intervals app-lifetime; every (re)entry refetches so an
+  account switch swaps reminder sources immediately, and `resetCalendar`
+  clears the list) pulls the next 26 h of events every 10 min and every 30 s
+  fires a desktop notification when an event's own reminder lead arrives
+  (skips silently if > 5 min past start — no stale toast bursts after reopening
+  the app). Fired reminders dedup via localStorage (`id@startMs`, pruned > 2
+  days old). Gated on the one notifications toggle (hint text now covers
+  mail + calendar). Ceiling: leads longer than the 26 h horizon fire when the
+  event enters the window (later than configured, never missed).
+- **Month grid** — Agenda/Month toggle (persisted `wattmail.calView`);
+  Monday-first fixed 6-week grid fetching the whole grid range (out-of-month
+  cells show their events), day-number/"+N more" jump to that day's agenda,
+  pills share `.cal-event` so delegated clicks + selection work unchanged;
+  events starting before the grid clamp to the first cell (same rule as the
+  agenda). Multi-day events still pill only on their start day — known gap.
+- **Adversarial review** (3 lenses, all candidates verified): 14 real findings
+  → 9 fixed (the wholesale-attendee-PATCH flattening optional→required — the
+  worst, silent server-side mutation on every edit; cross-account reminder
+  bleed; month-grid clamp; RSVP bar lost on theme re-render; cancelled-meeting
+  RSVP guard; all-day→timed 00:00 prefill; run-together textarea text; dup
+  zone const; per-open probe cost via cache) and 5 accepted ceilings (full-body
+  `$select` for reminder/month fetches; rich-body flattening on real
+  description edits; multi-day pills; >26 h reminder leads; no edit-conflict
+  detection).
+- **Verification level: compile + full workspace tests (incl. new payload/
+  probe decode tests) + tsc/vite + the review; NOT live-run.** Live sanity
+  worth doing on first use: open a real meeting invite (probe + RSVP), edit an
+  event you organize (check attendees survive untouched), watch one reminder
+  fire, and flip to Month view.
+
 ### 2026-07-10 — Mail-gaps batch: signatures, undo send, reply threading, draft attachments (v0.3.0)
 - **Signature** — `settings.signature` (plain text, one global; ponytail: per-account
   rich signatures if multi-account use demands them) edited via a Settings textarea;
@@ -1423,6 +1488,12 @@ contacts permission. Suggestions remain optional if the cache is unavailable.
 
 **Shipped in v0.3.0 (2026-07-10):** the mail-gaps batch — signature, undo send,
 reply threading, draft attachments (details in the progress log).
+
+**Shipped in v0.4.0 (2026-07-11):** calendar completion — event editing,
+in-email meeting-invite RSVP, event reminders, month grid (details in the
+progress log). The calendar now covers the user's stated scope (mail +
+calendar); remaining calendar ideas are polish (week grid, multi-day pills,
+multi-calendar picker, rich description editing).
 
 ---
 
