@@ -12,7 +12,7 @@ import {
   isEnabled as isAutostartEnabled,
 } from "@tauri-apps/plugin-autostart";
 import { isPermissionGranted, requestPermission, sendNotification } from "@tauri-apps/plugin-notification";
-import { initCalendar, loadCalendar, resetCalendar } from "./calendar";
+import { initCalendar, loadCalendar, resetCalendar, startEventReminders } from "./calendar";
 import { showConfirm, showPrompt, isDialogOpen } from "./dialog";
 import "./styles.css";
 
@@ -438,7 +438,7 @@ appRoot.innerHTML = /* html */ `
         <input type="checkbox" id="set-autostart" class="toggle toggle-sm toggle-primary" />
       </label>
       <label class="settings-row">
-        <span>Show notifications for new mail<br /><span class="hint">A desktop alert when unread messages arrive in the Inbox</span></span>
+        <span>Show notifications<br /><span class="hint">Desktop alerts for new Inbox mail and upcoming calendar events</span></span>
         <input type="checkbox" id="set-notifications" class="toggle toggle-sm toggle-primary" />
       </label>
       <label class="settings-row">
@@ -2719,6 +2719,9 @@ async function loadActiveAccount(): Promise<void> {
   resetReader();
   showSignedIn();
   await refreshCalendarCapability();
+  // Event reminders run app-wide from the first active account (idempotent —
+  // the loop itself re-checks calendar capability + the notification setting).
+  startEventReminders();
   // If the calendar tab is showing (e.g. after switching to a calendar-capable
   // account), refresh its contents for the new mailbox.
   if (appMode === "calendar" && calendarSupported) {

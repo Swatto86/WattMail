@@ -647,6 +647,9 @@ pub struct CalendarEvent {
     pub web_link: Option<String>,
     /// True when the signed-in user organizes this event (can edit/delete it).
     pub is_organizer: bool,
+    /// Minutes before `start` at which the user's reminder should fire, or
+    /// `None` when the reminder is off (or the provider doesn't say).
+    pub reminder_minutes_before_start: Option<u32>,
 }
 
 /// A new event to create on the user's default calendar.

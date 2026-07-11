@@ -1271,6 +1271,8 @@ pub struct CalendarEventDto {
     pub response_status: String,
     pub web_link: Option<String>,
     pub is_organizer: bool,
+    /// Minutes before `start` the user's reminder should fire; `None` = off.
+    pub reminder_minutes: Option<u32>,
 }
 
 fn calendar_event_dto(e: wattmail_domain::CalendarEvent) -> CalendarEventDto {
@@ -1302,6 +1304,7 @@ fn calendar_event_dto(e: wattmail_domain::CalendarEvent) -> CalendarEventDto {
         response_status: e.response_status.as_str().to_string(),
         web_link: e.web_link,
         is_organizer: e.is_organizer,
+        reminder_minutes: e.reminder_minutes_before_start,
     }
 }
 

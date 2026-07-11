@@ -23,7 +23,8 @@ use wattmail_domain::{
 /// Event fields the agenda needs. `body` is fetched so the detail pane can render
 /// the description; `onlineMeeting`/`onlineMeetingUrl` give a join link.
 const EVENT_SELECT: &str = "id,subject,start,end,isAllDay,isCancelled,isOrganizer,type,location,\
-organizer,attendees,body,onlineMeeting,onlineMeetingUrl,webLink,responseStatus";
+organizer,attendees,body,onlineMeeting,onlineMeetingUrl,webLink,responseStatus,\
+isReminderOn,reminderMinutesBeforeStart";
 
 /// Hard cap on `calendarView` pages followed, so a pathological window can never
 /// loop unbounded. 20 pages × 100 events = 2000 occurrences, far beyond any sane
@@ -495,6 +496,17 @@ fn to_domain_event(event: GraphEvent, tz: &str) -> CalendarEvent {
         ),
         web_link: http_url(event.web_link),
         is_organizer: event.is_organizer.unwrap_or(false),
+        // A reminder exists only when explicitly on; a missing lead defaults to
+        // Outlook's usual 15 minutes, and negative/absurd values are clamped.
+        reminder_minutes_before_start: match event.is_reminder_on {
+            Some(true) => Some(
+                event
+                    .reminder_minutes_before_start
+                    .unwrap_or(15)
+                    .clamp(0, 40_320) as u32, // ≤ 4 weeks
+            ),
+            _ => None,
+        },
     }
 }
 
@@ -558,6 +570,9 @@ struct GraphEvent {
     online_meeting_url: Option<String>,
     web_link: Option<String>,
     response_status: Option<GraphResponse>,
+    is_reminder_on: Option<bool>,
+    /// Graph models this as a signed int; negatives are clamped on mapping.
+    reminder_minutes_before_start: Option<i64>,
 }
 
 #[derive(Deserialize)]

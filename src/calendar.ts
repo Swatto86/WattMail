@@ -11,6 +11,7 @@
 
 import { invoke } from "@tauri-apps/api/core";
 import { openUrl } from "@tauri-apps/plugin-opener";
+import { sendNotification } from "@tauri-apps/plugin-notification";
 import { showConfirm } from "./dialog";
 
 interface Attendee {
@@ -38,6 +39,8 @@ interface CalendarEvent {
   responseStatus: string;
   webLink: string | null;
   isOrganizer: boolean;
+  // Minutes before start the user's reminder should fire; null = reminder off.
+  reminderMinutes: number | null;
 }
 
 const RANGE_DAYS = 7;
@@ -824,6 +827,106 @@ function startOfDay(d: Date): Date {
   const c = new Date(d);
   c.setHours(0, 0, 0, 0);
   return c;
+}
+
+// ---- Event reminders ----
+// A lightweight loop, independent of the calendar tab: every REFRESH interval
+// it pulls the next ~26h of events; every TICK it fires a desktop notification
+// for any event whose per-event reminder lead (Graph's reminderMinutesBeforeStart,
+// as set in Outlook) has arrived. Fired reminders are remembered in localStorage
+// so a reload doesn't re-notify. Runs only while the app is alive — WattMail is
+// tray-resident by design, so that covers the workday.
+const REMINDER_REFRESH_MS = 10 * 60_000;
+const REMINDER_TICK_MS = 30_000;
+// Don't announce a reminder more than this far past the event start (e.g. the
+// app was closed all morning) — a stale "meeting at 09:00" toast at 14:00 is noise.
+const REMINDER_STALE_MS = 5 * 60_000;
+const REMINDED_KEY = "wattmail.remindedEvents";
+
+let reminderEvents: CalendarEvent[] = [];
+let remindersStarted = false;
+
+export function startEventReminders(): void {
+  if (remindersStarted) return; // boot can run more than once (sign-out/in)
+  remindersStarted = true;
+  void refreshReminderEvents();
+  setInterval(() => void refreshReminderEvents(), REMINDER_REFRESH_MS);
+  setInterval(checkReminders, REMINDER_TICK_MS);
+}
+
+async function refreshReminderEvents(): Promise<void> {
+  try {
+    const supports = await invoke<boolean>("account_supports_calendar");
+    const enabled = supports && (await invoke<boolean>("get_notification_setting"));
+    if (!enabled) {
+      reminderEvents = [];
+      return;
+    }
+    const now = new Date();
+    // 26h ahead: catches everything for today+tomorrow-morning. An event whose
+    // reminder lead exceeds the horizon fires when its start enters the window
+    // (later than configured, never missed).
+    const end = new Date(now.getTime() + 26 * 3_600_000);
+    reminderEvents = await invoke<CalendarEvent[]>("calendar_view", {
+      start: now.toISOString(),
+      end: end.toISOString(),
+      timeZone: IANA_ZONE,
+    });
+  } catch {
+    /* offline / signed out — keep the previous list and retry next cycle */
+  }
+}
+
+function checkReminders(): void {
+  if (reminderEvents.length === 0) return;
+  const now = Date.now();
+  const reminded = loadReminded();
+  let dirty = false;
+  for (const ev of reminderEvents) {
+    if (ev.reminderMinutes === null || ev.isCancelled) continue;
+    const start = parseLocal(ev.start).getTime();
+    if (isNaN(start)) continue;
+    const remindAt = start - ev.reminderMinutes * 60_000;
+    // Occurrence ids are unique per instance, but key on start too so an event
+    // moved to a new time re-reminds at the new time.
+    const key = `${ev.id}@${start}`;
+    if (now < remindAt || key in reminded) continue;
+    reminded[key] = start;
+    dirty = true;
+    if (now > start + REMINDER_STALE_MS) continue; // mark silently, too late to help
+    const when = ev.isAllDay
+      ? "All day"
+      : new Date(start).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });
+    const where = ev.location ? ` · ${ev.location}` : "";
+    try {
+      void sendNotification({ title: "Upcoming event", body: `${ev.subject} · ${when}${where}` });
+    } catch {
+      /* best-effort */
+    }
+  }
+  if (dirty) saveReminded(reminded);
+}
+
+function loadReminded(): Record<string, number> {
+  try {
+    const parsed: unknown = JSON.parse(localStorage.getItem(REMINDED_KEY) ?? "{}");
+    return parsed && typeof parsed === "object" ? (parsed as Record<string, number>) : {};
+  } catch {
+    return {};
+  }
+}
+
+function saveReminded(map: Record<string, number>): void {
+  // Prune entries whose event started over 2 days ago so the store stays small.
+  const cutoff = Date.now() - 2 * 86_400_000;
+  for (const k of Object.keys(map)) {
+    if (typeof map[k] !== "number" || map[k] < cutoff) delete map[k];
+  }
+  try {
+    localStorage.setItem(REMINDED_KEY, JSON.stringify(map));
+  } catch {
+    /* storage full — reminders degrade to per-session dedup */
+  }
 }
 
 // Clear all calendar view state (range window, selection, rendered panes), so one
