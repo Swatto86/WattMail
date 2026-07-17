@@ -96,6 +96,26 @@ Entra app registration (public, not secret):
 
 ## Progress log
 
+### 2026-07-17 — Sign-in redirect fix: localhost URI + dual-stack loopback (v0.4.2)
+- **Live-hit bug**: interactive sign-in failed with **AADSTS50011** — since
+  v0.2.7 (commit `c8cf1ed`) the redirect URI said `http://127.0.0.1:{port}`,
+  but **Entra's port-agnostic loopback matching applies only to the literal
+  host `localhost`** (the registered URI); with `127.0.0.1` the port must
+  match the registration exactly, impossible with an ephemeral port. Every
+  interactive sign-in/re-auth since v0.2.7 was broken; it surfaced only when
+  a session next needed one.
+- Fix in `interactive_login`: redirect URI is `http://localhost:{port}`
+  again, and the app now listens on **both** loopback stacks (`127.0.0.1:0`
+  + best-effort `[::1]` on the same port), one waiter thread per listener,
+  first meaningful outcome wins, loser unblocked — so the redirect lands
+  whichever address the browser resolves `localhost` to (this covers the
+  IPv6-first case c8cf1ed was trying to fix by changing the URI host, which
+  is the wrong knob). Test-pinned: a redirect delivered over `[::1]` yields
+  the code.
+- **Rule: never change the loopback redirect host away from `localhost` for
+  Entra — fix resolution problems by listening on more addresses, not by
+  renaming the URI.**
+
 ### 2026-07-17 — 411 send fix + full bug-sweep batch (v0.4.1)
 - **Send failure root-caused (the user-visible 411)**: Graph's frontend rejects
   body-less POSTs with `411 Length Required`; reqwest omits `Content-Length`

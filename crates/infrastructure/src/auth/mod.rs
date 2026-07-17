@@ -291,15 +291,28 @@ impl AuthService {
     }
 
     /// Run a fresh interactive sign-in: browser + loopback redirect catcher.
+    ///
+    /// The redirect URI must say `localhost`: Entra's port-agnostic loopback
+    /// matching applies ONLY to that literal host, so `http://127.0.0.1:{port}`
+    /// is rejected with AADSTS50011 (an ephemeral port can never be
+    /// pre-registered). The browser may resolve `localhost` to either loopback
+    /// address, so we listen on BOTH stacks at the same port — that (not
+    /// changing the URI host) is the fix for the IPv6-first resolution case.
     pub async fn interactive_login(&self) -> Result<TokenSet, AuthError> {
-        let server =
+        let v4 =
             tiny_http::Server::http("127.0.0.1:0").map_err(|e| AuthError::Listener(io_other(e)))?;
-        let port = server
+        let port = v4
             .server_addr()
             .to_ip()
             .map(|addr| addr.port())
             .ok_or_else(|| AuthError::Listener(io_other("loopback listener has no IP port")))?;
-        let redirect_uri = format!("http://127.0.0.1:{port}");
+        let mut servers = vec![std::sync::Arc::new(v4)];
+        // Best-effort: no IPv6 loopback (or the port is taken there) degrades
+        // to IPv4-only, which every stock Windows/macOS browser still reaches.
+        if let Ok(v6) = tiny_http::Server::http(format!("[::1]:{port}")) {
+            servers.push(std::sync::Arc::new(v6));
+        }
+        let redirect_uri = format!("http://localhost:{port}");
 
         let pkce = Pkce::generate();
         let state = random_token();
@@ -308,10 +321,27 @@ impl AuthService {
         open::that(&authorize_url).map_err(AuthError::Browser)?;
         println!("Opened your browser to sign in. Waiting for the redirect…");
 
-        let expected_state = state.clone();
-        let code = tokio::task::spawn_blocking(move || wait_for_code(server, &expected_state))
+        // One waiter per listener; the first meaningful outcome (code, error,
+        // or timeout) wins, then the other listener is unblocked and its
+        // waiter's send lands in a closed channel.
+        let (tx, rx) = std::sync::mpsc::channel();
+        for server in &servers {
+            let server = std::sync::Arc::clone(server);
+            let expected_state = state.clone();
+            let tx = tx.clone();
+            std::thread::spawn(move || {
+                let _ = tx.send(wait_for_code(&server, &expected_state));
+            });
+        }
+        drop(tx);
+        let code = tokio::task::spawn_blocking(move || rx.recv())
             .await
-            .map_err(|e| AuthError::Listener(io_other(e)))??;
+            .map_err(|e| AuthError::Listener(io_other(e)))?
+            .map_err(|e| AuthError::Listener(io_other(e)))?;
+        for server in &servers {
+            server.unblock();
+        }
+        let code = code?;
 
         self.exchange_code(&code, &redirect_uri, &pkce.verifier)
             .await
@@ -402,7 +432,7 @@ impl AuthService {
 /// CSRF state. Browser noise (e.g. favicon requests) is answered and ignored.
 /// Bounded by a deadline so a user who closes the browser tab (never completing
 /// sign-in) doesn't wedge the flow forever — it returns [`AuthError::TimedOut`].
-fn wait_for_code(server: tiny_http::Server, expected_state: &str) -> Result<String, AuthError> {
+fn wait_for_code(server: &tiny_http::Server, expected_state: &str) -> Result<String, AuthError> {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(300);
     loop {
         let Some(remaining) = deadline.checked_duration_since(std::time::Instant::now()) else {
@@ -413,7 +443,7 @@ fn wait_for_code(server: tiny_http::Server, expected_state: &str) -> Result<Stri
             Ok(None) => return Err(AuthError::TimedOut), // deadline elapsed
             Err(e) => return Err(AuthError::Listener(io_other(e))),
         };
-        let target = format!("http://127.0.0.1{}", request.url());
+        let target = format!("http://localhost{}", request.url());
         let (code, state, error) = match url::Url::parse(&target) {
             Ok(url) => extract_params(&url),
             Err(_) => (None, None, None),
@@ -470,4 +500,55 @@ fn text_response(body: &str) -> tiny_http::Response<std::io::Cursor<Vec<u8>>> {
 
 fn io_other(e: impl std::fmt::Display) -> std::io::Error {
     std::io::Error::other(e.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The sign-in redirect URI must say `localhost` (Entra only port-ignores
+    /// that host), so the browser may deliver the redirect over either
+    /// loopback stack. Pin the dual-listener race: a redirect landing on the
+    /// IPv6 listener still yields the code.
+    #[test]
+    fn redirect_on_ipv6_loopback_still_reaches_a_waiter() {
+        let v4 = tiny_http::Server::http("127.0.0.1:0").expect("bind v4 loopback");
+        let port = v4
+            .server_addr()
+            .to_ip()
+            .expect("listener has an IP port")
+            .port();
+        let Ok(v6) = tiny_http::Server::http(format!("[::1]:{port}")) else {
+            return; // no IPv6 loopback on this machine — v4-only is the proven path
+        };
+        let servers = [std::sync::Arc::new(v4), std::sync::Arc::new(v6)];
+        let (tx, rx) = std::sync::mpsc::channel();
+        for server in &servers {
+            let server = std::sync::Arc::clone(server);
+            let tx = tx.clone();
+            std::thread::spawn(move || {
+                let _ = tx.send(wait_for_code(&server, "st4t3"));
+            });
+        }
+        drop(tx);
+
+        use std::io::Write;
+        let mut stream =
+            std::net::TcpStream::connect(("::1", port)).expect("connect IPv6 loopback");
+        write!(
+            stream,
+            "GET /?code=c0de&state=st4t3 HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"
+        )
+        .expect("send redirect request");
+        stream.flush().expect("flush");
+
+        let code = rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("a waiter reported")
+            .expect("code extracted");
+        assert_eq!(code, "c0de");
+        for server in &servers {
+            server.unblock();
+        }
+    }
 }
