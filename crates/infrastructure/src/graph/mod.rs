@@ -42,6 +42,16 @@ impl GraphClient {
         &self.access_token
     }
 
+    /// POST with a deliberately empty body. Graph's frontend rejects body-less
+    /// POSTs with 411 Length Required, so `Content-Length: 0` must be explicit
+    /// (reqwest omits the header entirely when no body is set).
+    fn post_empty(&self, url: &str) -> reqwest::RequestBuilder {
+        self.http
+            .post(url)
+            .bearer_auth(&self.access_token)
+            .header(reqwest::header::CONTENT_LENGTH, 0)
+    }
+
     async fn get(&self, url: &str) -> Result<reqwest::Response, MailError> {
         let response = self
             .http
@@ -820,9 +830,7 @@ impl MailProvider for GraphClient {
             .expect("base URL is a proper path")
             .push("createReply");
         let response = self
-            .http
-            .post(url.as_str())
-            .bearer_auth(&self.access_token)
+            .post_empty(url.as_str())
             .send()
             .await
             .map_err(|e| MailError::Network(e.to_string()))?;
@@ -926,9 +934,7 @@ impl MailProvider for GraphClient {
             .expect("base URL is a proper path")
             .push("send");
         let response = self
-            .http
-            .post(url.as_str())
-            .bearer_auth(&self.access_token)
+            .post_empty(url.as_str())
             .send()
             .await
             .map_err(|e| MailError::Network(e.to_string()))?;
@@ -1702,6 +1708,24 @@ impl From<GraphMessage> for MessageSummary {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn empty_post_carries_explicit_zero_content_length() {
+        // Graph rejects body-less POSTs with 411 Length Required; the draft
+        // send and createReply paths depend on this header being present.
+        let client = GraphClient::new("token");
+        let request = client
+            .post_empty("https://graph.microsoft.com/v1.0/me/messages/x/send")
+            .build()
+            .expect("request builds");
+        assert_eq!(
+            request
+                .headers()
+                .get(reqwest::header::CONTENT_LENGTH)
+                .and_then(|v| v.to_str().ok()),
+            Some("0")
+        );
+    }
 
     #[test]
     fn plain_file_attachment_json_has_no_inline_fields() {
