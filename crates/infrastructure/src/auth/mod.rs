@@ -12,6 +12,7 @@ mod token_store;
 pub use token_store::{TokenSet, TokenStore};
 
 use pkce::{random_token, Pkce};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 
 /// Static OAuth configuration for one identity provider. Provider-neutral: the
@@ -139,6 +140,18 @@ pub struct AuthService {
     store: TokenStore,
     /// Access token cached for this process; avoids refreshing on every call.
     cache: Mutex<Option<TokenSet>>,
+    /// Serializes silent refreshes: two concurrent expired-token callers would
+    /// otherwise both redeem the same refresh token and interleave their
+    /// chunked keyring writes, persisting a corrupted blend of the two rotated
+    /// tokens and wedging the account until a manual re-sign-in.
+    refresh_lock: tokio::sync::Mutex<()>,
+    /// Set by [`sign_out`](Self::sign_out); makes [`remember`](Self::remember)
+    /// a no-op so an in-flight refresh can't write a fresh token back into the
+    /// keyring entries a just-removed account already cleared.
+    signed_out: AtomicBool,
+    /// Mutual exclusion between `remember`'s check-then-save and `sign_out`'s
+    /// flag-then-clear, so their keyring writes can never interleave.
+    store_lock: Mutex<()>,
 }
 
 impl AuthService {
@@ -147,9 +160,17 @@ impl AuthService {
     pub fn new(config: OAuthConfig, keyring_prefix: impl Into<String>) -> Result<Self, AuthError> {
         Ok(Self {
             config,
-            http: reqwest::Client::new(),
+            // Bounded so a black-holed token request can't hang a command forever.
+            http: reqwest::Client::builder()
+                .connect_timeout(std::time::Duration::from_secs(15))
+                .timeout(std::time::Duration::from_secs(30))
+                .build()
+                .map_err(AuthError::Http)?,
             store: TokenStore::new(keyring_prefix)?,
             cache: Mutex::new(None),
+            refresh_lock: tokio::sync::Mutex::new(()),
+            signed_out: AtomicBool::new(false),
+            store_lock: Mutex::new(()),
         })
     }
 
@@ -162,6 +183,13 @@ impl AuthService {
     /// a transport failure surfaces as [`AuthError::Network`] (offline, not a
     /// credential problem).
     pub async fn access_token(&self) -> Result<String, AuthError> {
+        if let Some(access_token) = self.cached_access_token() {
+            return Ok(access_token);
+        }
+        // One refresh at a time: a caller that lost the race waits here, then
+        // finds the winner's freshly-cached token on the re-check and returns
+        // without redeeming (and rotating) the refresh token a second time.
+        let _refresh_guard = self.refresh_lock.lock().await;
         if let Some(access_token) = self.cached_access_token() {
             return Ok(access_token);
         }
@@ -187,6 +215,8 @@ impl AuthService {
     /// after [`access_token`](Self::access_token) reported [`AuthError::ReauthRequired`].
     pub async fn reauthenticate(&self) -> Result<(), AuthError> {
         let tokens = self.interactive_login().await?;
+        // An explicit sign-in always un-bars persistence.
+        self.signed_out.store(false, Ordering::SeqCst);
         self.remember(&tokens)
     }
 
@@ -211,8 +241,14 @@ impl AuthService {
     }
 
     /// Cache the token set for this process and persist the (rotated) refresh
-    /// token to the OS keychain.
+    /// token to the OS keychain. A no-op after [`sign_out`](Self::sign_out):
+    /// an in-flight refresh finishing late must not resurrect credentials the
+    /// account removal just erased.
     fn remember(&self, tokens: &TokenSet) -> Result<(), AuthError> {
+        let _store_guard = self.store_lock.lock().expect("store lock poisoned");
+        if self.signed_out.load(Ordering::SeqCst) {
+            return Ok(());
+        }
         if let Some(refresh_token) = &tokens.refresh_token {
             self.store.save_refresh_token(refresh_token)?;
         }
@@ -239,11 +275,16 @@ impl AuthService {
     /// Force a fresh interactive sign-in and persist the result.
     pub async fn sign_in(&self) -> Result<(), AuthError> {
         let tokens = self.interactive_login().await?;
+        // An explicit sign-in always un-bars persistence.
+        self.signed_out.store(false, Ordering::SeqCst);
         self.remember(&tokens)
     }
 
-    /// Forget all credentials (in-memory cache + persisted refresh token).
+    /// Forget all credentials (in-memory cache + persisted refresh token) and
+    /// bar any in-flight refresh from persisting new ones afterwards.
     pub fn sign_out(&self) -> Result<(), AuthError> {
+        let _store_guard = self.store_lock.lock().expect("store lock poisoned");
+        self.signed_out.store(true, Ordering::SeqCst);
         *self.cache.lock().expect("token cache poisoned") = None;
         self.store.clear()?;
         Ok(())

@@ -187,9 +187,13 @@ fn sanitize_style(style: &str) -> String {
 }
 
 /// Reject CSS values that could load remote content or escape into script.
+/// Backslashes are rejected outright: CSS escape sequences (`\75rl(…)` decodes
+/// to `url(…)`) would otherwise reconstruct any of the banned tokens past
+/// these literal substring checks. No legitimate mail style needs one.
 fn is_safe_css_value(value: &str) -> bool {
     let lower = value.to_ascii_lowercase();
-    !lower.contains("url(")
+    !lower.contains('\\')
+        && !lower.contains("url(")
         && !lower.contains("expression")
         && !lower.contains("javascript:")
         && !lower.contains("@import")
@@ -334,6 +338,18 @@ mod tests {
     #[test]
     fn plain_text_is_never_designed() {
         assert!(!sanitize_email("hello", false, false).is_designed);
+    }
+
+    #[test]
+    fn css_backslash_escape_cannot_smuggle_url_past_the_filter() {
+        // `\75` decodes to `u` in CSS, reconstituting `url(...)` — the whole
+        // declaration must be dropped, in both blocked and allowed modes.
+        let html = r#"<div style="background:\75rl(http://tracker.example/p.gif)">x</div>"#;
+        for allow_images in [false, true] {
+            let out = sanitize_email(html, true, allow_images).html;
+            assert!(!out.contains('\\'), "escape survived: {out}");
+            assert!(!out.contains("tracker.example"), "url survived: {out}");
+        }
     }
 
     #[test]

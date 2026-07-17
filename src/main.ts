@@ -16,6 +16,7 @@ import {
   IANA_ZONE,
   initCalendar,
   loadCalendar,
+  notificationSettingChanged,
   resetCalendar,
   startEventReminders,
 } from "./calendar";
@@ -887,8 +888,11 @@ function renderInbox(inbox: Inbox): void {
     listEl.innerHTML = renderListBody(visible, showRecipient) + more;
   }
 
-  // A refresh may have dropped the open message; clear the reader if so.
-  if (selectedId && !currentIds.has(selectedId)) resetReader();
+  // Deliberately no reader reset here: the loaded window is a top-N slice, so
+  // an open message can drop out of `currentIds` just because new mail pushed
+  // it past the LIMIT during a background refresh — blanking mid-read then
+  // reads as data loss. Real removals (delete/move/folder switch) call
+  // resetReader() at their own sites.
   highlightSelected();
   syncCursor();
 }
@@ -1147,13 +1151,13 @@ function renderSearchResults(query: string, results: Message[]): void {
   const header = `<div class="search-header">Search results for: ${esc(query)} (${count})</div>`;
   if (visible.length === 0) {
     listEl.innerHTML = header + `<div class="p-6 text-center opacity-60">No matching messages.</div>`;
-    if (selectedId && !currentIds.has(selectedId)) resetReader();
     syncCursor();
     return;
   }
   const rows = visible.map((m) => messageRowHtml(m, false)).join("");
   listEl.innerHTML = header + rows;
-  if (selectedId && !currentIds.has(selectedId)) resetReader();
+  // As in renderInbox: results are a relevance-ranked slice, so the open
+  // message falling outside them is not a removal — keep the reader.
   highlightSelected();
   syncCursor();
 }
@@ -1364,18 +1368,25 @@ function renderInviteBar(bar: HTMLDivElement, messageId: string, invite: Meeting
           });
           // Ignore if the reader moved on while the response was in flight.
           if (selectedId !== messageId) return;
+          // Re-query the live bar: a re-render (click-away-and-back, theme
+          // toggle) replaces the node the click closure captured, and writing
+          // to the detached one leaves the visible bar unanswered.
+          const live =
+            readerEl.querySelector<HTMLDivElement>("#reader-invite") ?? bar;
           const done =
             response === "accept"
               ? "Accepted"
               : response === "tentative"
                 ? "Tentatively accepted"
                 : "Declined";
-          bar.innerHTML = `<span class="reader-invite-label">&#128197; ${done} — your response was sent to the organizer.</span>`;
+          live.innerHTML = `<span class="reader-invite-label">&#128197; ${done} — your response was sent to the organizer.</span>`;
         })
         .catch((e) => {
           if (selectedId !== messageId) return;
-          bar.querySelectorAll<HTMLButtonElement>("button").forEach((b) => (b.disabled = false));
-          const label = bar.querySelector<HTMLSpanElement>(".reader-invite-label");
+          const live =
+            readerEl.querySelector<HTMLDivElement>("#reader-invite") ?? bar;
+          live.querySelectorAll<HTMLButtonElement>("button").forEach((b) => (b.disabled = false));
+          const label = live.querySelector<HTMLSpanElement>(".reader-invite-label");
           if (label) label.textContent = `Could not send response: ${e}`;
         });
     });
@@ -3161,11 +3172,12 @@ function sanitizeHtml(dirty: string): string {
 }
 
 // ---- Inline images ----
-// Single-image and total-payload caps. Graph's sendMail inline limit is ~3 MB
-// per image; we cap raw bytes so a base64-inflated body still fits, and warn
-// once the cumulative inline payload approaches the same ceiling.
-const INLINE_IMAGE_MAX_BYTES = 3 * 1024 * 1024;
-const INLINE_TOTAL_WARN_BYTES = 3 * 1024 * 1024;
+// Single-image and total-payload caps. These mirror the backend's hard
+// total-attachment budget (collect_attachments' MAX_ATTACHMENT_BYTES) — the
+// client-side guard must catch everything the backend would reject, or the
+// failure only surfaces after the full undo-send wait.
+const INLINE_IMAGE_MAX_BYTES = 2_500_000;
+const INLINE_TOTAL_WARN_BYTES = 2_500_000;
 const oneMb = (bytes: number): string => (bytes / (1024 * 1024)).toFixed(1);
 // data: image URLs are base64; raw bytes ≈ payload length * 3 / 4.
 function dataUrlByteLength(dataUrl: string): number {
@@ -3724,6 +3736,7 @@ async function replyTo(replyAll: boolean, id?: string): Promise<void> {
       replyToId: targetId,
     });
   } catch (e) {
+    if (await handlePossibleAuthError(e)) return;
     statusEl.textContent = `Could not prepare reply: ${e}`;
   }
 }
@@ -3782,12 +3795,14 @@ async function forwardMsg(id?: string): Promise<void> {
         "Some attachments on the original (embedded messages or cloud links) can't be forwarded by WattMail.";
     }
   } catch (e) {
+    if (await handlePossibleAuthError(e)) return;
     statusEl.textContent = `Could not prepare forward: ${e}`;
   }
 }
 
 // Total-attachment budget for a single send (Graph's simple sendMail path). Must
-// match the backend guard in send_message.
+// match the backend guard in send_message — and INLINE_IMAGE_MAX_BYTES above,
+// which pre-screens inline images against the same budget.
 const MAX_SEND_ATTACHMENT_BYTES = 2_500_000;
 
 // Resume editing a saved draft: load its RAW body (never the display-sanitized
@@ -3826,6 +3841,7 @@ async function resumeDraft(id: string): Promise<void> {
       }
     }
   } catch (e) {
+    if (await handlePossibleAuthError(e)) return;
     statusEl.textContent = `Could not open draft: ${e}`;
   }
 }
@@ -3928,8 +3944,14 @@ async function saveDraft(): Promise<void> {
         : "Draft saved.";
     await syncDraftsFolder();
   } catch (e) {
-    composeMsg.dataset.error = "1";
-    composeMsg.textContent = `Could not save draft: ${e}`;
+    // A stale session gets the one-tap re-sign-in prompt, not a dead-end
+    // error string (the typed message stays in the composer either way).
+    if (await handlePossibleAuthError(e)) {
+      composeMsg.textContent = "Session expired — sign in, then save again.";
+    } else {
+      composeMsg.dataset.error = "1";
+      composeMsg.textContent = `Could not save draft: ${e}`;
+    }
   } finally {
     composeSaveInFlight = false;
     composeSaveDraftBtn.disabled = false;
@@ -4074,8 +4096,14 @@ async function sendCompose(): Promise<void> {
     statusEl.textContent = "Message sent.";
     if (hadDraft) await syncDraftsFolder(); // the draft has left Drafts
   } catch (e) {
-    composeMsg.dataset.error = "1";
-    composeMsg.textContent = `Send failed: ${e}`;
+    // A stale session gets the one-tap re-sign-in prompt, not a dead-end
+    // error string (the typed message stays in the composer either way).
+    if (await handlePossibleAuthError(e)) {
+      composeMsg.textContent = "Session expired — sign in, then send again.";
+    } else {
+      composeMsg.dataset.error = "1";
+      composeMsg.textContent = `Send failed: ${e}`;
+    }
   } finally {
     composeSaveInFlight = false;
     composeSendBtn.disabled = false;
@@ -4915,6 +4943,9 @@ setNotifications.addEventListener("change", async () => {
       }
     }
     await invoke("set_notification_setting", { value: want });
+    // Apply to calendar reminders immediately — off must silence
+    // already-fetched ones, not wait out the 10-min refresh cycle.
+    notificationSettingChanged();
   } catch (e) {
     settingsMsg.textContent = `Could not change notification setting: ${e}`;
     setNotifications.checked = !want;
@@ -5077,6 +5108,20 @@ updateLater.addEventListener("click", () => updateBanner.classList.add("hidden")
 
 // Tray "Settings…" menu item asks the frontend to open the modal.
 void listen("open-settings", () => openSettings());
+
+// Tray "Quit" routes through here (see quit_with_flush) so a mid-compose
+// draft whose debounced autosave hasn't fired yet is flushed to Drafts before
+// the process exits. The backend watchdog force-exits if this never returns.
+void listen("app-quit-flush", async () => {
+  try {
+    cancelAutosave();
+    // Wait out a save already in flight so the flush can't double-save.
+    while (composeSaveInFlight) await new Promise((r) => setTimeout(r, 100));
+    await runAutosave(); // no-ops when compose is closed or clean
+  } finally {
+    void invoke("quit_app");
+  }
+});
 
 // (No notification-click handler: tauri-plugin-notification doesn't deliver
 // click events, so there is nothing to listen for. Clicking a new-mail toast

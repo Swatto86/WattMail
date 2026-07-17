@@ -9,6 +9,7 @@ mod paths;
 mod settings;
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::RwLock;
 
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
@@ -25,6 +26,11 @@ const HIDDEN_FLAG: &str = "--hidden";
 /// Whether this process was launched into the tray (autostart). Read by the
 /// `started_hidden` command so the frontend skips revealing the window.
 pub(crate) struct StartHidden(pub bool);
+
+/// Set once the user explicitly closes the window to the tray, so the startup
+/// safety-net (which re-shows a window the frontend failed to reveal) doesn't
+/// pop the window back up against that explicit action.
+static USER_HID_WINDOW: AtomicBool = AtomicBool::new(false);
 
 /// In-memory state for desktop new-mail notifications: per account, the most
 /// recent `receivedDateTime` we have already notified about, so we only fire on
@@ -73,7 +79,9 @@ pub fn run() {
                 if let Some(window) = app.get_webview_window("main") {
                     std::thread::spawn(move || {
                         std::thread::sleep(std::time::Duration::from_millis(3000));
-                        let _ = window.show();
+                        if !USER_HID_WINDOW.load(Ordering::SeqCst) {
+                            let _ = window.show();
+                        }
                     });
                 }
             }
@@ -89,6 +97,7 @@ pub fn run() {
                     .map(|s| s.close_to_tray)
                     .unwrap_or(true);
                 if close_to_tray {
+                    USER_HID_WINDOW.store(true, Ordering::SeqCst);
                     let _ = window.hide();
                     api.prevent_close();
                 }
@@ -151,6 +160,7 @@ pub fn run() {
             commands::update_event,
             commands::respond_to_event,
             commands::delete_event,
+            commands::quit_app,
         ])
         .run(tauri::generate_context!())
         .expect("error while running WattMail");
@@ -179,7 +189,7 @@ fn build_tray(app: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
                 show_main(app);
                 let _ = app.emit("open-settings", ());
             }
-            "quit" => app.exit(0),
+            "quit" => quit_with_flush(app),
             _ => {}
         })
         .on_tray_icon_event(|tray, event| {
@@ -194,6 +204,23 @@ fn build_tray(app: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
         })
         .build(app)?;
     Ok(())
+}
+
+/// Quit via the frontend: emit a flush signal so a mid-compose draft whose
+/// debounced autosave hasn't fired yet is saved before the process dies; the
+/// frontend calls the `quit_app` command once its flush completes. The
+/// watchdog thread covers a hung or never-loaded frontend — nothing to flush
+/// there, so a delayed hard exit is safe.
+pub(crate) fn quit_with_flush(app: &AppHandle) {
+    if app.emit("app-quit-flush", ()).is_err() {
+        app.exit(0);
+        return;
+    }
+    let handle = app.clone();
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_secs(10));
+        handle.exit(0);
+    });
 }
 
 /// Play the system notification sound (respects the user's sound scheme).

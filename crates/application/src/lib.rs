@@ -472,11 +472,19 @@ pub fn compose_reply(message: &MessageBody, self_email: &str, reply_all: bool) -
         }
     };
 
-    // Prefer Reply-To over the raw From; fall back to From when unset.
-    if message.reply_to_addresses.is_empty() {
+    // Prefer Reply-To over the raw From; fall back to From when unset. Judge
+    // presence on *usable* (non-blank) entries — Graph can serve a Reply-To
+    // whose address is an empty string, and treating that as "set" would open
+    // the reply with no recipient at all.
+    let reply_to: Vec<&String> = message
+        .reply_to_addresses
+        .iter()
+        .filter(|a| !a.is_empty())
+        .collect();
+    if reply_to.is_empty() {
         push_unique(&mut to, &message.from_address);
     } else {
-        for addr in &message.reply_to_addresses {
+        for addr in reply_to {
             push_unique(&mut to, addr);
         }
     }
@@ -773,6 +781,15 @@ mod tests {
         let msg = body_with("sender@x.com", &["list@x.com"], &[], &[]);
         let prefill = compose_reply(&msg, "me@x.com", false);
         assert_eq!(prefill.to, vec!["list@x.com".to_string()]);
+    }
+
+    #[test]
+    fn reply_falls_back_to_from_when_reply_to_is_only_blanks() {
+        // Graph can serve a Reply-To entry whose address is "" — the reply
+        // must still target the sender, not open with no recipient.
+        let msg = body_with("sender@x.com", &[""], &[], &[]);
+        let prefill = compose_reply(&msg, "me@x.com", false);
+        assert_eq!(prefill.to, vec!["sender@x.com".to_string()]);
     }
 
     #[test]

@@ -131,12 +131,31 @@ impl CalendarProvider for GraphClient {
         // PATCH /me/events/{id} replaces the supplied fields in place (the
         // attendee list is replaced wholesale); Graph returns the updated
         // event and, for a meeting, sends attendees an update.
+        let mut payload = event_payload(event, &tz);
+        if let Some(list) = &event.attendees {
+            // The edited list carries bare addresses only. Rebuilding entries
+            // from scratch would mark everyone "required" with no `status`,
+            // which Graph treats as a fresh invite: it re-notifies the whole
+            // list and wipes recorded accept/decline responses. Merge with the
+            // event's current collection so surviving attendees keep their
+            // name, optional/required type, and RSVP status.
+            let mut url = event_endpoint(id);
+            url.set_query(Some("$select=attendees"));
+            let current: serde_json::Value = self
+                .get(url.as_str())
+                .await?
+                .json()
+                .await
+                .map_err(|e| MailError::Decode(e.to_string()))?;
+            payload["attendees"] =
+                serde_json::Value::Array(merged_attendees_json(list, &current["attendees"]));
+        }
         let response = self
             .http()
             .patch(event_endpoint(id).as_str())
             .bearer_auth(self.token())
             .header("Prefer", &prefer)
-            .json(&event_payload(event, &tz))
+            .json(&payload)
             .send()
             .await
             .map_err(|e| MailError::Network(e.to_string()))?;
@@ -314,6 +333,38 @@ fn event_payload(event: &NewEvent, tz: &str) -> serde_json::Value {
             .insert("attendees".to_string(), serde_json::Value::Array(attendees));
     }
     payload
+}
+
+/// Merge an edited attendee address list with the event's current server-side
+/// attendee collection (`current` = the GET's `attendees` array). Addresses
+/// already attending keep their full existing entry; new addresses join as
+/// bare `required` entries. Pure, so the merge is unit-tested.
+fn merged_attendees_json(
+    new_addresses: &[String],
+    current: &serde_json::Value,
+) -> Vec<serde_json::Value> {
+    let existing = current.as_array().cloned().unwrap_or_default();
+    new_addresses
+        .iter()
+        .map(|a| a.trim())
+        .filter(|a| !a.is_empty())
+        .map(|address| {
+            existing
+                .iter()
+                .find(|entry| {
+                    entry["emailAddress"]["address"]
+                        .as_str()
+                        .is_some_and(|e| e.eq_ignore_ascii_case(address))
+                })
+                .cloned()
+                .unwrap_or_else(|| {
+                    serde_json::json!({
+                        "emailAddress": { "address": address },
+                        "type": "required",
+                    })
+                })
+        })
+        .collect()
 }
 
 /// Build the `/me/events/{id}` endpoint with the opaque id encoded as a single
@@ -634,6 +685,37 @@ struct GraphEventBody {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn attendee_merge_keeps_existing_entries_and_adds_new_as_required() {
+        // Existing collection: an optional attendee with a name and an
+        // accepted required one — both must survive an edit untouched.
+        let current = serde_json::json!([
+            {
+                "emailAddress": { "address": "fyi@x.com", "name": "Manager" },
+                "type": "optional",
+                "status": { "response": "none", "time": "0001-01-01T00:00:00Z" }
+            },
+            {
+                "emailAddress": { "address": "dev@x.com", "name": "Dev" },
+                "type": "required",
+                "status": { "response": "accepted", "time": "2026-07-01T09:00:00Z" }
+            }
+        ]);
+        // Edit keeps both (one with different case), drops nobody, adds one.
+        let merged = merged_attendees_json(
+            &["FYI@x.com".into(), "dev@x.com".into(), " new@x.com ".into()],
+            &current,
+        );
+
+        assert_eq!(merged.len(), 3);
+        assert_eq!(merged[0]["type"], "optional");
+        assert_eq!(merged[0]["emailAddress"]["name"], "Manager");
+        assert_eq!(merged[1]["status"]["response"], "accepted");
+        assert_eq!(merged[2]["emailAddress"]["address"], "new@x.com");
+        assert_eq!(merged[2]["type"], "required");
+        assert!(merged[2].get("status").is_none());
+    }
 
     #[test]
     fn normalize_strips_fractional_seconds_and_zone_marker() {

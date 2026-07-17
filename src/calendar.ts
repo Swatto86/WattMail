@@ -1000,6 +1000,9 @@ const REMINDED_KEY = "wattmail.remindedEvents";
 
 let reminderEvents: CalendarEvent[] = [];
 let remindersStarted = false;
+// Discards out-of-order refresh completions: an in-flight fetch for the
+// previous account must not overwrite the new account's list (mirrors loadSeq).
+let reminderSeq = 0;
 
 export function startEventReminders(): void {
   // Always refresh right away: a sign-in or account SWITCH must not keep
@@ -1012,11 +1015,12 @@ export function startEventReminders(): void {
 }
 
 async function refreshReminderEvents(): Promise<void> {
+  const seq = ++reminderSeq;
   try {
     const supports = await invoke<boolean>("account_supports_calendar");
     const enabled = supports && (await invoke<boolean>("get_notification_setting"));
     if (!enabled) {
-      reminderEvents = [];
+      if (seq === reminderSeq) reminderEvents = [];
       return;
     }
     const now = new Date();
@@ -1024,14 +1028,23 @@ async function refreshReminderEvents(): Promise<void> {
     // reminder lead exceeds the horizon fires when its start enters the window
     // (later than configured, never missed).
     const end = new Date(now.getTime() + 26 * 3_600_000);
-    reminderEvents = await invoke<CalendarEvent[]>("calendar_view", {
+    const fetched = await invoke<CalendarEvent[]>("calendar_view", {
       start: now.toISOString(),
       end: end.toISOString(),
       timeZone: IANA_ZONE,
     });
+    // Commit only if no newer refresh (or account switch) superseded this one.
+    if (seq === reminderSeq) reminderEvents = fetched;
   } catch {
     /* offline / signed out — keep the previous list and retry next cycle */
   }
+}
+
+// Called by the settings toggle: switching notifications off must silence
+// already-fetched reminders immediately (not on the next 10-min cycle), and
+// switching them on picks upcoming events straight up.
+export function notificationSettingChanged(): void {
+  void refreshReminderEvents();
 }
 
 function checkReminders(): void {
@@ -1094,8 +1107,10 @@ export function resetCalendar(): void {
   selectedId = null;
   events = [];
   // The old account's reminders must stop immediately too (the switch path
-  // also calls startEventReminders, which refetches for the new account).
+  // also calls startEventReminders, which refetches for the new account), and
+  // any of its fetches still in flight must land dead.
   reminderEvents = [];
+  reminderSeq++;
   loadSeq++; // cancel any in-flight load
   if (agendaEl) agendaEl.innerHTML = "";
   if (detailEl) resetDetail();

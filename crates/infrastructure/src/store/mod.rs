@@ -410,22 +410,28 @@ impl MailStore for SqliteStore {
         self.run(move |conn| {
             // Replace-all: the live list is authoritative, so wipe then re-insert
             // in order. position preserves the sidebar's tree order on read-back.
-            conn.execute("DELETE FROM folders", [])?;
-            let mut stmt = conn.prepare(
-                "INSERT INTO folders (id, name, unread_count, depth, position, role)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            )?;
-            for r in &rows {
-                stmt.execute(rusqlite::params![
-                    r.id,
-                    r.name,
-                    r.unread_count,
-                    r.depth,
-                    r.position,
-                    r.role,
-                ])?;
+            // One transaction: a mid-loop failure (locked db, full disk) must
+            // roll the DELETE back, not leave a truncated list for the
+            // offline sidebar. Rolls back automatically if dropped uncommitted.
+            let tx = conn.unchecked_transaction()?;
+            tx.execute("DELETE FROM folders", [])?;
+            {
+                let mut stmt = tx.prepare(
+                    "INSERT INTO folders (id, name, unread_count, depth, position, role)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                )?;
+                for r in &rows {
+                    stmt.execute(rusqlite::params![
+                        r.id,
+                        r.name,
+                        r.unread_count,
+                        r.depth,
+                        r.position,
+                        r.role,
+                    ])?;
+                }
             }
-            Ok(())
+            tx.commit()
         })
         .await
     }

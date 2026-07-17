@@ -26,7 +26,14 @@ pub struct GraphClient {
 impl GraphClient {
     pub fn new(access_token: impl Into<String>) -> Self {
         Self {
-            http: reqwest::Client::new(),
+            // Bounded so a black-holed request can never hang a command (and
+            // its spinner) forever; 60s total leaves room for the ~3 MB
+            // base64 attachment uploads on a slow uplink.
+            http: reqwest::Client::builder()
+                .connect_timeout(std::time::Duration::from_secs(15))
+                .timeout(std::time::Duration::from_secs(60))
+                .build()
+                .expect("reqwest client"),
             access_token: access_token.into(),
         }
     }
@@ -50,6 +57,31 @@ impl GraphClient {
             .post(url)
             .bearer_auth(&self.access_token)
             .header(reqwest::header::CONTENT_LENGTH, 0)
+    }
+
+    /// GET a Graph collection page-by-page, following `@odata.nextLink` until
+    /// exhausted — `$top` alone silently truncates collections larger than one
+    /// page (mirrors the folder walk in `fetch_child_folders`).
+    async fn get_all_pages<T: serde::de::DeserializeOwned>(
+        &self,
+        first_url: &str,
+    ) -> Result<Vec<T>, MailError> {
+        let mut items = Vec::new();
+        let mut url = first_url.to_string();
+        loop {
+            let page: GraphPage<T> = self
+                .get(&url)
+                .await?
+                .json()
+                .await
+                .map_err(|e| MailError::Decode(e.to_string()))?;
+            items.extend(page.value);
+            match page.next_link {
+                Some(next) => url = next,
+                None => break,
+            }
+        }
+        Ok(items)
     }
 
     async fn get(&self, url: &str) -> Result<reqwest::Response, MailError> {
@@ -220,15 +252,15 @@ impl GraphClient {
             "$filter=isInline eq true&$select=id,contentType,contentId,contentBytes,isInline&$top=50",
         ));
 
-        let Ok(response) = self.get(url.as_str()).await else {
-            return HashMap::new();
-        };
-        let Ok(body) = response.json::<GraphInlineAttachments>().await else {
+        let Ok(items) = self
+            .get_all_pages::<GraphInlineAttachment>(url.as_str())
+            .await
+        else {
             return HashMap::new();
         };
 
         let mut map = HashMap::new();
-        for att in body.value {
+        for att in items {
             let (Some(content_id), Some(bytes)) = (att.content_id, att.content_bytes) else {
                 continue;
             };
@@ -983,15 +1015,9 @@ impl MailProvider for GraphClient {
         }
         url.set_query(Some("$select=id,name,contentType,size,isInline&$top=50"));
 
-        let body: GraphAttachments = self
-            .get(url.as_str())
-            .await?
-            .json()
-            .await
-            .map_err(|e| MailError::Decode(e.to_string()))?;
+        let items: Vec<GraphAttachment> = self.get_all_pages(url.as_str()).await?;
 
-        Ok(body
-            .value
+        Ok(items
             .into_iter()
             .filter(|a| {
                 !a.is_inline.unwrap_or(false)
@@ -1042,14 +1068,9 @@ impl MailProvider for GraphClient {
         }
         url.set_query(Some("$select=id,isInline,@odata.type&$top=50"));
 
-        let body: GraphAttachments = self
-            .get(url.as_str())
-            .await?
-            .json()
-            .await
-            .map_err(|e| MailError::Decode(e.to_string()))?;
+        let items: Vec<GraphAttachment> = self.get_all_pages(url.as_str()).await?;
 
-        Ok(body.value.into_iter().any(|a| {
+        Ok(items.into_iter().any(|a| {
             !a.is_inline.unwrap_or(false)
                 && a.odata_type.as_deref() != Some("#microsoft.graph.fileAttachment")
         }))
@@ -1099,7 +1120,18 @@ impl MailProvider for GraphClient {
         url.path_segments_mut()
             .expect("base URL is a proper path")
             .push(id);
-        let payload = message_rule_json(rule);
+        // Graph PATCH replaces the `conditions`/`actions` complex properties
+        // wholesale, and our model carries only the subset the UI edits — merge
+        // over the rule's current server-side JSON so unmodeled fields a rule
+        // may have picked up in Outlook (forwardTo, stopProcessingRules,
+        // bodyContains, …) survive an edit made here.
+        let current: serde_json::Value = self
+            .get(url.as_str())
+            .await?
+            .json()
+            .await
+            .map_err(|e| MailError::Decode(e.to_string()))?;
+        let payload = message_rule_json_merged(rule, &current);
         let response = self
             .http
             .patch(url.as_str())
@@ -1432,15 +1464,12 @@ fn attachments_json(attachments: &[OutgoingAttachment]) -> Vec<serde_json::Value
     attachments.iter().map(attachment_json).collect()
 }
 
+/// One page of any Graph collection response.
 #[derive(serde::Deserialize)]
-struct GraphAttachments {
-    value: Vec<GraphAttachment>,
-}
-
-/// Inline attachments carrying their bytes, for resolving `cid:` image refs.
-#[derive(serde::Deserialize)]
-struct GraphInlineAttachments {
-    value: Vec<GraphInlineAttachment>,
+struct GraphPage<T> {
+    value: Vec<T>,
+    #[serde(rename = "@odata.nextLink")]
+    next_link: Option<String>,
 }
 
 #[derive(serde::Deserialize)]
@@ -1522,7 +1551,13 @@ async fn inline_remote_images(html: &str) -> String {
         return html.to_string();
     }
 
-    let client = reqwest::Client::new();
+    // Images are fetched sequentially, so keep the per-image budget tight: a
+    // page of dead tracker hosts must not stall message loading for minutes.
+    let client = reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(5))
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .expect("reqwest client");
     let mut result = html.to_string();
     for url in urls {
         // The src in the cleaned HTML is HTML-escaped; the fetch URL is not.
@@ -1687,6 +1722,40 @@ fn message_rule_json(rule: &MessageRule) -> serde_json::Value {
     })
 }
 
+/// [`message_rule_json`], but with the modeled `conditions`/`actions` keys
+/// overlaid onto the rule's current server-side JSON, so fields our domain
+/// model doesn't carry aren't destroyed by Graph's wholesale complex-property
+/// replacement on PATCH.
+fn message_rule_json_merged(rule: &MessageRule, current: &serde_json::Value) -> serde_json::Value {
+    let mut payload = message_rule_json(rule);
+    for (section, modeled_keys) in [
+        (
+            "conditions",
+            &["senderContains", "subjectContains", "recipientContains"][..],
+        ),
+        ("actions", &["moveToFolder", "markAsRead"][..]),
+    ] {
+        let mut merged = current
+            .get(section)
+            .and_then(|v| v.as_object().cloned())
+            .unwrap_or_default();
+        // Modeled keys are owned by the editor: drop the server's copy, then
+        // re-add whichever ones the edited rule still sets (an emptied field
+        // stays dropped = cleared). Everything else passes through untouched.
+        for key in modeled_keys {
+            merged.remove(*key);
+        }
+        if let Some(modeled) = payload[section].as_object() {
+            let modeled = modeled.clone();
+            for (k, v) in modeled {
+                merged.insert(k, v);
+            }
+        }
+        payload[section] = serde_json::Value::Object(merged);
+    }
+    payload
+}
+
 impl From<GraphMessage> for MessageSummary {
     fn from(m: GraphMessage) -> Self {
         let from = format_recipient(m.from);
@@ -1848,6 +1917,73 @@ mod tests {
         assert!(url.ends_with("/messages"));
         assert!(url.contains("%2F")); // '/' encoded, not splitting the segment
         assert!(!url.contains('?'));
+    }
+
+    #[test]
+    fn rule_update_merge_preserves_unmodeled_fields_and_clears_emptied_ones() {
+        // A rule that also forwards + stops processing (set up in Outlook) and
+        // has an unmodeled bodyContains condition. The editor changes the
+        // modeled fields: keeps senderContains, clears subjectContains, and
+        // unchecks markAsRead.
+        let current = serde_json::json!({
+            "id": "R1",
+            "displayName": "Invoices",
+            "conditions": {
+                "senderContains": ["old"],
+                "subjectContains": ["invoice"],
+                "bodyContains": ["total due"]
+            },
+            "actions": {
+                "forwardTo": [{"emailAddress": {"address": "accounting@x.com"}}],
+                "stopProcessingRules": true,
+                "markAsRead": true
+            }
+        });
+        let rule = MessageRule {
+            id: "R1".into(),
+            display_name: "Invoices".into(),
+            sequence: 1,
+            is_enabled: true,
+            conditions: MessageRuleConditions {
+                sender_contains: vec!["new".into()],
+                subject_contains: vec![],
+                recipient_contains: vec![],
+            },
+            actions: MessageRuleActions {
+                move_to_folder_id: Some("F1".into()),
+                mark_as_read: false,
+            },
+        };
+        let merged = message_rule_json_merged(&rule, &current);
+
+        // Unmodeled fields survive the PATCH payload.
+        assert_eq!(merged["conditions"]["bodyContains"][0], "total due");
+        assert_eq!(merged["actions"]["stopProcessingRules"], true);
+        assert_eq!(
+            merged["actions"]["forwardTo"][0]["emailAddress"]["address"],
+            "accounting@x.com"
+        );
+        // Modeled fields reflect the edit: overwritten, added, or cleared.
+        assert_eq!(merged["conditions"]["senderContains"][0], "new");
+        assert!(merged["conditions"].get("subjectContains").is_none());
+        assert_eq!(merged["actions"]["moveToFolder"], "F1");
+        assert!(merged["actions"].get("markAsRead").is_none());
+    }
+
+    #[test]
+    fn graph_page_decodes_next_link_for_attachment_paging() {
+        // Attachment collections page at $top; the walk must expose nextLink
+        // so >50-attachment messages aren't silently truncated.
+        let page: GraphPage<GraphAttachment> = serde_json::from_str(
+            r#"{"value":[{"id":"A1"}],"@odata.nextLink":"https://graph/next"}"#,
+        )
+        .expect("parses");
+        assert_eq!(page.value.len(), 1);
+        assert_eq!(page.next_link.as_deref(), Some("https://graph/next"));
+
+        let last: GraphPage<GraphAttachment> =
+            serde_json::from_str(r#"{"value":[]}"#).expect("parses");
+        assert!(last.next_link.is_none());
     }
 
     #[test]

@@ -96,6 +96,54 @@ Entra app registration (public, not secret):
 
 ## Progress log
 
+### 2026-07-17 — 411 send fix + full bug-sweep batch (v0.4.1)
+- **Send failure root-caused (the user-visible 411)**: Graph's frontend rejects
+  body-less POSTs with `411 Length Required`; reqwest omits `Content-Length`
+  when no body is set. Every reply (`createReply`) and draft/reply send
+  (`POST …/send`) hit it. Fixed with a shared `post_empty` helper
+  (`Content-Length: 0` explicit) + a header-pinning test.
+- **Multi-agent adversarial sweep** (11 scoped finders, 2–3 judges per finding)
+  confirmed 16 further bugs, all fixed this release:
+  - *Critical* — rule edits destroyed unmodeled Graph rule fields
+    (forwardTo/stopProcessingRules/bodyContains…): `update_message_rule` now
+    GETs the rule and merges modeled keys over the server JSON
+    (`message_rule_json_merged`, unit-tested). Tray **Quit** hard-exited past
+    the debounced compose autosave: now `quit_with_flush` emits
+    `app-quit-flush` → frontend flushes the draft → `quit_app` command exits
+    (10s backend watchdog covers a hung frontend).
+  - *Graph client* — no HTTP timeouts anywhere (connect 15s/total 60s now;
+    5s/10s for the sequential remote-image fetches; 30s for token posts);
+    attachment/CID/unforwardable lookups capped at `$top=50` with no paging
+    (generic `GraphPage<T>`/`get_all_pages` follows `@odata.nextLink`).
+  - *Calendar* — editing an event's attendees wholesale-reset everyone to
+    bare "required" (Graph re-invites the whole list and wipes RSVPs): PATCH
+    now merges the current attendee collection (`merged_attendees_json`,
+    unit-tested). Reminder refresh got a `reminderSeq` guard (account-switch
+    race) and the notifications toggle now applies to reminders immediately.
+  - *Auth* — concurrent silent refreshes could interleave chunked keyring
+    writes and corrupt the stored refresh token (per-account
+    `refresh_lock` serializes refresh+persist); `remove_account` could race an
+    in-flight refresh that resurrected the cleared keychain entry
+    (`signed_out` flag + store lock make `remember` a no-op after sign-out).
+  - *Frontend* — reading pane no longer blanks mid-read when new mail pushes
+    the open message out of the loaded top-N window (window-exclusion ≠
+    deletion; delete/move/folder-switch still reset explicitly); RSVP bar
+    then/catch handlers re-query the live `#reader-invite` node instead of a
+    detached one; compose/save/reply/forward/draft catches route
+    `auth-required:` errors through the one-tap re-sign-in prompt; inline
+    image caps aligned to the backend's 2,500,000-byte budget (was 3 MiB, so
+    2.5–3 MB images failed only after the undo-send wait); Reply-To entries
+    that are blank strings no longer suppress the From fallback (reply opened
+    with empty To); folder cache replace-all now runs in one SQLite
+    transaction (mid-loop failure truncated the sidebar); the 3s startup
+    safety-net no longer re-shows a window the user closed to tray within 3s.
+  - *Hardening* — sanitizer rejects backslashes in CSS values (`\75rl(…)`
+    escape-decodes to `url(…)` past the literal filter; the app CSP already
+    blocked the fetch — defense in depth, test-pinned).
+- Sweep rejected 2 findings as no-impact (invite-probe 404 path, CSP-blocked
+  CSS exfil — the latter hardened anyway, above). Compile+test verified
+  (61 tests); not live-run.
+
 ### 2026-07-11 — Calendar completion: editing, in-email RSVP, reminders, month grid (v0.4.0)
 - **Event editing** — `CalendarProvider::update_event` (default `Unsupported`);
   Graph `PATCH /me/events/{id}` sharing a factored `event_payload` with create.

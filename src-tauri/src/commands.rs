@@ -135,6 +135,13 @@ pub fn is_signed_in(accounts: State<'_, AccountManager>) -> bool {
     accounts.is_signed_in()
 }
 
+/// Terminate the app. Called by the frontend at the end of the quit-flush
+/// sequence (see `quit_with_flush`), once pending compose state is saved.
+#[tauri::command]
+pub fn quit_app(app: tauri::AppHandle) {
+    app.exit(0);
+}
+
 /// All signed-in accounts, with the active one flagged.
 #[tauri::command]
 pub fn list_accounts(accounts: State<'_, AccountManager>) -> Vec<AccountSummary> {
