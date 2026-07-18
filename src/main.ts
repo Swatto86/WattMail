@@ -3029,7 +3029,8 @@ aboutOverlay.addEventListener("click", (e) => {
 const ALLOWED_TAGS = new Set([
   "p", "br", "div", "span", "b", "strong", "i", "em", "u", "s", "strike", "sub", "sup",
   "a", "ul", "ol", "li", "blockquote", "pre", "code", "h1", "h2", "h3", "h4", "h5", "h6",
-  "table", "thead", "tbody", "tr", "td", "th", "hr", "img", "font",
+  "table", "thead", "tbody", "tfoot", "caption", "col", "colgroup", "tr", "td", "th",
+  "hr", "img", "font", "dl", "dt", "dd", "small", "mark", "ins", "del",
 ]);
 // Tags dropped wholesale — their subtree never reaches the editor.
 const DROP_SUBTREE_TAGS = new Set([
@@ -3042,12 +3043,19 @@ const TABLE_ATTRS = new Set(["colspan", "rowspan", "align", "valign"]);
 // non-base64 (e.g. URL-encoded) forms are excluded so the sanitizer, the
 // byte-counter, and extractInlineImages all agree on exactly what is "inline".
 const INLINE_IMAGE_SRC = /^data:image\/(png|jpeg|jpg|gif|webp|bmp);base64,/i;
-// CSS properties permitted inside a sanitized `style` attribute.
+// CSS properties permitted inside a sanitized `style` attribute. Broadened so
+// class/<style>-based formatting the paste inliner resolves into inline styles
+// (Word/Excel/Outlook/web) survives: border longhands, line-height, list
+// markers, vertical-align, text-indent, white-space, border-collapse. Every one
+// is still value-filtered by styleValueIsSafe (url()/expression()/@import/etc.).
 const ALLOWED_STYLE_PROPS = new Set([
   "color", "background-color", "font-weight", "font-style", "font-size", "font-family",
-  "text-align", "text-decoration", "margin", "margin-top", "margin-right",
+  "text-align", "text-decoration", "text-decoration-line", "line-height", "list-style-type",
+  "vertical-align", "text-indent", "white-space", "margin", "margin-top", "margin-right",
   "margin-bottom", "margin-left", "padding", "padding-top", "padding-right",
-  "padding-bottom", "padding-left", "border", "width", "height",
+  "padding-bottom", "padding-left", "border", "border-collapse", "border-top",
+  "border-right", "border-bottom", "border-left", "border-width", "border-style",
+  "border-color", "width", "height",
 ]);
 
 // Reject any style value carrying an active/escape vector (url(), expression(),
@@ -3090,6 +3098,19 @@ function protocolOf(url: string): string | null {
   return m ? m[1].toLowerCase() : null;
 }
 
+// Presentational color attributes (bgcolor, <font color>) accept ONLY a #hex
+// literal (3/4/6/8 digits) or a bare CSS color name — never a function like
+// url()/expression() (defence in depth: these land in attributes, which
+// styleValueIsSafe never inspects).
+const SAFE_COLOR_ATTR = /^(#[0-9a-f]{3,8}|[a-z]+)$/i;
+const isSafeColorAttr = (value: string): boolean => SAFE_COLOR_ATTR.test(value.trim());
+// Numeric presentation attributes that must stay small integers (e.g. <font
+// size>, table border/cellpadding/cellspacing) — reject anything else.
+const isSmallInt = (value: string, max: number): boolean => {
+  const n = Number(value.trim());
+  return Number.isInteger(n) && n >= 0 && n <= max;
+};
+
 // Copy only the allow-listed attributes for `tag` from `src` onto `dst`,
 // applying per-attribute value rules. Anything not explicitly allowed is dropped.
 function copyAllowedAttributes(tag: string, src: Element, dst: Element): void {
@@ -3130,8 +3151,33 @@ function copyAllowedAttributes(tag: string, src: Element, dst: Element): void {
       dst.setAttribute(name, value);
       continue;
     }
+    // Cell/table shading + width — the presentational shape Excel/Word grids use.
+    if ((tag === "td" || tag === "th" || tag === "table") && name === "bgcolor") {
+      if (isSafeColorAttr(value)) dst.setAttribute("bgcolor", value);
+      continue;
+    }
+    if ((tag === "td" || tag === "th" || tag === "table" || tag === "col" || tag === "colgroup") && name === "width") {
+      dst.setAttribute("width", value);
+      continue;
+    }
+    if (tag === "table" && (name === "border" || name === "cellpadding" || name === "cellspacing")) {
+      if (isSmallInt(value, 100)) dst.setAttribute(name, value);
+      continue;
+    }
+    if ((tag === "col" || tag === "colgroup") && name === "span") {
+      if (isSmallInt(value, 1000)) dst.setAttribute("span", value);
+      continue;
+    }
     if (tag === "font" && name === "color") {
-      dst.setAttribute("color", value);
+      if (isSafeColorAttr(value)) dst.setAttribute("color", value);
+      continue;
+    }
+    if (tag === "font" && name === "face") {
+      dst.setAttribute("face", value);
+      continue;
+    }
+    if (tag === "font" && name === "size") {
+      if (/^[1-7]$/.test(value.trim())) dst.setAttribute("size", value);
       continue;
     }
   }
@@ -3169,6 +3215,155 @@ function sanitizeHtml(dirty: string): string {
   const container = document.createElement("div");
   rebuildInto(parsed.body, container, document);
   return container.innerHTML;
+}
+
+// ---- Rich-paste style inlining ----
+// The sanitizer keeps only inline `style` attributes and drops `class` + <style>
+// blocks — which is exactly where Word/Excel/Outlook/Teams/web pages carry most
+// of their formatting. This pre-pass renders the untrusted clipboard HTML in a
+// SANDBOXED, NETWORK-BLOCKED iframe, reads each element's *computed* style, and
+// writes the formatting differences back as inline styles so the sanitizer keeps
+// them. It never bypasses the sanitizer: its output is fed straight through
+// sanitizeHtml(), which value-filters every property it produces.
+
+// Above this size, skip inlining and fall back to plain sanitization — a
+// multi-MB paste is almost always a whole web page and walking every node would
+// jank the UI for little gain.
+const INLINE_STYLES_MAX_HTML = 2_000_000;
+const INLINE_STYLES_MAX_NODES = 6000;
+// Inherited text properties: written when the element's computed value differs
+// from the document default (the iframe <body>). Diffing against the document
+// default (not the parent) keeps the result correct even after the sanitizer
+// unwraps a non-allowed ancestor that carried the value.
+const INLINE_INHERITED_PROPS = [
+  "color", "font-family", "font-size", "font-weight", "font-style",
+  "text-align", "line-height", "list-style-type", "white-space", "text-indent",
+];
+
+// Property names already present in an element's inline `style` (lowercased), so
+// an author's explicit declarations always win over computed ones.
+function stylePropsPresent(el: Element): Set<string> {
+  const present = new Set<string>();
+  for (const decl of (el.getAttribute("style") ?? "").split(";")) {
+    const idx = decl.indexOf(":");
+    if (idx > 0) present.add(decl.slice(0, idx).trim().toLowerCase());
+  }
+  return present;
+}
+
+// A background value that is just the default (transparent / zero-alpha) and so
+// not worth inlining.
+function isBlankBackground(v: string): boolean {
+  const s = v.trim().toLowerCase();
+  return s === "" || s === "transparent" || s === "rgba(0, 0, 0, 0)";
+}
+
+async function inlineComputedStyles(dirtyHtml: string): Promise<string> {
+  if (dirtyHtml.length > INLINE_STYLES_MAX_HTML) return dirtyHtml;
+  let frame: HTMLIFrameElement | null = null;
+  try {
+    frame = document.createElement("iframe");
+    // sandbox WITHOUT allow-scripts: no script in the pasted HTML can run.
+    // allow-same-origin lets this (privileged) document read the computed styles.
+    frame.setAttribute("sandbox", "allow-same-origin");
+    frame.style.cssText =
+      "position:fixed;left:-9999px;top:0;width:800px;height:10px;visibility:hidden";
+    // CSP blocks every network fetch (images, fonts, @import) so hostile CSS in
+    // the paste can't phone home; inline + <style> CSS still applies for compute.
+    const csp =
+      `<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'">`;
+    frame.srcdoc = `<!doctype html><html><head>${csp}</head><body>${dirtyHtml}</body></html>`;
+    const theFrame = frame;
+    const win = await new Promise<Window | null>((resolve) => {
+      const done = (): void => resolve(theFrame.contentWindow ?? null);
+      theFrame.addEventListener("load", done, { once: true });
+      setTimeout(done, 500); // never hang the paste on a frame that won't load
+      document.body.appendChild(theFrame);
+    });
+    const fdoc = win?.document;
+    if (!win || !fdoc?.body) return dirtyHtml;
+    const all = fdoc.body.querySelectorAll("*");
+    if (all.length > INLINE_STYLES_MAX_NODES) return dirtyHtml;
+    const bodyStyle = win.getComputedStyle(fdoc.body);
+    for (const el of Array.from(all)) {
+      const tag = el.tagName.toLowerCase();
+      if (!ALLOWED_TAGS.has(tag)) continue;
+      const cs = win.getComputedStyle(el);
+      const present = stylePropsPresent(el);
+      const add: string[] = [];
+      for (const prop of INLINE_INHERITED_PROPS) {
+        if (present.has(prop)) continue;
+        const val = cs.getPropertyValue(prop);
+        if (val && val !== bodyStyle.getPropertyValue(prop)) add.push(`${prop}: ${val}`);
+      }
+      if (!present.has("background-color")) {
+        const bg = cs.backgroundColor;
+        if (!isBlankBackground(bg)) add.push(`background-color: ${bg}`);
+      }
+      // text-decoration: propagate the line only; diff against the default so an
+      // inherited underline isn't re-stamped on every descendant.
+      if (!present.has("text-decoration") && !present.has("text-decoration-line")) {
+        const line = cs.getPropertyValue("text-decoration-line");
+        if (line && line !== "none" && line !== bodyStyle.getPropertyValue("text-decoration-line")) {
+          add.push(`text-decoration: ${line}`);
+        }
+      }
+      // Borders (tables/cells): write each visible side.
+      for (const side of ["top", "right", "bottom", "left"]) {
+        const p = `border-${side}`;
+        if (present.has(p) || present.has("border")) continue;
+        const style = cs.getPropertyValue(`${p}-style`);
+        const width = cs.getPropertyValue(`${p}-width`);
+        if (style && style !== "none" && width && width !== "0px") {
+          add.push(`${p}: ${width} ${style} ${cs.getPropertyValue(`${p}-color`)}`);
+        }
+      }
+      if (tag === "table" && !present.has("border-collapse") && cs.borderCollapse === "collapse") {
+        add.push("border-collapse: collapse");
+      }
+      if (add.length === 0) continue;
+      const existing = el.getAttribute("style");
+      el.setAttribute("style", existing ? `${existing}; ${add.join("; ")}` : add.join("; "));
+    }
+    return fdoc.body.innerHTML;
+  } catch {
+    return dirtyHtml; // never lose the paste to an inliner failure
+  } finally {
+    frame?.remove();
+  }
+}
+
+// The one entry point every rich-HTML sink uses: inline computed styles, then run
+// the result through the existing allow-list sanitizer.
+async function richHtmlToSafeFragment(dirty: string): Promise<string> {
+  return sanitizeHtml(await inlineComputedStyles(dirty));
+}
+
+// Snapshot the caret/selection if it lies within the compose editor, so an async
+// paste/drop can restore it before inserting (the await can move focus/selection).
+function snapshotEditorSelection(): Range | null {
+  const sel = window.getSelection();
+  if (!sel || sel.rangeCount === 0) return null;
+  const range = sel.getRangeAt(0);
+  return cBodyInput.contains(range.commonAncestorContainer) ? range.cloneRange() : null;
+}
+
+// Restore a snapshot before an insert. If its nodes were removed meanwhile (draft
+// reloaded) or none was captured, collapse the caret to the end of the editor so
+// the insert still lands in-body rather than wherever focus drifted.
+function restoreEditorSelection(snapshot: Range | null): void {
+  cBodyInput.focus();
+  const sel = window.getSelection();
+  if (!sel) return;
+  sel.removeAllRanges();
+  if (snapshot && cBodyInput.contains(snapshot.commonAncestorContainer)) {
+    sel.addRange(snapshot);
+  } else {
+    const end = document.createRange();
+    end.selectNodeContents(cBodyInput);
+    end.collapse(false);
+    sel.addRange(end);
+  }
 }
 
 // ---- Inline images ----
@@ -4879,7 +5074,14 @@ cBodyInput.addEventListener("paste", (e) => {
   const html = data?.getData("text/html") ?? "";
   if (html) {
     e.preventDefault();
-    document.execCommand("insertHTML", false, sanitizeHtml(html));
+    // Inlining runs in an iframe (async), which can move the selection, so
+    // snapshot the caret now and restore it before inserting.
+    const saved = snapshotEditorSelection();
+    void (async () => {
+      const fragment = await richHtmlToSafeFragment(html);
+      restoreEditorSelection(saved);
+      document.execCommand("insertHTML", false, fragment);
+    })();
     return;
   }
   e.preventDefault();
@@ -4912,7 +5114,12 @@ cBodyInput.addEventListener("drop", (e) => {
   }
   const html = data?.getData("text/html") ?? "";
   if (html) {
-    document.execCommand("insertHTML", false, sanitizeHtml(html));
+    const saved = snapshotEditorSelection();
+    void (async () => {
+      const fragment = await richHtmlToSafeFragment(html);
+      restoreEditorSelection(saved);
+      document.execCommand("insertHTML", false, fragment);
+    })();
     return;
   }
   document.execCommand("insertText", false, data?.getData("text/plain") ?? "");
