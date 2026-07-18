@@ -4805,7 +4805,15 @@ for (const field of [cToInput, cCcInput, cBccInput]) {
   field.addEventListener("input", () => showCorrespondentSuggestions(field));
   field.addEventListener("blur", () => setTimeout(hideCorrespondentSuggestions));
   field.addEventListener("keydown", (event) => {
-    if (event.key === "Escape") hideCorrespondentSuggestions();
+    // Escape closes the suggestion dropdown ONLY. Stop it bubbling to the
+    // document-level modal-stack handler, which would otherwise read the visible
+    // compose overlay and close/discard the whole message. With no dropdown open,
+    // let Escape bubble so it still closes compose (the expected behaviour).
+    if (event.key === "Escape" && !correspondentsList.classList.contains("hidden")) {
+      event.preventDefault();
+      event.stopPropagation();
+      hideCorrespondentSuggestions();
+    }
   });
 }
 cBodyInput.addEventListener("input", scheduleAutosave);

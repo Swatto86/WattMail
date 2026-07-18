@@ -222,15 +222,19 @@ pub async fn sync_folder(
                 id,
                 is_read,
                 is_flagged,
+                has_attachments,
             } => {
                 flush_upserts(store, folder_id, &mut upserts).await?;
-                // Update only the flags the notification carried; a missing row
+                // Update only the fields the notification carried; a missing row
                 // (message never fully cached) is a no-op until the next upsert.
                 if let Some(read) = is_read {
                     store.set_read(&id, read).await?;
                 }
                 if let Some(flagged) = is_flagged {
                     store.set_flag(&id, flagged).await?;
+                }
+                if let Some(has) = has_attachments {
+                    store.set_has_attachments(&id, has).await?;
                 }
             }
             MessageChange::Removed(id) => {
@@ -637,6 +641,12 @@ mod tests {
         async fn set_flag(&self, id: &str, flagged: bool) -> Result<(), MailError> {
             if let Some(m) = self.messages.lock().unwrap().get_mut(id) {
                 m.is_flagged = flagged;
+            }
+            Ok(())
+        }
+        async fn set_has_attachments(&self, id: &str, has: bool) -> Result<(), MailError> {
+            if let Some(m) = self.messages.lock().unwrap().get_mut(id) {
+                m.has_attachments = has;
             }
             Ok(())
         }

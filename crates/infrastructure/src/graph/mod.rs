@@ -773,16 +773,18 @@ impl MailProvider for GraphClient {
                 if item.removed.is_some() {
                     changes.push(MessageChange::Removed(id));
                 } else if item.is_flags_only_change() {
-                    // Graph's delta feed reports a flag change (e.g. a message
-                    // marked read) by returning just the id and the changed
-                    // scalar fields — no subject, sender, or date, even though
-                    // `$select` requests them. Upserting it would overwrite the
-                    // cached content with `(no subject)`/`(unknown)`/empty-date
-                    // placeholders, so apply it as a targeted flag update.
+                    // Graph's delta feed reports a scalar-property change (e.g. a
+                    // message marked read, or an attachment added elsewhere) by
+                    // returning just the id and the changed fields — no subject,
+                    // sender, or date, even though `$select` requests them.
+                    // Upserting it would overwrite the cached content with
+                    // `(no subject)`/`(unknown)`/empty-date placeholders, so apply
+                    // it as a targeted update of only the fields it carried.
                     changes.push(MessageChange::FlagsChanged {
                         id,
                         is_read: item.is_read,
                         is_flagged: item.flag.as_ref().map(|f| flag_is_flagged(Some(f))),
+                        has_attachments: item.has_attachments,
                     });
                 } else {
                     changes.push(MessageChange::Upserted(MessageSummary {
@@ -1845,6 +1847,18 @@ mod tests {
         assert!(item.is_flags_only_change());
         assert_eq!(item.is_read, Some(true));
         assert!(item.removed.is_none());
+    }
+
+    #[test]
+    fn attachments_only_delta_notification_is_carried_not_dropped() {
+        // An attachment added/removed from another client arrives content-less
+        // ({id, hasAttachments}); it must stay on the targeted flags path (so it
+        // can't clobber cached content) AND preserve the value so the indicator
+        // updates rather than being silently discarded.
+        let item: DeltaItem =
+            serde_json::from_str(r#"{"id":"AAA","hasAttachments":true}"#).expect("parses");
+        assert!(item.is_flags_only_change());
+        assert_eq!(item.has_attachments, Some(true));
     }
 
     #[test]

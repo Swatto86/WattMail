@@ -391,6 +391,18 @@ impl MailStore for SqliteStore {
         .await
     }
 
+    async fn set_has_attachments(&self, id: &str, has: bool) -> Result<(), MailError> {
+        let id = id.to_string();
+        self.run(move |conn| {
+            conn.execute(
+                "UPDATE messages SET has_attachments = ?1 WHERE id = ?2",
+                rusqlite::params![i64::from(has), id],
+            )?;
+            Ok(())
+        })
+        .await
+    }
+
     async fn save_folders(&self, folders: Vec<Folder>) -> Result<(), MailError> {
         // Encrypt folder names (content) before the blocking thread; ids, counts,
         // depth, position, and role stay plaintext for ordering and display.

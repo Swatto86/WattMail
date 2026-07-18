@@ -534,6 +534,9 @@ pub enum MessageChange {
         id: String,
         is_read: Option<bool>,
         is_flagged: Option<bool>,
+        /// The message's attachment state, when the notification carried it (e.g.
+        /// an attachment added/removed from another client). `None` = untouched.
+        has_attachments: Option<bool>,
     },
     Removed(String),
 }
@@ -766,6 +769,9 @@ pub trait MailStore: Send + Sync {
     async fn count(&self, folder_id: &str) -> Result<u32, MailError>;
     async fn set_read(&self, id: &str, read: bool) -> Result<(), MailError>;
     async fn set_flag(&self, id: &str, flagged: bool) -> Result<(), MailError>;
+    /// Update only the cached attachment indicator for a message (a targeted
+    /// delta change). A missing row is a no-op until the next full upsert.
+    async fn set_has_attachments(&self, id: &str, has: bool) -> Result<(), MailError>;
     /// Replace the cached folder list (in sidebar order) so it survives offline.
     async fn save_folders(&self, folders: Vec<Folder>) -> Result<(), MailError>;
     /// The cached folder list, in saved sidebar order.
