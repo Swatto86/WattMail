@@ -76,13 +76,41 @@ impl TokenStore {
     }
 
     /// Replace any stored refresh token with `token`, split into chunks.
+    ///
+    /// Session-loss-atomic: the new chunks overwrite the old ones in place and
+    /// the meta count is written **last**, so a failure partway through leaves
+    /// either the old token fully intact (meta not yet updated → `load` still
+    /// reads the old chunks) or the new token fully committed. Never calls
+    /// `clear()` first — that deletes-then-writes window is exactly what turned
+    /// a transient keychain glitch into a forced re-sign-in.
     pub fn save_refresh_token(&self, token: &str) -> Result<(), keyring::Error> {
-        self.clear()?;
+        let old_count = self.stored_chunk_count();
         let chunks = chunk_string(token, CHUNK_CHARS);
         for (i, chunk) in chunks.iter().enumerate() {
             self.chunk_entry(i)?.set_password(chunk)?;
         }
-        self.meta_entry()?.set_password(&chunks.len().to_string())
+        // Commit point: once meta records the new count, `load` reads exactly
+        // the freshly-written chunks and nothing else.
+        self.meta_entry()?.set_password(&chunks.len().to_string())?;
+        // Leftover higher-index chunks from a longer previous token are now
+        // unreachable (load only reads 0..count). Prune best-effort — a failure
+        // here leaks an orphan entry but can no longer corrupt the live token.
+        for i in stale_chunk_indices(old_count, chunks.len()) {
+            let _ = self
+                .chunk_entry(i)
+                .and_then(|e| delete_ignoring_missing(&e));
+        }
+        Ok(())
+    }
+
+    /// The chunk count recorded by the metadata entry, or 0 if none is stored
+    /// (or the meta value is unparseable — treated as "no prior token").
+    fn stored_chunk_count(&self) -> usize {
+        self.meta_entry()
+            .ok()
+            .and_then(|e| e.get_password().ok())
+            .and_then(|raw| raw.parse().ok())
+            .unwrap_or(0)
     }
 
     /// Delete the metadata entry and every chunk.
@@ -115,6 +143,13 @@ fn delete_ignoring_missing(entry: &keyring::Entry) -> Result<(), keyring::Error>
     }
 }
 
+/// Chunk indices left stale after a save: the new token overwrites `0..new`
+/// in place, so only indices a *longer* previous token wrote (`new..old`) need
+/// pruning. Empty when the token grew or stayed the same size.
+fn stale_chunk_indices(old_count: usize, new_count: usize) -> std::ops::Range<usize> {
+    new_count..old_count.max(new_count)
+}
+
 fn chunk_string(s: &str, max_chars: usize) -> Vec<String> {
     s.chars()
         .collect::<Vec<char>>()
@@ -128,4 +163,31 @@ fn now_unix() -> u64 {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stale_prune_range_shrinking_token() {
+        // 4 old chunks, 2 new → indices 2 and 3 are orphaned and must be pruned.
+        assert_eq!(stale_chunk_indices(4, 2), 2..4);
+    }
+
+    #[test]
+    fn stale_prune_range_growing_or_equal_token_prunes_nothing() {
+        // All indices are overwritten in place, so nothing is left stale.
+        assert!(stale_chunk_indices(2, 4).is_empty());
+        assert!(stale_chunk_indices(3, 3).is_empty());
+        assert!(stale_chunk_indices(0, 3).is_empty());
+    }
+
+    #[test]
+    fn chunk_string_splits_on_boundary_and_rejoins_losslessly() {
+        let token = "a".repeat(2500);
+        let chunks = chunk_string(&token, CHUNK_CHARS);
+        assert_eq!(chunks.len(), 3); // 1024 + 1024 + 452
+        assert_eq!(chunks.concat(), token);
+    }
 }
