@@ -158,8 +158,16 @@ Entra app registration (public, not secret):
     contexts) to async and rippling through the command layer — disproportionate
     to a sub-millisecond, AV-stall-only impact, and it touches the auth path just
     fixed in v0.4.2. Accepted deferral.
+- **Regression pass** (adversarial review of the whole diff) caught and fixed
+  three self-inflicted issues before release: the new async paste/drop path
+  lacked the `composeSession` guard (reopening the #2 cross-session hijack for
+  pastes — now guarded); the inliner's 500 ms timeout could return a half-parsed
+  body (now falls back to the original HTML, lossless); and the first token-store
+  fix was only *partially* atomic (a mid-loop keychain failure still yielded a
+  garbage token) — replaced with the generation ping-pong above, which is truly
+  atomic and, as a bonus, race-safe for a concurrent load during a save.
 - Gate green (npm build + fmt + clippy `-D warnings` + `cargo test --workspace`,
-  now 52 infra tests). Adversarial regression pass over the whole diff.
+  now 54 infra tests).
 
 ### 2026-07-17 — Sign-in redirect fix: localhost URI + dual-stack loopback (v0.4.2)
 - **Live-hit bug**: interactive sign-in failed with **AADSTS50011** — since

@@ -1,7 +1,7 @@
 {
   "name": "wattmail",
   "private": true,
-  "version": "0.4.2",
+  "version": "0.5.0",
   "type": "module",
   "description": "WattMail — a personal desktop email client for Office 365 (Rust + Tauri, Windows)",
   "author": "Swatto <claude.ai@swatto.co.uk>",
