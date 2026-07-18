@@ -3312,6 +3312,13 @@ let composeServerAtts: ServerAttachment[] = [];
 // The draft currently open in the compose modal, if any. Set when resuming a
 // draft or after the first "Save draft"; null for a fresh compose/reply/forward.
 let currentDraftId: string | null = null;
+// Bumped every time compose opens or closes. A save (autosave/manual) snapshots
+// it before its `await` and refuses to write back the resulting draft id if the
+// session has since changed — otherwise a save from a just-closed compose would
+// adopt its draft id into the next compose, redirecting that session's saves
+// onto the wrong draft. Same stale-response guard as resumeDraft / the invite bar.
+let composeSession = 0;
+const composeSessionStale = (session: number): boolean => session !== composeSession;
 // True when the open draft was resumed from the Drafts folder (as opposed to
 // auto-created this session). A resumed draft is never deleted on discard.
 let currentDraftIsResumed = false;
@@ -3498,6 +3505,7 @@ function openCompose(opts: {
   forwardedAtts?: ForwardedAttachmentInfo[];
 }): void {
   void loadCorrespondentSuggestions();
+  composeSession += 1; // invalidate any in-flight save from a prior session
   currentDraftId = opts.draftId ?? null;
   currentDraftIsResumed = opts.draftIsResumed ?? false;
   currentReplyToId = opts.replyToId ?? null;
@@ -3549,6 +3557,7 @@ function focusComposeBody(): void {
 // pending autosave so it can't fire against a closed compose.
 function closeCompose(): void {
   cancelAutosave();
+  composeSession += 1; // any save still in flight must not write back to this closed compose
   composeOverlay.classList.add("hidden");
 }
 
@@ -3687,6 +3696,7 @@ async function runAutosave(): Promise<void> {
     return;
   }
   if (!composeIsDirty()) return;
+  const session = composeSession;
   composeSaveInFlight = true;
   try {
     const id = await invoke<string>("save_draft", {
@@ -3697,6 +3707,9 @@ async function runAutosave(): Promise<void> {
       subject: cSubjectInput.value,
       bodyHtml: cBodyInput.innerHTML,
     });
+    // Compose was closed/replaced while this save was in flight — the returned
+    // id belongs to that gone session; adopting it would hijack the new one.
+    if (composeSessionStale(session)) return;
     currentDraftId = id;
     // Show a quiet timestamp, but never stomp on an error already displayed.
     if (!composeMsg.dataset.error) {
@@ -3902,6 +3915,7 @@ async function syncDraftsFolder(): Promise<void> {
 // through the draft body and are converted to cid: attachments at send).
 async function saveDraft(): Promise<void> {
   if (composeSaveInFlight) return; // a save/send is already running (#30)
+  const session = composeSession;
   composeSaveInFlight = true;
   cancelAutosave();
   composeSaveDraftBtn.disabled = true;
@@ -3915,6 +3929,10 @@ async function saveDraft(): Promise<void> {
       subject: cSubjectInput.value,
       bodyHtml: cBodyInput.innerHTML,
     });
+    // Compose closed/replaced mid-save: the draft is safely persisted server-side,
+    // but writing back its id (and attachments/baseline) would land on the new
+    // session's compose. The saved draft simply lives in Drafts as-is.
+    if (composeSessionStale(session)) return;
     currentDraftId = id;
     if (composeAttachPaths.length > 0 || composeForwardedAtts.length > 0) {
       const uploaded = await invoke<ServerAttachment[]>("upload_draft_attachments", {
