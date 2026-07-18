@@ -216,13 +216,21 @@ fn text_to_html(text: &str) -> String {
 /// whose only sources are inline must NOT trip the banner — otherwise clicking
 /// "load images" does nothing.
 fn has_remote_content(html: &str) -> bool {
-    let lower = html.to_ascii_lowercase();
+    // Match against a whitespace-stripped, lowercased copy so non-canonical
+    // spacing (`src = "http"`, `url( 'http' )`, `background: url`) still trips
+    // the banner. The real (DOM-based) sanitizer strips these regardless of
+    // spacing, so a remote image that doesn't trip here would show as a
+    // silently-missing image the user has no way to load.
+    let lower: String = html
+        .chars()
+        .filter(|c| !c.is_ascii_whitespace())
+        .collect::<String>()
+        .to_ascii_lowercase();
     has_remote_img_src(&lower)
         || lower.contains("url(http")
         || lower.contains("url('http")
         || lower.contains("url(\"http")
         || lower.contains("background:url")
-        || lower.contains("background: url")
 }
 
 /// True when a source attribute points at an `http(s)` URL — a remote-loading
@@ -429,6 +437,25 @@ mod tests {
         let s = sanitize_email(r#"<img src="http://tracker.example/x.png">"#, true, false);
         assert!(s.remote_content_blocked);
         assert!(!s.html.contains("http://tracker.example"));
+    }
+
+    #[test]
+    fn remote_image_with_spaced_attribute_still_trips_banner() {
+        // Non-canonical spacing around `=` must not fool the banner heuristic —
+        // the sanitizer strips the image either way.
+        let s = sanitize_email(r#"<img src = "http://tracker.example/x.png">"#, true, false);
+        assert!(s.remote_content_blocked);
+        assert!(!s.html.contains("http://tracker.example"));
+    }
+
+    #[test]
+    fn remote_css_background_with_spaces_trips_banner() {
+        let s = sanitize_email(
+            r#"<div style="background: url( 'http://tracker.example/x.gif' )">hi</div>"#,
+            true,
+            false,
+        );
+        assert!(s.remote_content_blocked);
     }
 
     #[test]
