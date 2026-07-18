@@ -135,6 +135,19 @@ function open(kind: DialogKind, message: string, opts: DialogOptions): Promise<s
       e.preventDefault();
       e.stopPropagation();
       settle(document.activeElement === cancelBtn ? cancelResult() : currentResult());
+    } else if (e.key === "Tab") {
+      // Trap focus within the dialog's own controls. Without this, Tab walks out
+      // to the (still-interactive) app behind the modal, letting Enter/Space hit
+      // a background control while a confirm/delete dialog is up.
+      const focusables = ([inputEl, cancelBtn, okBtn] as HTMLElement[]).filter(
+        (el) => !el.classList.contains("hidden"),
+      );
+      if (focusables.length === 0) return;
+      e.preventDefault();
+      const idx = focusables.indexOf(document.activeElement as HTMLElement);
+      const step = e.shiftKey ? -1 : 1;
+      const start = idx === -1 ? (e.shiftKey ? 0 : -1) : idx;
+      focusables[(start + step + focusables.length) % focusables.length].focus();
     }
   };
   document.addEventListener("keydown", activeKeyHandler, true);
