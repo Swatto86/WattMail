@@ -96,6 +96,71 @@ Entra app registration (public, not secret):
 
 ## Progress log
 
+### 2026-07-18 — Pasted-formatting fidelity + bug-sweep batch (v0.5.0)
+- **Feature — preserve pasted text formatting.** The compose paste/drop path
+  already sanitized rich HTML, but the sanitizer drops `class` attributes and
+  cuts `<style>` blocks — exactly where Word/Excel/Outlook/Teams/web pages carry
+  most formatting, so only inline styles survived. New pre-pass
+  `inlineComputedStyles` (`src/main.ts`) renders the untrusted clipboard HTML in
+  a **sandboxed (`allow-same-origin`, NO `allow-scripts`), CSP-network-blocked
+  (`default-src 'none'; style-src 'unsafe-inline'`) srcdoc iframe**, reads each
+  element's `getComputedStyle`, and writes the formatting diffs (vs the document
+  default for inherited props; vs blank for bg/borders) back as inline styles.
+  The result is then fed through the EXISTING `sanitizeHtml` — never bypassed.
+  Shared entry `richHtmlToSafeFragment` wired into the paste + drop `text/html`
+  branches (now async, with caret snapshot/restore around the await). Sanitizer
+  allow-lists broadened to keep the inlined styles: border longhands,
+  line-height, list-style-type, vertical-align, text-indent, white-space,
+  border-collapse; table/cell `bgcolor`/`width`/`border`/`cellpadding`, `<font>`
+  `face`/`size`, `col`/`colgroup`, and more structural tags. Presentational
+  color attrs validated (`#hex`/name only), font size 1–7, numeric attrs bounded.
+  Reply/forward quote and resumed drafts already carry formatting verbatim, so
+  they're left untouched by design. **Mechanism verified live** in the WebView
+  engine: class/`<style>` color + font-weight + table borders resolve via
+  getComputedStyle, and the CSP blocks a tracker `<img src=http…>` (no network
+  request). Full paste-fidelity checklist is a live-after-release exercise.
+- **Bug sweep (three independent lenses: frontend / Rust crates / Tauri glue +
+  contracts).** Contracts (all 50 commands, arg casings, DTOs, events,
+  capabilities) came back clean. Fixed:
+  - *High* — a rotated refresh token was destroyed by a **non-atomic keyring
+    write**: `save_refresh_token` called `clear()` before writing, so a
+    transient Credential Manager failure mid-write wiped a just-issued token and
+    forced a full re-sign-in. Now overwrites chunks in place, writes the meta
+    count **last** (the commit point), and prunes stale higher-index chunks only
+    after — a failure now leaves either the old or the new token fully intact.
+    Pure ordering helper `stale_chunk_indices` unit-tested.
+  - *Medium* — a **stale autosave from a just-closed compose** wrote its draft
+    id into the next compose session (`currentDraftId`), redirecting that
+    session's saves onto the wrong draft. Fixed with a `composeSession` counter
+    (bumped on open + close); `runAutosave`/`saveDraft` snapshot it before their
+    `await` and refuse to adopt the returned id if the session changed.
+  - *Medium* — **Escape to dismiss the To/Cc/Bcc autocomplete** bubbled to the
+    modal-stack handler and closed/discarded the whole compose. The field's
+    Escape branch now stops propagation only when the dropdown is actually open;
+    with no dropdown, Escape still closes compose.
+  - *Low* — a `hasAttachments`-only Graph **delta change was silently dropped**
+    (the flags-only path had no field for it), leaving a stale paperclip. Added
+    `has_attachments: Option<bool>` to `MessageChange::FlagsChanged` + a targeted
+    `MailStore::set_has_attachments`. (Note: the "widen the classifier" shortcut
+    the sweep first proposed was rejected — it would have routed the item to the
+    content-upsert branch and clobbered cached subject/from/date with
+    placeholders.)
+  - *Low* — the **"load images" banner** missed non-canonical remote-image
+    markup (`src = "http"`, `url( 'http' )`): the sanitizer stripped the image
+    but the banner heuristic didn't fire, so the image went silently missing
+    with no way to load it. `has_remote_content` now whitespace-normalizes first.
+  - *Low* — **modal dialogs didn't trap Tab focus**: Tab walked out to the
+    interactive app behind a confirm/delete dialog. Added a Tab/Shift+Tab cycle
+    over the dialog's own controls.
+  - *Deferred* — blocking keyring I/O inside the async auth paths (`remember`/
+    `sign_out`) is **not** wrapped in `spawn_blocking`. Doing so would force
+    converting several sync `fn`s (called from both async and sync Tauri-command
+    contexts) to async and rippling through the command layer — disproportionate
+    to a sub-millisecond, AV-stall-only impact, and it touches the auth path just
+    fixed in v0.4.2. Accepted deferral.
+- Gate green (npm build + fmt + clippy `-D warnings` + `cargo test --workspace`,
+  now 52 infra tests). Adversarial regression pass over the whole diff.
+
 ### 2026-07-17 — Sign-in redirect fix: localhost URI + dual-stack loopback (v0.4.2)
 - **Live-hit bug**: interactive sign-in failed with **AADSTS50011** — since
   v0.2.7 (commit `c8cf1ed`) the redirect URI said `http://127.0.0.1:{port}`,

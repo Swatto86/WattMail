@@ -3274,12 +3274,16 @@ async function inlineComputedStyles(dirtyHtml: string): Promise<string> {
       `<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'">`;
     frame.srcdoc = `<!doctype html><html><head>${csp}</head><body>${dirtyHtml}</body></html>`;
     const theFrame = frame;
-    const win = await new Promise<Window | null>((resolve) => {
-      const done = (): void => resolve(theFrame.contentWindow ?? null);
-      theFrame.addEventListener("load", done, { once: true });
-      setTimeout(done, 500); // never hang the paste on a frame that won't load
+    // Resolve true only on a real load. A timeout resolves false so we fall back
+    // to the ORIGINAL html (lossless) rather than reading a possibly half-parsed
+    // document — never hang, never silently truncate the paste.
+    const loaded = await new Promise<boolean>((resolve) => {
+      theFrame.addEventListener("load", () => resolve(true), { once: true });
+      setTimeout(() => resolve(false), 500);
       document.body.appendChild(theFrame);
     });
+    if (!loaded) return dirtyHtml;
+    const win = theFrame.contentWindow;
     const fdoc = win?.document;
     if (!win || !fdoc?.body) return dirtyHtml;
     const all = fdoc.body.querySelectorAll("*");
@@ -5077,8 +5081,13 @@ cBodyInput.addEventListener("paste", (e) => {
     // Inlining runs in an iframe (async), which can move the selection, so
     // snapshot the caret now and restore it before inserting.
     const saved = snapshotEditorSelection();
+    const session = composeSession;
     void (async () => {
       const fragment = await richHtmlToSafeFragment(html);
+      // Compose closed/replaced during the async inline — dropping the fragment
+      // is right (this paste belonged to the gone session); inserting would
+      // hijack the new one, the same cross-session leak the autosave guard closes.
+      if (composeSessionStale(session)) return;
       restoreEditorSelection(saved);
       document.execCommand("insertHTML", false, fragment);
     })();
@@ -5115,8 +5124,10 @@ cBodyInput.addEventListener("drop", (e) => {
   const html = data?.getData("text/html") ?? "";
   if (html) {
     const saved = snapshotEditorSelection();
+    const session = composeSession;
     void (async () => {
       const fragment = await richHtmlToSafeFragment(html);
+      if (composeSessionStale(session)) return; // compose closed/replaced mid-inline
       restoreEditorSelection(saved);
       document.execCommand("insertHTML", false, fragment);
     })();
