@@ -173,6 +173,28 @@ pub async fn move_message(
     store.remove_message(id).await
 }
 
+/// Mark every message in a folder as read — server-side first, then the
+/// cache's rows and unread badge.
+pub async fn mark_folder_read(
+    provider: &dyn MailProvider,
+    store: &dyn MailStore,
+    folder_id: &str,
+) -> Result<(), MailError> {
+    provider.mark_folder_read(folder_id).await?;
+    store.mark_folder_read(folder_id).await
+}
+
+/// Permanently delete every message in a folder (Deleted Items / Junk), then
+/// drop the folder's cached rows.
+pub async fn empty_folder(
+    provider: &dyn MailProvider,
+    store: &dyn MailStore,
+    folder_id: &str,
+) -> Result<(), MailError> {
+    provider.empty_folder(folder_id).await?;
+    store.forget_folder(folder_id).await
+}
+
 /// A cached account snapshot.
 #[derive(Debug)]
 pub struct CachedAccount {

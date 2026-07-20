@@ -14,11 +14,13 @@ use wattmail_application::{
     create_event as app_create_event, create_folder as app_create_folder,
     delete_draft_attachment as app_delete_draft_attachment, delete_event as app_delete_event,
     delete_folder as app_delete_folder, delete_message as app_delete_message, download_attachment,
-    export_message as app_export_message, folder_from_cache as app_folder_from_cache,
+    empty_folder as app_empty_folder, export_message as app_export_message,
+    folder_from_cache as app_folder_from_cache,
     has_unforwardable_attachments as app_has_unforwardable_attachments, list_attachments,
     list_folders as app_list_folders, load_draft as app_load_draft, load_older as app_load_older,
-    meeting_invite as app_meeting_invite, move_message as app_move_message, read_headers,
-    read_message, rename_folder as app_rename_folder, respond_to_event as app_respond_to_event,
+    mark_folder_read as app_mark_folder_read, meeting_invite as app_meeting_invite,
+    move_message as app_move_message, read_headers, read_message,
+    rename_folder as app_rename_folder, respond_to_event as app_respond_to_event,
     save_draft as app_save_draft, search_messages as app_search_messages,
     send_draft as app_send_draft, send_message as app_send_message, send_reply as app_send_reply,
     set_flag as app_set_flag, set_read as app_set_read, sync_folder as app_sync_folder,
@@ -429,6 +431,31 @@ pub async fn move_message(
 ) -> Result<(), String> {
     let (account, provider) = active_provider(&accounts).await?;
     app_move_message(&*provider, &account.store, &id, &destination_folder_id)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Mark every message in a folder as read (server + cache).
+#[tauri::command]
+pub async fn mark_folder_read(
+    accounts: State<'_, AccountManager>,
+    folder_id: String,
+) -> Result<(), String> {
+    let (account, provider) = active_provider(&accounts).await?;
+    app_mark_folder_read(&*provider, &account.store, &folder_id)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Permanently delete every message in a folder. The frontend only offers this
+/// for Deleted Items / Junk, behind a danger confirm.
+#[tauri::command]
+pub async fn empty_folder(
+    accounts: State<'_, AccountManager>,
+    folder_id: String,
+) -> Result<(), String> {
+    let (account, provider) = active_provider(&accounts).await?;
+    app_empty_folder(&*provider, &account.store, &folder_id)
         .await
         .map_err(|e| e.to_string())
 }

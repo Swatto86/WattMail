@@ -237,6 +237,33 @@ impl GraphClient {
         Ok(roles_from_batch(batch))
     }
 
+    /// POST a `$batch` of sub-requests and fail on the first sub-request that
+    /// didn't succeed (a `$batch` itself returns 200 even when items fail).
+    /// Bulk callers rely on this to stop re-looping over a message that
+    /// persistently rejects its PATCH/DELETE.
+    async fn run_batch(&self, requests: Vec<serde_json::Value>) -> Result<(), MailError> {
+        let response = self
+            .http
+            .post(format!("{GRAPH_BASE}/$batch"))
+            .bearer_auth(&self.access_token)
+            .json(&serde_json::json!({ "requests": requests }))
+            .send()
+            .await
+            .map_err(|e| MailError::Network(e.to_string()))?;
+        let batch: GraphBatchResponse = check_status(response)
+            .await?
+            .json()
+            .await
+            .map_err(|e| MailError::Decode(e.to_string()))?;
+        match first_batch_failure(&batch) {
+            None => Ok(()),
+            Some((status, id)) => Err(MailError::Api {
+                status,
+                message: format!("batch sub-request {id} failed"),
+            }),
+        }
+    }
+
     /// Fetch the message's inline attachments and return a map of their
     /// normalized `contentId` -> `data:` URL, for resolving `cid:` image
     /// references in the body. Best-effort: any failure yields an empty map, so
@@ -647,6 +674,67 @@ impl MailProvider for GraphClient {
             return Ok(());
         }
         self.move_message(id, "deleteditems").await
+    }
+
+    async fn mark_folder_read(&self, folder_id: &str) -> Result<(), MailError> {
+        // Page unread ids and flip them in `$batch` chunks of 20 (Graph's batch
+        // cap), re-querying until the unread filter drains. A batch reporting
+        // any per-item failure aborts the loop — otherwise a poison message
+        // would come back unread every round and spin forever.
+        const MAX_ROUNDS: usize = 500;
+        for _ in 0..MAX_ROUNDS {
+            let mut url =
+                url::Url::parse(&folder_messages_url(folder_id)).expect("valid folder URL");
+            url.set_query(Some("$filter=isRead eq false&$select=id&$top=20"));
+            let page: GraphPage<GraphMessageId> = self
+                .get(url.as_str())
+                .await?
+                .json()
+                .await
+                .map_err(|e| MailError::Decode(e.to_string()))?;
+            if page.value.is_empty() {
+                if page.next_link.is_none() {
+                    return Ok(());
+                }
+                continue; // empty page mid-collection: re-query
+            }
+            let ids: Vec<String> = page.value.into_iter().map(|m| m.id).collect();
+            self.run_batch(mark_read_batch_requests(&ids)).await?;
+        }
+        Err(MailError::Api {
+            status: 0,
+            message: "mark-all-read did not drain the folder".into(),
+        })
+    }
+
+    async fn empty_folder(&self, folder_id: &str) -> Result<(), MailError> {
+        // Same drain loop as mark_folder_read, with hard DELETEs (this is only
+        // ever offered for Deleted Items / Junk, where deletion is permanent by
+        // design — Graph moves the items to Recoverable Items).
+        const MAX_ROUNDS: usize = 500;
+        for _ in 0..MAX_ROUNDS {
+            let mut url =
+                url::Url::parse(&folder_messages_url(folder_id)).expect("valid folder URL");
+            url.set_query(Some("$select=id&$top=20"));
+            let page: GraphPage<GraphMessageId> = self
+                .get(url.as_str())
+                .await?
+                .json()
+                .await
+                .map_err(|e| MailError::Decode(e.to_string()))?;
+            if page.value.is_empty() {
+                if page.next_link.is_none() {
+                    return Ok(());
+                }
+                continue;
+            }
+            let ids: Vec<String> = page.value.into_iter().map(|m| m.id).collect();
+            self.run_batch(delete_batch_requests(&ids)).await?;
+        }
+        Err(MailError::Api {
+            status: 0,
+            message: "empty-folder did not drain the folder".into(),
+        })
     }
 
     async fn move_message(&self, id: &str, destination_folder_id: &str) -> Result<(), MailError> {
@@ -1393,6 +1481,61 @@ fn folder_messages_url(folder_id: &str) -> String {
     url.into()
 }
 
+/// The `/me/…` form of a message URL for use inside a `$batch` — sub-request
+/// URLs are relative to the version root, with the opaque id still encoded as
+/// a path segment (same encoding as [`message_endpoint`]).
+fn batch_message_url(id: &str) -> String {
+    message_endpoint(id)
+        .path()
+        .trim_start_matches("/v1.0")
+        .to_string()
+}
+
+/// `$batch` sub-requests flipping each message to read.
+fn mark_read_batch_requests(ids: &[String]) -> Vec<serde_json::Value> {
+    ids.iter()
+        .enumerate()
+        .map(|(i, id)| {
+            serde_json::json!({
+                "id": (i + 1).to_string(),
+                "method": "PATCH",
+                "url": batch_message_url(id),
+                "headers": { "Content-Type": "application/json" },
+                "body": { "isRead": true },
+            })
+        })
+        .collect()
+}
+
+/// `$batch` sub-requests hard-deleting each message.
+fn delete_batch_requests(ids: &[String]) -> Vec<serde_json::Value> {
+    ids.iter()
+        .enumerate()
+        .map(|(i, id)| {
+            serde_json::json!({
+                "id": (i + 1).to_string(),
+                "method": "DELETE",
+                "url": batch_message_url(id),
+            })
+        })
+        .collect()
+}
+
+/// First non-2xx sub-response in a `$batch` result, as `(status, sub-request id)`.
+fn first_batch_failure(batch: &GraphBatchResponse) -> Option<(u16, String)> {
+    batch
+        .responses
+        .iter()
+        .find(|r| !(200..300).contains(&r.status))
+        .map(|r| (r.status, r.id.clone()))
+}
+
+/// An id-only message projection (`$select=id` pages).
+#[derive(serde::Deserialize)]
+struct GraphMessageId {
+    id: String,
+}
+
 #[derive(serde::Deserialize)]
 struct GraphFolders {
     value: Vec<GraphFolder>,
@@ -1940,6 +2083,53 @@ mod tests {
         assert!(url.ends_with("/messages"));
         assert!(url.contains("%2F")); // '/' encoded, not splitting the segment
         assert!(!url.contains('?'));
+    }
+
+    #[test]
+    fn batch_message_url_is_version_relative_and_keeps_id_encoded() {
+        // `$batch` sub-request URLs are relative to the version root — no
+        // /v1.0 prefix, no host — and the opaque message id (base64: may hold
+        // '/', '+', '=') must stay one encoded path segment.
+        let url = batch_message_url("AB/cd+ef=");
+        assert!(url.starts_with("/me/messages/"), "got {url}");
+        assert!(url.contains("%2F"));
+        assert!(!url.contains("v1.0"));
+    }
+
+    #[test]
+    fn mark_read_batch_requests_shape() {
+        let reqs = mark_read_batch_requests(&["a".into(), "b".into()]);
+        assert_eq!(reqs.len(), 2);
+        assert_eq!(reqs[0]["id"], "1");
+        assert_eq!(reqs[1]["id"], "2"); // ids must be unique within a $batch
+        assert_eq!(reqs[0]["method"], "PATCH");
+        assert_eq!(reqs[0]["url"], "/me/messages/a");
+        assert_eq!(reqs[0]["body"]["isRead"], true);
+        // PATCH bodies require an explicit JSON content type inside $batch.
+        assert_eq!(reqs[0]["headers"]["Content-Type"], "application/json");
+    }
+
+    #[test]
+    fn delete_batch_requests_shape() {
+        let reqs = delete_batch_requests(&["x".into()]);
+        assert_eq!(reqs[0]["method"], "DELETE");
+        assert_eq!(reqs[0]["url"], "/me/messages/x");
+        assert!(reqs[0].get("body").is_none());
+    }
+
+    #[test]
+    fn first_batch_failure_finds_non_2xx_and_passes_all_2xx() {
+        let ok: GraphBatchResponse = serde_json::from_str(
+            r#"{"responses":[{"id":"1","status":200},{"id":"2","status":204}]}"#,
+        )
+        .unwrap();
+        assert!(first_batch_failure(&ok).is_none());
+
+        let mixed: GraphBatchResponse = serde_json::from_str(
+            r#"{"responses":[{"id":"1","status":204},{"id":"2","status":429,"body":{"error":{"code":"tooManyRequests"}}}]}"#,
+        )
+        .unwrap();
+        assert_eq!(first_batch_failure(&mixed), Some((429, "2".to_string())));
     }
 
     #[test]

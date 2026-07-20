@@ -4765,11 +4765,15 @@ function showFolderMenu(x: number, y: number, fid: string | null): void {
   ];
   if (fid) {
     items.push({ act: "newSubfolder", label: "New subfolder…" });
+    const target = folders.find((f) => f.id === fid);
+    if (target?.unreadCount) items.push("sep", { act: "markAllRead", label: "Mark all as read" });
+    // Emptying is only offered where deletion is already permanent by design.
+    if (target?.role === "deleteditems" || target?.role === "junkemail")
+      items.push({ act: "emptyFolder", label: `Empty "${esc(target.name)}"…`, danger: true });
     // Rename/Delete only for non-system folders — the provider rejects mutating
     // distinguished folders, and renaming one the app keys off would break role
     // detection. A custom folder (e.g. one named "Sent") carries no role and is
     // freely renamable/deletable.
-    const target = folders.find((f) => f.id === fid);
     if (target && !isProtectedFolder(target)) {
       items.push(
         "sep",
@@ -4820,8 +4824,48 @@ folderMenu.addEventListener("click", (e) => {
     case "deleteFolder":
       if (fid) void deleteFolder(fid);
       break;
+    case "markAllRead":
+      if (fid) void markFolderAllRead(fid);
+      break;
+    case "emptyFolder":
+      if (fid) void emptyFolderConfirmed(fid);
+      break;
   }
 });
+
+// Mark every message in the folder read: server + cache in one command, then
+// re-render from the cache so rows and badges agree.
+async function markFolderAllRead(fid: string): Promise<void> {
+  statusEl.textContent = "Marking all as read…";
+  try {
+    await invoke("mark_folder_read", { folderId: fid });
+    statusEl.textContent = "";
+    await loadFolders().catch(() => {});
+    if (fid === currentFolderId && !searchActive) await refreshFromCache().catch(() => {});
+  } catch (e) {
+    statusEl.textContent = `Mark all as read failed: ${e}`;
+  }
+}
+
+// Permanently empty Deleted Items / Junk, behind a danger confirm.
+async function emptyFolderConfirmed(fid: string): Promise<void> {
+  const folder = folders.find((f) => f.id === fid);
+  if (!folder) return;
+  const ok = await showConfirm(
+    `Permanently delete everything in "${folder.name}"? This cannot be undone.`,
+    { danger: true, okLabel: "Empty folder" },
+  );
+  if (!ok) return;
+  statusEl.textContent = `Emptying ${folder.name}…`;
+  try {
+    await invoke("empty_folder", { folderId: fid });
+    statusEl.textContent = `${folder.name} emptied`;
+    await loadFolders().catch(() => {});
+    if (fid === currentFolderId && !searchActive) await refreshFromCache().catch(() => {});
+  } catch (e) {
+    statusEl.textContent = `Empty folder failed: ${e}`;
+  }
+}
 
 document.addEventListener("click", (e) => {
   if (!folderMenu.contains(e.target as Node)) hideFolderMenu();

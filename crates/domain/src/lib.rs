@@ -366,6 +366,18 @@ pub trait MailProvider: Send + Sync {
     /// Move a message to another folder.
     async fn move_message(&self, id: &str, destination_folder_id: &str) -> Result<(), MailError>;
 
+    /// Mark every message in `folder_id` as read. Default: `Unsupported`.
+    async fn mark_folder_read(&self, _folder_id: &str) -> Result<(), MailError> {
+        Err(MailError::Unsupported)
+    }
+
+    /// Permanently delete every message in `folder_id` — used to empty Deleted
+    /// Items / Junk, so deletion is outright, not a move to Deleted Items.
+    /// Default: `Unsupported`.
+    async fn empty_folder(&self, _folder_id: &str) -> Result<(), MailError> {
+        Err(MailError::Unsupported)
+    }
+
     /// Whether the message carries attachments WattMail can't forward (embedded
     /// messages / cloud-reference links — anything that isn't a plain file
     /// attachment). Lets the forward UI show a "can't be forwarded" notice.
@@ -773,6 +785,12 @@ pub trait MailStore: Send + Sync {
     /// `recent` only returns a window of it).
     async fn count(&self, folder_id: &str) -> Result<u32, MailError>;
     async fn set_read(&self, id: &str, read: bool) -> Result<(), MailError>;
+    /// Flip every cached message in `folder_id` to read and zero the folder's
+    /// cached unread count — the cache mirror of a provider-side bulk change.
+    /// Defaults to a no-op (the next sync heals the cache).
+    async fn mark_folder_read(&self, _folder_id: &str) -> Result<(), MailError> {
+        Ok(())
+    }
     async fn set_flag(&self, id: &str, flagged: bool) -> Result<(), MailError>;
     /// Update only the cached attachment indicator for a message (a targeted
     /// delta change). A missing row is a no-op until the next full upsert.

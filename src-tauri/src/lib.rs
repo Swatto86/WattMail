@@ -137,6 +137,8 @@ pub fn run() {
             commands::reauthenticate_account,
             commands::message_has_unforwardable_attachments,
             commands::move_message,
+            commands::mark_folder_read,
+            commands::empty_folder,
             commands::get_close_to_tray,
             commands::set_close_to_tray,
             commands::set_unread,

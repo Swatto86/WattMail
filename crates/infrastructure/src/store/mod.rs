@@ -379,6 +379,22 @@ impl MailStore for SqliteStore {
         .await
     }
 
+    async fn mark_folder_read(&self, folder_id: &str) -> Result<(), MailError> {
+        let folder_id = folder_id.to_string();
+        self.run(move |conn| {
+            conn.execute(
+                "UPDATE messages SET is_read = 1 WHERE folder_id = ?1",
+                [&folder_id],
+            )?;
+            conn.execute(
+                "UPDATE folders SET unread_count = 0 WHERE id = ?1",
+                [folder_id],
+            )?;
+            Ok(())
+        })
+        .await
+    }
+
     async fn set_flag(&self, id: &str, flagged: bool) -> Result<(), MailError> {
         let id = id.to_string();
         self.run(move |conn| {
