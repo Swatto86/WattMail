@@ -916,6 +916,22 @@ function resetReader(): void {
 }
 
 // ---- Message list ----
+// Deterministic avatar hue from the who-string, so a sender keeps their colour
+// across renders and sessions.
+function avatarHue(s: string): number {
+  let h = 0;
+  for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) >>> 0;
+  return h % 360;
+}
+// Up to two initials: first word + last word ("Ada Lovelace" → "AL").
+function avatarInitials(name: string): string {
+  const words = name.trim().split(/\s+/).filter(Boolean);
+  if (!words.length) return "?";
+  const first = [...words[0]][0] ?? "?";
+  const last = words.length > 1 ? ([...words[words.length - 1]][0] ?? "") : "";
+  return (first + last).toUpperCase();
+}
+
 // Render one list row. `showRecipient` shows "To: …" instead of the sender (used
 // by outgoing folders). Search results use the sender form.
 function messageRowHtml(m: Message, showRecipient: boolean): string {
@@ -928,6 +944,10 @@ function messageRowHtml(m: Message, showRecipient: boolean): string {
     : "";
   const who = showRecipient ? `To: ${esc(m.to)}` : esc(senderName(m.from));
   const whoTitle = showRecipient ? esc(m.to) : esc(m.from);
+  // Initials avatar keyed to whoever the row names (sender, or the first
+  // recipient in outgoing folders).
+  const avatarSource = showRecipient ? m.to.split(",")[0].trim() : senderName(m.from);
+  const avatar = `<div class="msg-avatar" style="background:hsl(${avatarHue(avatarSource)} 45% 45%)" aria-hidden="true">${esc(avatarInitials(avatarSource))}</div>`;
   const importance =
     m.importance === "high"
       ? `<span class="msg-importance-high" title="High importance">!</span>`
@@ -937,6 +957,7 @@ function messageRowHtml(m: Message, showRecipient: boolean): string {
   return `
         <div class="msg ${unread}${flagged}" data-id="${esc(m.id)}">
           <div class="msg-dot">${dot}</div>
+          ${avatar}
           <div class="msg-main">
             <div class="msg-top">
               <span class="msg-from" title="${whoTitle}">${who}</span>

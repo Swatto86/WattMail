@@ -168,6 +168,21 @@ body,
   border-radius: 50%;
   background: oklch(var(--p));
 }
+/* Sender initials avatar (deterministic hue per sender; background inline). */
+.msg-avatar {
+  width: 30px;
+  height: 30px;
+  flex-shrink: 0;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 12px;
+  font-weight: 600;
+  color: #fff;
+  margin-top: 2px;
+  user-select: none;
+}
 .msg-main {
   min-width: 0;
   flex: 1;
