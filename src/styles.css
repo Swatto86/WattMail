@@ -658,6 +658,54 @@ body,
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+/* Image-attachment lightbox: dismiss-anywhere overlay with a contained image. */
+#attachment-lightbox {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: zoom-out;
+}
+#attachment-lightbox.hidden {
+  display: none;
+}
+.lightbox-figure {
+  margin: 0;
+  text-align: center;
+}
+.lightbox-img {
+  max-width: 90vw;
+  max-height: 85vh;
+  object-fit: contain;
+  border-radius: 6px;
+  box-shadow: 0 8px 40px rgb(0 0 0 / 0.5);
+}
+.lightbox-caption {
+  margin-top: 8px;
+  font-size: 12px;
+  color: #fff;
+  text-shadow: 0 1px 2px rgb(0 0 0 / 0.8);
+}
+/* Attachment chip cluster: main chip + per-chip save, plus a save-all button. */
+.attach-chip-group {
+  display: inline-flex;
+  align-items: stretch;
+  gap: 1px;
+}
+.attach-save,
+.attach-save-all {
+  padding: 2px 7px;
+  font-size: 12px;
+  border-radius: 6px;
+  background: oklch(var(--bc) / 0.08);
+  border: 1px solid oklch(var(--bc) / 0.14);
+  color: inherit;
+  cursor: pointer;
+}
+.attach-save:hover,
+.attach-save-all:hover {
+  background: oklch(var(--bc) / 0.16);
+}
+
 /* "Sent with high/low importance" notice under the subject. */
 .reader-importance {
   font-size: 12px;

@@ -1064,6 +1064,164 @@ pub async fn export_messages_to_desktop(
     })
 }
 
+/// Split a server-provided attachment name into a sanitized stem plus a
+/// sanitized extension (including the dot). The extension survives only as a
+/// short alphanumeric token, so the OS file association stays meaningful while
+/// a hostile name can't smuggle path syntax through. Runs backend-side because
+/// attachment names cross the IPC trust boundary (same rule as
+/// [`safe_filename`] for subjects).
+fn safe_attachment_name(name: &str) -> (String, String) {
+    match name.rsplit_once('.') {
+        Some((stem, ext))
+            if !ext.is_empty()
+                && ext.len() <= 10
+                && ext.chars().all(|c| c.is_ascii_alphanumeric()) =>
+        {
+            (
+                safe_filename(stem),
+                format!(".{}", ext.to_ascii_lowercase()),
+            )
+        }
+        _ => (safe_filename(name), String::new()),
+    }
+}
+
+/// First non-existing `<stem><ext>` path in `dir`, numbering duplicates
+/// Windows-style before the extension: `a.pdf`, `a (2).pdf`, …
+fn unique_attachment_path(dir: &std::path::Path, stem: &str, ext: &str) -> std::path::PathBuf {
+    let mut path = dir.join(format!("{stem}{ext}"));
+    let mut n = 2u32;
+    while path.exists() {
+        path = dir.join(format!("{stem} ({n}){ext}"));
+        n += 1;
+    }
+    path
+}
+
+/// Save every attachment of a message into `dir_path` (from the folder
+/// picker), continuing past per-item failures. Names are sanitized and
+/// de-duplicated here — they come from the server, not the user.
+#[tauri::command]
+pub async fn save_attachments_to_dir(
+    accounts: State<'_, AccountManager>,
+    message_id: String,
+    dir_path: String,
+) -> Result<DesktopExportDto, String> {
+    let dir = std::path::PathBuf::from(&dir_path);
+    if !dir.is_dir() {
+        return Err("destination folder does not exist".into());
+    }
+    let (_account, provider) = active_provider(&accounts).await?;
+    let atts = list_attachments(&*provider, &message_id)
+        .await
+        .map_err(|e| e.to_string())?;
+    let mut saved = 0u32;
+    let mut failed = 0u32;
+    let mut error: Option<String> = None;
+    for a in &atts {
+        let result = match download_attachment(&*provider, &message_id, &a.id).await {
+            Ok(bytes) => {
+                let (stem, ext) = safe_attachment_name(&a.name);
+                let path = unique_attachment_path(&dir, &stem, &ext);
+                std::fs::write(&path, bytes).map_err(|e| e.to_string())
+            }
+            Err(e) => Err(e.to_string()),
+        };
+        match result {
+            Ok(()) => saved += 1,
+            Err(e) => {
+                failed += 1;
+                error.get_or_insert(e);
+            }
+        }
+    }
+    Ok(DesktopExportDto {
+        saved,
+        failed,
+        error,
+    })
+}
+
+/// An attachment's bytes as a `data:` URL for the in-app image lightbox.
+/// Serves only `image/*`, with the content type taken from the provider's own
+/// attachment listing (never the caller) and validated before it's
+/// interpolated into the URL.
+#[tauri::command]
+pub async fn attachment_data_url(
+    accounts: State<'_, AccountManager>,
+    message_id: String,
+    attachment_id: String,
+) -> Result<String, String> {
+    // data: URLs live in the DOM; cap so a huge image can't balloon the webview.
+    const MAX_PREVIEW_BYTES: u64 = 15 * 1024 * 1024;
+    let (_account, provider) = active_provider(&accounts).await?;
+    let atts = list_attachments(&*provider, &message_id)
+        .await
+        .map_err(|e| e.to_string())?;
+    let att = atts
+        .iter()
+        .find(|a| a.id == attachment_id)
+        .ok_or("attachment not found")?;
+    let content_type = att.content_type.to_ascii_lowercase();
+    if !is_previewable_image(&content_type) {
+        return Err("not a previewable image".into());
+    }
+    if att.size > MAX_PREVIEW_BYTES {
+        return Err("image too large to preview — use Save instead".into());
+    }
+    let bytes = download_attachment(&*provider, &message_id, &attachment_id)
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(format!(
+        "data:{};base64,{}",
+        content_type,
+        base64::engine::general_purpose::STANDARD.encode(bytes)
+    ))
+}
+
+/// True for content types the image lightbox renders: `image/<token>` with a
+/// plain MIME subtype token — guards the value interpolated into the data: URL.
+fn is_previewable_image(content_type: &str) -> bool {
+    match content_type.strip_prefix("image/") {
+        Some(sub) if !sub.is_empty() => sub
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '+' | '-')),
+        _ => false,
+    }
+}
+
+/// Download a PDF attachment to WattMail's temp folder and open it with the
+/// system PDF viewer. The temp filename is sanitized and FORCED to `.pdf` —
+/// the only type this path supports — so a message can never hand the OS an
+/// executable (or any other association) to launch.
+#[tauri::command]
+pub async fn open_attachment(
+    accounts: State<'_, AccountManager>,
+    message_id: String,
+    attachment_id: String,
+) -> Result<(), String> {
+    let (_account, provider) = active_provider(&accounts).await?;
+    let atts = list_attachments(&*provider, &message_id)
+        .await
+        .map_err(|e| e.to_string())?;
+    let att = atts
+        .iter()
+        .find(|a| a.id == attachment_id)
+        .ok_or("attachment not found")?;
+    if !att.content_type.eq_ignore_ascii_case("application/pdf") {
+        return Err("only PDF attachments open directly — use Save for other files".into());
+    }
+    let bytes = download_attachment(&*provider, &message_id, &attachment_id)
+        .await
+        .map_err(|e| e.to_string())?;
+    let dir = std::env::temp_dir().join("WattMail").join("attachments");
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let (stem, _ext) = safe_attachment_name(&att.name);
+    let path = unique_attachment_path(&dir, &stem, ".pdf");
+    std::fs::write(&path, bytes).map_err(|e| e.to_string())?;
+    tauri_plugin_opener::open_path(&path, None::<&str>).map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 pub fn get_close_to_tray(state: State<'_, SettingsState>) -> bool {
     state.0.read().map(|s| s.close_to_tray).unwrap_or(true)
@@ -1541,7 +1699,59 @@ pub fn started_hidden(flag: State<'_, crate::StartHidden>) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{safe_filename, unique_eml_path};
+    use super::{
+        is_previewable_image, safe_attachment_name, safe_filename, unique_attachment_path,
+        unique_eml_path,
+    };
+
+    #[test]
+    fn safe_attachment_name_keeps_plain_extensions_and_neutralizes_path_syntax() {
+        assert_eq!(
+            safe_attachment_name("report.pdf"),
+            ("report".into(), ".pdf".into())
+        );
+        // Path traversal collapses to a single component; the extension survives.
+        assert_eq!(
+            safe_attachment_name("..\\..\\evil.exe"),
+            (".. .. evil".into(), ".exe".into())
+        );
+        // No/weird extension: everything is treated as the stem.
+        assert_eq!(
+            safe_attachment_name("README"),
+            ("README".into(), String::new())
+        );
+        assert_eq!(
+            safe_attachment_name("archive.tar.gz"),
+            ("archive.tar".into(), ".gz".into())
+        );
+        // A hostile "extension" with non-alphanumerics is not an extension.
+        assert_eq!(
+            safe_attachment_name("x.e?e"),
+            ("x.e e".into(), String::new())
+        );
+    }
+
+    #[test]
+    fn unique_attachment_path_numbers_before_the_extension() {
+        let dir = std::env::temp_dir().join(format!("wattmail-att-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let first = unique_attachment_path(&dir, "a", ".pdf");
+        assert_eq!(first.file_name().unwrap(), "a.pdf");
+        std::fs::write(&first, b"x").unwrap();
+        let second = unique_attachment_path(&dir, "a", ".pdf");
+        assert_eq!(second.file_name().unwrap(), "a (2).pdf");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn previewable_image_accepts_plain_subtypes_and_rejects_url_breakouts() {
+        assert!(is_previewable_image("image/png"));
+        assert!(is_previewable_image("image/svg+xml"));
+        assert!(!is_previewable_image("application/pdf"));
+        assert!(!is_previewable_image("image/"));
+        assert!(!is_previewable_image("image/png;base64,x")); // data:-URL injection
+        assert!(!is_previewable_image("text/html"));
+    }
 
     #[test]
     fn safe_filename_strips_illegal_characters_and_collapses_whitespace() {

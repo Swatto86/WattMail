@@ -1672,16 +1672,118 @@ async function loadAttachments(messageId: string): Promise<void> {
   if (selectedId !== messageId) return;
   const container = document.querySelector<HTMLDivElement>("#reader-attachments");
   if (!container) return;
-  container.innerHTML = list
-    .map(
-      (a) =>
-        `<button class="attach-chip" data-aid="${esc(a.id)}" data-name="${esc(a.name)}" title="Download ${esc(a.name)}">&#128206; ${esc(a.name)} <span class="attach-size">${fmtBytes(a.size)}</span></button>`,
-    )
+  // Chip click: images preview in the in-app lightbox, PDFs open in the system
+  // viewer, everything else keeps the save dialog. The per-chip ↓ always saves.
+  const chips = list
+    .map((a, i) => {
+      const ct = a.contentType.toLowerCase();
+      const hint = ct.startsWith("image/") ? "Preview" : ct === "application/pdf" ? "Open" : "Download";
+      return (
+        `<span class="attach-chip-group">` +
+        `<button class="attach-chip" data-i="${i}" title="${hint} ${esc(a.name)}">&#128206; ${esc(a.name)} <span class="attach-size">${fmtBytes(a.size)}</span></button>` +
+        `<button class="attach-save" data-i="${i}" title="Save ${esc(a.name)}">&#8595;</button>` +
+        `</span>`
+      );
+    })
     .join("");
+  const saveAll =
+    list.length > 1
+      ? `<button class="attach-save-all" title="Save every attachment into a folder">Save all (${list.length})</button>`
+      : "";
+  container.innerHTML = chips + saveAll;
   container.querySelectorAll<HTMLButtonElement>(".attach-chip").forEach((b) => {
-    b.addEventListener("click", () => void downloadAttachment(messageId, b.dataset.aid!, b.dataset.name!));
+    b.addEventListener("click", () => {
+      const a = list[Number(b.dataset.i)];
+      if (!a) return;
+      const ct = a.contentType.toLowerCase();
+      if (ct.startsWith("image/")) void previewImageAttachment(messageId, a);
+      else if (ct === "application/pdf") void openAttachmentExternally(messageId, a);
+      else void downloadAttachment(messageId, a.id, a.name);
+    });
   });
+  container.querySelectorAll<HTMLButtonElement>(".attach-save").forEach((b) => {
+    b.addEventListener("click", () => {
+      const a = list[Number(b.dataset.i)];
+      if (a) void downloadAttachment(messageId, a.id, a.name);
+    });
+  });
+  container
+    .querySelector<HTMLButtonElement>(".attach-save-all")
+    ?.addEventListener("click", () => void saveAllAttachments(messageId));
 }
+
+async function previewImageAttachment(messageId: string, a: AttachmentInfo): Promise<void> {
+  statusEl.textContent = `Loading ${a.name}…`;
+  try {
+    const url = await invoke<string>("attachment_data_url", {
+      messageId,
+      attachmentId: a.id,
+    });
+    statusEl.textContent = "";
+    openLightbox(url, a.name);
+  } catch (e) {
+    statusEl.textContent = `Preview failed: ${e}`;
+  }
+}
+
+async function openAttachmentExternally(messageId: string, a: AttachmentInfo): Promise<void> {
+  statusEl.textContent = `Opening ${a.name}…`;
+  try {
+    await invoke("open_attachment", { messageId, attachmentId: a.id });
+    statusEl.textContent = "";
+  } catch (e) {
+    statusEl.textContent = `Open failed: ${e}`;
+  }
+}
+
+async function saveAllAttachments(messageId: string): Promise<void> {
+  const dir = (await open({ directory: true, title: "Save attachments to folder" })) as
+    | string
+    | null;
+  if (!dir) return;
+  statusEl.textContent = "Saving attachments…";
+  try {
+    const r = await invoke<DesktopExport>("save_attachments_to_dir", {
+      messageId,
+      dirPath: dir,
+    });
+    statusEl.textContent = r.failed
+      ? `Saved ${r.saved}; ${r.failed} failed${r.error ? ` — ${r.error}` : ""}`
+      : `Saved ${r.saved} attachment${r.saved === 1 ? "" : "s"}`;
+  } catch (e) {
+    statusEl.textContent = `Save failed: ${e}`;
+  }
+}
+
+// ---- Image attachment lightbox ----
+// A dismiss-anywhere overlay showing one image via a data: URL served by the
+// backend (only image/* is ever served; the webview makes no network request).
+const lightbox = document.createElement("div");
+lightbox.id = "attachment-lightbox";
+lightbox.className = "overlay hidden";
+lightbox.innerHTML = `<figure class="lightbox-figure"><img class="lightbox-img" alt="" /><figcaption class="lightbox-caption"></figcaption></figure>`;
+document.body.appendChild(lightbox);
+function openLightbox(dataUrl: string, name: string): void {
+  lightbox.querySelector<HTMLImageElement>(".lightbox-img")!.src = dataUrl;
+  lightbox.querySelector<HTMLElement>(".lightbox-caption")!.textContent = name;
+  lightbox.classList.remove("hidden");
+}
+function closeLightbox(): void {
+  lightbox.classList.add("hidden");
+  lightbox.querySelector<HTMLImageElement>(".lightbox-img")!.src = ""; // release the data URL
+}
+lightbox.addEventListener("click", closeLightbox);
+// Capture phase so this Esc wins over (and suppresses) the modal-stack handlers.
+document.addEventListener(
+  "keydown",
+  (e) => {
+    if (e.key === "Escape" && !lightbox.classList.contains("hidden")) {
+      e.stopPropagation();
+      closeLightbox();
+    }
+  },
+  true,
+);
 
 async function downloadAttachment(messageId: string, attachmentId: string, name: string): Promise<void> {
   try {
@@ -5596,6 +5698,7 @@ function aModalIsOpen(): boolean {
     !rulesOverlay.classList.contains("hidden") ||
     !shortcutsOverlay.classList.contains("hidden") ||
     !providerOverlay.classList.contains("hidden") ||
+    !lightbox.classList.contains("hidden") ||
     isDialogOpen()
   );
 }
