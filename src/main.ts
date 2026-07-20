@@ -259,6 +259,14 @@ function currentFolderIsDrafts(): boolean {
   const folder = folders.find((f) => f.id === currentFolderId);
   return !!folder && isDraftsFolder(folder);
 }
+// Resolve a well-known folder by its provider role ("archive", "junkemail",
+// "inbox", …). Undefined when the provider reported no such folder.
+function folderByRole(role: string): FolderInfo | undefined {
+  return folders.find((f) => f.role === role);
+}
+function currentFolderRole(): string | null {
+  return folders.find((f) => f.id === currentFolderId)?.role ?? null;
+}
 
 // ---- Sort (client-side, over the loaded window) ----
 type SortMode = "dateDesc" | "dateAsc" | "sender" | "subject" | "unread";
@@ -603,7 +611,10 @@ appRoot.innerHTML = /* html */ `
           <tr><td><kbd>f</kbd></td><td>Forward</td></tr>
           <tr><td><kbd>u</kbd></td><td>Toggle read / unread</td></tr>
           <tr><td><kbd>g</kbd></td><td>Toggle follow-up flag</td></tr>
+          <tr><td><kbd>e</kbd></td><td>Archive message</td></tr>
           <tr><td><kbd>#</kbd></td><td>Delete message</td></tr>
+          <tr><td><kbd>Ctrl</kbd>+<kbd>A</kbd></td><td>Select all visible messages</td></tr>
+          <tr><td><kbd>Ctrl</kbd>+<kbd>P</kbd></td><td>Print open message</td></tr>
           <tr><td><kbd>c</kbd></td><td>Compose new message</td></tr>
           <tr><td><kbd>/</kbd></td><td>Focus search</td></tr>
           <tr><td><kbd>?</kbd></td><td>Show this cheat-sheet</td></tr>
@@ -1118,6 +1129,108 @@ async function moveMessage(id: string, destinationFolderId: string): Promise<voi
   }
 }
 
+// ---- Bulk actions over the multi-selection ----
+// Sequential per-message invokes (selections are human-scale); optimistic row
+// updates mirror the single-message actions, with ONE cache reconcile at the
+// end. A partial failure reports the count and re-syncs from the cache.
+async function bulkSetRead(ids: string[], read: boolean): Promise<void> {
+  let failed = 0;
+  for (const id of ids) {
+    const row = rowFor(id);
+    if (row) {
+      row.classList.toggle("unread", !read);
+      const dot = row.querySelector(".msg-dot");
+      if (dot) dot.innerHTML = read ? "" : `<span class="dot"></span>`;
+    }
+    try {
+      await invoke("set_read", { id, read });
+    } catch {
+      failed++;
+    }
+  }
+  clearChecked();
+  await loadFolders().catch(() => {}); // recompute unread badges once
+  if (failed) {
+    statusEl.textContent = `Marked ${ids.length - failed} of ${ids.length}; ${failed} failed`;
+    await revertOptimisticAction();
+  } else {
+    statusEl.textContent = `Marked ${ids.length} ${read ? "read" : "unread"}`;
+  }
+}
+
+async function bulkMove(ids: string[], destinationFolderId: string): Promise<void> {
+  let failed = 0;
+  for (const id of ids) {
+    rowFor(id)?.remove();
+    if (selectedId === id) resetReader();
+    try {
+      await invoke("move_message", { id, destinationFolderId });
+    } catch {
+      failed++;
+    }
+  }
+  clearChecked();
+  await reconcileAfterAction();
+  if (failed) {
+    statusEl.textContent = `Moved ${ids.length - failed} of ${ids.length}; ${failed} failed`;
+    await revertOptimisticAction();
+  } else {
+    statusEl.textContent = `Moved ${ids.length} messages`;
+  }
+}
+
+async function bulkDelete(ids: string[]): Promise<void> {
+  // Same permanence rule as the single delete: only Deleted Items hard-deletes,
+  // and search results always take the safe recoverable move.
+  const folder = folders.find((f) => f.id === currentFolderId);
+  const permanent = !searchActive && folder?.role === "deleteditems";
+  if (permanent) {
+    const ok = await showConfirm(
+      `Permanently delete ${ids.length} messages? This cannot be undone.`,
+      { danger: true, okLabel: "Delete" },
+    );
+    if (!ok) return;
+  }
+  let failed = 0;
+  for (const id of ids) {
+    rowFor(id)?.remove();
+    if (selectedId === id) resetReader();
+    try {
+      await invoke("delete_message", { id, permanent });
+    } catch {
+      failed++;
+    }
+  }
+  clearChecked();
+  await reconcileAfterAction();
+  if (failed) {
+    statusEl.textContent = `Deleted ${ids.length - failed} of ${ids.length}; ${failed} failed`;
+    await revertOptimisticAction();
+  } else {
+    statusEl.textContent = `Deleted ${ids.length} messages`;
+  }
+}
+
+// Ctrl+A: put every visible row into the bulk selection.
+function selectAllVisible(): void {
+  const ids = rowEls()
+    .map((el) => el.dataset.id)
+    .filter((v): v is string => !!v);
+  if (!ids.length) return;
+  checkedIds.clear();
+  for (const id of ids) checkedIds.add(id);
+  reflectChecked();
+  announceChecked();
+}
+
+// Print the open message: the reader iframe holds the sanitized body, so its
+// own print() prints exactly the message, not the app chrome. The frame's
+// sandbox carries allow-modals for this (scripts stay disabled inside, so the
+// email content itself can never call print — only this outer call can).
+function printOpenMessage(): void {
+  readerEl.querySelector<HTMLIFrameElement>(".reader-frame")?.contentWindow?.print();
+}
+
 // ---- Search ----
 // Cross-folder search via live Graph $search. Results bypass the local cache and
 // render into the list area; while a search is active the folder auto-sync must
@@ -1238,6 +1351,7 @@ function renderReader(msg: MessageView): void {
         <button id="reply-btn" class="btn btn-xs">Reply</button>
         <button id="reply-all-btn" class="btn btn-xs">Reply all</button>
         <button id="forward-btn" class="btn btn-xs">Forward</button>
+        <button id="print-btn" class="btn btn-xs btn-ghost" title="Print this message (Ctrl+P)">Print</button>
         <button id="save-eml-btn" class="btn btn-xs btn-ghost" title="Save this message to disk as an .eml file">Save as EML</button>
         <button id="headers-btn" class="btn btn-xs btn-ghost" title="View raw message headers and trace its origin">Headers</button>
       </div>
@@ -1245,7 +1359,7 @@ function renderReader(msg: MessageView): void {
     <div id="reader-invite" class="reader-invite hidden"></div>
     <div id="reader-attachments" class="reader-attachments"></div>
     ${banner}
-    <iframe class="reader-frame" sandbox="allow-same-origin" referrerpolicy="no-referrer"></iframe>
+    <iframe class="reader-frame" sandbox="allow-same-origin allow-modals" referrerpolicy="no-referrer"></iframe>
   `;
   readerEl
     .querySelector<HTMLButtonElement>("#load-images")
@@ -1259,6 +1373,9 @@ function renderReader(msg: MessageView): void {
   readerEl
     .querySelector<HTMLButtonElement>("#forward-btn")
     ?.addEventListener("click", () => void forwardMsg());
+  readerEl
+    .querySelector<HTMLButtonElement>("#print-btn")
+    ?.addEventListener("click", printOpenMessage);
   readerEl
     .querySelector<HTMLButtonElement>("#save-eml-btn")
     ?.addEventListener("click", () => void saveMessageAsEml(msg.id, msg.subject));
@@ -4427,8 +4544,19 @@ function renderMainMenu(unread: boolean, flagged: boolean): void {
     { act: "toggleRead", label: unread ? "Mark as read" : "Mark as unread" },
     { act: "toggleFlag", label: flagged ? "Clear flag" : "Flag" },
     { act: "moveMenu", label: "Move to folder…" },
-    { act: "delete", label: "Delete", danger: true },
   ];
+  // Archive / junk triage reuse the move seam against well-known role folders.
+  // In search the source folder is unknown, so "already there" checks only
+  // apply when browsing a folder; "Not junk" is only offered from Junk itself.
+  const role = searchActive ? null : currentFolderRole();
+  if (folderByRole("archive") && role !== "archive")
+    items.push({ act: "archive", label: "Archive" });
+  if (role === "junkemail") {
+    if (folderByRole("inbox")) items.push({ act: "notJunk", label: "Not junk" });
+  } else if (folderByRole("junkemail")) {
+    items.push({ act: "junk", label: "Mark as junk" });
+  }
+  items.push({ act: "delete", label: "Delete", danger: true });
   ctxMenu.innerHTML = items
     .map((it) =>
       it === "sep"
@@ -4458,10 +4586,25 @@ function renderFolderMenu(): void {
 // Menu for a right-click on a multi-selected row: bulk actions only, so the
 // per-message items can't silently apply to just one of the selection.
 function renderBulkMenu(count: number): void {
-  ctxMenu.innerHTML =
-    `<button class="ctx-item" data-act="saveDesktop">Save ${count} messages to Desktop</button>` +
-    `<div class="ctx-sep"></div>` +
-    `<button class="ctx-item" data-act="clearSel">Clear selection</button>`;
+  const items = [
+    `<button class="ctx-item" data-act="bulkRead">Mark ${count} as read</button>`,
+    `<button class="ctx-item" data-act="bulkUnread">Mark ${count} as unread</button>`,
+  ];
+  if (folderByRole("archive"))
+    items.push(`<button class="ctx-item" data-act="bulkArchive">Archive ${count} messages</button>`);
+  items.push(
+    `<button class="ctx-item" data-act="moveMenu">Move ${count} to folder…</button>`,
+    `<button class="ctx-item" data-act="saveDesktop">Save ${count} messages to Desktop</button>`,
+    `<button class="ctx-item ctx-danger" data-act="bulkDelete">Delete ${count} messages</button>`,
+    `<div class="ctx-sep"></div>`,
+    `<button class="ctx-item" data-act="clearSel">Clear selection</button>`,
+  );
+  ctxMenu.innerHTML = items.join("");
+}
+// The bulk menu (and its folder-picker drill-in) is active when the clicked row
+// is part of a multi-selection — same predicate as showCtxMenu.
+function ctxIsBulk(id: string): boolean {
+  return checkedIds.size > 1 && checkedIds.has(id);
 }
 
 function showCtxMenu(x: number, y: number, id: string, unread: boolean, flagged: boolean): void {
@@ -4504,10 +4647,12 @@ ctxMenu.addEventListener("click", (e) => {
     return;
   }
   if (item.dataset.act === "back") {
-    renderMainMenu(
-      rowFor(id)?.classList.contains("unread") ?? false,
-      rowFor(id)?.classList.contains("flagged") ?? false,
-    );
+    if (ctxIsBulk(id)) renderBulkMenu(checkedIds.size);
+    else
+      renderMainMenu(
+        rowFor(id)?.classList.contains("unread") ?? false,
+        rowFor(id)?.classList.contains("flagged") ?? false,
+      );
     placeMenu();
     return;
   }
@@ -4517,7 +4662,8 @@ ctxMenu.addEventListener("click", (e) => {
   const destFolderId = item.dataset.fid;
   hideCtxMenu();
   if (destFolderId) {
-    void moveMessage(id, destFolderId);
+    if (ctxIsBulk(id)) void bulkMove([...checkedIds], destFolderId);
+    else void moveMessage(id, destFolderId);
     return;
   }
   switch (item.dataset.act) {
@@ -4553,8 +4699,37 @@ ctxMenu.addEventListener("click", (e) => {
     case "toggleFlag":
       void setFlag(id, !flagged); // flagged → clear; unflagged → flag
       break;
+    case "archive": {
+      const dest = folderByRole("archive");
+      if (dest) void moveMessage(id, dest.id);
+      break;
+    }
+    case "junk": {
+      const dest = folderByRole("junkemail");
+      if (dest) void moveMessage(id, dest.id);
+      break;
+    }
+    case "notJunk": {
+      const dest = folderByRole("inbox");
+      if (dest) void moveMessage(id, dest.id);
+      break;
+    }
     case "delete":
       void deleteMessage(id);
+      break;
+    case "bulkRead":
+      void bulkSetRead([...checkedIds], true);
+      break;
+    case "bulkUnread":
+      void bulkSetRead([...checkedIds], false);
+      break;
+    case "bulkArchive": {
+      const dest = folderByRole("archive");
+      if (dest) void bulkMove([...checkedIds], dest.id);
+      break;
+    }
+    case "bulkDelete":
+      void bulkDelete([...checkedIds]);
       break;
   }
 });
@@ -5268,6 +5443,20 @@ function cursorRowState(): { unread: boolean; flagged: boolean } | null {
 document.addEventListener("keydown", (e) => {
   // Never intercept while signed out, typing, holding a modifier, or in a modal.
   if (mainView.classList.contains("hidden")) return;
+  // The two modified-key bindings live above the modifier bail: Ctrl+A selects
+  // every visible message, Ctrl+P prints the open one.
+  if ((e.ctrlKey || e.metaKey) && !e.altKey && e.key.toLowerCase() === "a") {
+    if (isTypingTarget() || aModalIsOpen()) return;
+    e.preventDefault();
+    selectAllVisible();
+    return;
+  }
+  if ((e.ctrlKey || e.metaKey) && !e.altKey && e.key.toLowerCase() === "p") {
+    if (aModalIsOpen()) return;
+    e.preventDefault();
+    printOpenMessage();
+    return;
+  }
   if (e.ctrlKey || e.metaKey || e.altKey) return;
   if (isTypingTarget() || aModalIsOpen()) return;
   // A floating menu owns the keyboard while open (its own Escape closes it);
@@ -5345,6 +5534,13 @@ document.addEventListener("keydown", (e) => {
       e.preventDefault();
       if (state) void setFlag(id, !state.flagged); // toggle follow-up flag
       break;
+    case "e": {
+      e.preventDefault();
+      const dest = folderByRole("archive");
+      if (dest && (searchActive || currentFolderRole() !== "archive"))
+        void moveMessage(id, dest.id);
+      break;
+    }
     case "#":
       e.preventDefault();
       void deleteMessage(id);
