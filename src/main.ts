@@ -58,6 +58,8 @@ interface MessageView {
   subject: string;
   from: string;
   to: string[];
+  cc: string[];
+  bcc: string[]; // only populated on the sender's own copy (Sent Items)
   received: string;
   html: string; // already sanitized in Rust
   remoteBlocked: boolean;
@@ -1221,6 +1223,8 @@ async function openMessage(id: string, allowImages = false): Promise<void> {
 function renderReader(msg: MessageView): void {
   lastMessage = msg;
   const to = msg.to.length ? ` · to ${esc(msg.to.join(", "))}` : "";
+  const cc = msg.cc.length ? `<div class="reader-meta">cc ${esc(msg.cc.join(", "))}</div>` : "";
+  const bcc = msg.bcc.length ? `<div class="reader-meta">bcc ${esc(msg.bcc.join(", "))}</div>` : "";
   const banner = msg.remoteBlocked
     ? `<button id="load-images" class="reader-banner" type="button">Images blocked &mdash; click to load images for this message</button>`
     : "";
@@ -1229,6 +1233,7 @@ function renderReader(msg: MessageView): void {
       <div class="reader-subject">${esc(msg.subject)}</div>
       <div class="reader-meta">${esc(msg.from)}</div>
       <div class="reader-meta">${esc(fmtDateFull(msg.received))}${to}</div>
+      ${cc}${bcc}
       <div class="reader-actions">
         <button id="reply-btn" class="btn btn-xs">Reply</button>
         <button id="reply-all-btn" class="btn btn-xs">Reply all</button>

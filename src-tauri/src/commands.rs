@@ -291,6 +291,10 @@ pub struct MessageViewDto {
     pub subject: String,
     pub from: String,
     pub to: Vec<String>,
+    pub cc: Vec<String>,
+    /// Only populated for the sender's own copy (Sent Items) — providers don't
+    /// deliver Bcc to recipients.
+    pub bcc: Vec<String>,
     pub received: String,
     pub html: String,
     pub remote_blocked: bool,
@@ -315,6 +319,8 @@ pub async fn load_message(
         subject: body.subject,
         from: body.from,
         to: body.to,
+        cc: body.cc,
+        bcc: body.bcc,
         received: body.received,
         html: body.html,
         remote_blocked: body.remote_content_blocked,

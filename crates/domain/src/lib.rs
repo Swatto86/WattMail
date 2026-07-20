@@ -110,6 +110,11 @@ pub struct MessageBody {
     /// Sender's bare email address (for building replies).
     pub from_address: String,
     pub to: Vec<String>,
+    /// Display-formatted Cc recipients (name + address), for the reading pane.
+    pub cc: Vec<String>,
+    /// Display-formatted Bcc recipients. Providers only store Bcc on the
+    /// sender's own copy (Sent Items), so this is empty for received mail.
+    pub bcc: Vec<String>,
     pub to_addresses: Vec<String>,
     pub cc_addresses: Vec<String>,
     /// Bare `Reply-To` addresses, when the message sets that header (mailing

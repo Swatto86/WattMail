@@ -480,7 +480,7 @@ impl MailProvider for GraphClient {
     async fn message(&self, id: &str, allow_images: bool) -> Result<MessageBody, MailError> {
         let mut url = message_endpoint(id);
         url.set_query(Some(
-            "$select=id,subject,from,replyTo,toRecipients,ccRecipients,receivedDateTime,body",
+            "$select=id,subject,from,replyTo,toRecipients,ccRecipients,bccRecipients,receivedDateTime,body",
         ));
 
         let message: GraphFullMessage = self
@@ -524,9 +524,15 @@ impl MailProvider for GraphClient {
             .unwrap_or_default();
         let to_recipients = message.to_recipients.unwrap_or_default();
         let cc_recipients = message.cc_recipients.unwrap_or_default();
+        let bcc_recipients = message.bcc_recipients.unwrap_or_default();
         let to_addresses = recipient_addresses(&to_recipients);
         let cc_addresses = recipient_addresses(&cc_recipients);
         let reply_to_addresses = recipient_addresses(&message.reply_to.unwrap_or_default());
+        let format_all = |list: Vec<GraphRecipient>| -> Vec<String> {
+            list.into_iter()
+                .map(|r| format_recipient(Some(r)))
+                .collect()
+        };
 
         Ok(MessageBody {
             id: message.id,
@@ -539,6 +545,8 @@ impl MailProvider for GraphClient {
                 .into_iter()
                 .map(|r| format_recipient(Some(r)))
                 .collect(),
+            cc: format_all(cc_recipients),
+            bcc: format_all(bcc_recipients),
             to_addresses,
             cc_addresses,
             reply_to_addresses,
@@ -1225,6 +1233,7 @@ struct GraphFullMessage {
     reply_to: Option<Vec<GraphRecipient>>,
     to_recipients: Option<Vec<GraphRecipient>>,
     cc_recipients: Option<Vec<GraphRecipient>>,
+    bcc_recipients: Option<Vec<GraphRecipient>>,
     received_date_time: Option<String>,
     body: Option<GraphBody>,
 }

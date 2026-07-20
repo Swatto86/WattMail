@@ -776,6 +776,8 @@ mod tests {
             from: from.into(),
             from_address: from.into(),
             to: Vec::new(),
+            cc: Vec::new(),
+            bcc: Vec::new(),
             to_addresses: to.iter().map(|s| s.to_string()).collect(),
             cc_addresses: cc.iter().map(|s| s.to_string()).collect(),
             reply_to_addresses: reply_to.iter().map(|s| s.to_string()).collect(),
