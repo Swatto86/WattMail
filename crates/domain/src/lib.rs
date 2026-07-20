@@ -81,6 +81,34 @@ pub struct UserProfile {
     pub email: EmailAddress,
 }
 
+/// Message importance, as providers expose it (Graph `importance`). `Normal`
+/// is the wire default and covers absent/unknown values.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Importance {
+    Low,
+    #[default]
+    Normal,
+    High,
+}
+
+impl Importance {
+    pub fn parse(raw: Option<&str>) -> Self {
+        match raw {
+            Some(s) if s.eq_ignore_ascii_case("high") => Importance::High,
+            Some(s) if s.eq_ignore_ascii_case("low") => Importance::Low,
+            _ => Importance::Normal,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Importance::Low => "low",
+            Importance::Normal => "normal",
+            Importance::High => "high",
+        }
+    }
+}
+
 /// A lightweight summary of a message, suitable for a list view.
 #[derive(Debug, Clone)]
 pub struct MessageSummary {
@@ -99,6 +127,8 @@ pub struct MessageSummary {
     /// `hasAttachments` already excludes inline images), so the list can show an
     /// attachment indicator without fetching each message's attachment list.
     pub has_attachments: bool,
+    /// Sender-set importance, so the list can show the high/low marker.
+    pub importance: Importance,
 }
 
 /// A single message with its full, render-ready body.
@@ -132,6 +162,8 @@ pub struct MessageBody {
     /// render designed mail on a light card while letting plain mail follow the
     /// app theme in dark mode.
     pub is_designed: bool,
+    /// Sender-set importance, for the reader's high/low banner.
+    pub importance: Importance,
 }
 
 /// A single internet message header (an RFC 5322 `name: value` pair), as
@@ -175,6 +207,11 @@ pub struct OutgoingMessage {
     pub subject: String,
     pub body_html: String,
     pub attachments: Vec<OutgoingAttachment>,
+    pub importance: Importance,
+    /// Ask recipients' clients for a read receipt.
+    pub request_read_receipt: bool,
+    /// Ask the transport for a delivery receipt.
+    pub request_delivery_receipt: bool,
 }
 
 /// A saved draft, loaded for editing. Carries the *raw* (unsanitized) body
@@ -187,6 +224,11 @@ pub struct DraftPrefill {
     pub bcc: Vec<String>,
     pub subject: String,
     pub body_html: String,
+    /// Importance / receipt-request state saved on the draft, restored into the
+    /// compose controls on resume.
+    pub importance: Importance,
+    pub request_read_receipt: bool,
+    pub request_delivery_receipt: bool,
     /// True when the draft has attachments stored on the server. WattMail can't
     /// edit or remove them (drafts don't carry attachments through the editor),
     /// so the compose UI warns that they will be sent with the message.

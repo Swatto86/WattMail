@@ -9,8 +9,8 @@ use std::sync::LazyLock;
 use async_trait::async_trait;
 use base64::Engine;
 use wattmail_domain::{
-    Attachment, DraftPrefill, EmailAddress, Folder, FolderRole, MailError, MailProvider,
-    MessageBody, MessageChange, MessageHeader, MessageRule, MessageRuleActions,
+    Attachment, DraftPrefill, EmailAddress, Folder, FolderRole, Importance, MailError,
+    MailProvider, MessageBody, MessageChange, MessageHeader, MessageRule, MessageRuleActions,
     MessageRuleConditions, MessageSummary, OutgoingAttachment, OutgoingMessage, SyncBatch,
     SyncToken, UserProfile,
 };
@@ -411,7 +411,7 @@ impl MailProvider for GraphClient {
         let url = format!(
             "{GRAPH_BASE}/me/messages\
              ?$top={top}\
-             &$select=id,subject,from,toRecipients,receivedDateTime,bodyPreview,isRead,flag,hasAttachments\
+             &$select=id,subject,from,toRecipients,receivedDateTime,bodyPreview,isRead,flag,hasAttachments,importance\
              &$orderby=receivedDateTime desc"
         );
         let body: GraphMessages = self
@@ -443,7 +443,7 @@ impl MailProvider for GraphClient {
                 ("$search", search_value.as_str()),
                 (
                     "$select",
-                    "id,subject,from,toRecipients,receivedDateTime,bodyPreview,isRead,flag,hasAttachments",
+                    "id,subject,from,toRecipients,receivedDateTime,bodyPreview,isRead,flag,hasAttachments,importance",
                 ),
                 ("$top", &top.to_string()),
             ])
@@ -489,7 +489,7 @@ impl MailProvider for GraphClient {
                 ("$top", top.as_str()),
                 (
                     "$select",
-                    "id,subject,from,toRecipients,receivedDateTime,bodyPreview,isRead,flag,hasAttachments",
+                    "id,subject,from,toRecipients,receivedDateTime,bodyPreview,isRead,flag,hasAttachments,importance",
                 ),
             ])
             .send()
@@ -507,7 +507,7 @@ impl MailProvider for GraphClient {
     async fn message(&self, id: &str, allow_images: bool) -> Result<MessageBody, MailError> {
         let mut url = message_endpoint(id);
         url.set_query(Some(
-            "$select=id,subject,from,replyTo,toRecipients,ccRecipients,bccRecipients,receivedDateTime,body",
+            "$select=id,subject,from,replyTo,toRecipients,ccRecipients,bccRecipients,receivedDateTime,body,importance",
         ));
 
         let message: GraphFullMessage = self
@@ -581,6 +581,7 @@ impl MailProvider for GraphClient {
             html,
             remote_content_blocked: sanitized.remote_content_blocked,
             is_designed: sanitized.is_designed,
+            importance: Importance::parse(message.importance.as_deref()),
         })
     }
 
@@ -893,6 +894,7 @@ impl MailProvider for GraphClient {
                         is_read: item.is_read.unwrap_or(false),
                         is_flagged: flag_is_flagged(item.flag.as_ref()),
                         has_attachments: item.has_attachments.unwrap_or(false),
+                        importance: Importance::parse(item.importance.as_deref()),
                     }));
                 }
             }
@@ -919,6 +921,9 @@ impl MailProvider for GraphClient {
                 "ccRecipients": recipients_json(&message.cc),
                 "bccRecipients": recipients_json(&message.bcc),
                 "attachments": attachments_json(&message.attachments),
+                "importance": message.importance.as_str(),
+                "isReadReceiptRequested": message.request_read_receipt,
+                "isDeliveryReceiptRequested": message.request_delivery_receipt,
             },
             "saveToSentItems": true,
         });
@@ -1077,7 +1082,7 @@ impl MailProvider for GraphClient {
         // `message`) so the editor round-trips the draft faithfully.
         let mut url = message_endpoint(id);
         url.set_query(Some(
-            "$select=subject,toRecipients,ccRecipients,bccRecipients,body,hasAttachments",
+            "$select=subject,toRecipients,ccRecipients,bccRecipients,body,hasAttachments,importance,isReadReceiptRequested,isDeliveryReceiptRequested",
         ));
 
         let message: GraphDraftMessage = self
@@ -1093,6 +1098,9 @@ impl MailProvider for GraphClient {
             bcc: recipient_addresses(&message.bcc_recipients.unwrap_or_default()),
             subject: message.subject.unwrap_or_default(),
             body_html: message.body.map(|b| b.content).unwrap_or_default(),
+            importance: Importance::parse(message.importance.as_deref()),
+            request_read_receipt: message.is_read_receipt_requested.unwrap_or(false),
+            request_delivery_receipt: message.is_delivery_receipt_requested.unwrap_or(false),
             has_attachments: message.has_attachments.unwrap_or(false),
         })
     }
@@ -1288,6 +1296,7 @@ struct GraphMessage {
     flag: Option<GraphFlag>,
     #[serde(default)]
     has_attachments: bool,
+    importance: Option<String>,
 }
 
 /// The `flag` property of a message; `flagStatus` is one of `notFlagged`,
@@ -1324,6 +1333,7 @@ struct GraphFullMessage {
     bcc_recipients: Option<Vec<GraphRecipient>>,
     received_date_time: Option<String>,
     body: Option<GraphBody>,
+    importance: Option<String>,
 }
 
 #[derive(serde::Deserialize)]
@@ -1351,6 +1361,9 @@ struct GraphDraftMessage {
     bcc_recipients: Option<Vec<GraphRecipient>>,
     body: Option<GraphBody>,
     has_attachments: Option<bool>,
+    importance: Option<String>,
+    is_read_receipt_requested: Option<bool>,
+    is_delivery_receipt_requested: Option<bool>,
 }
 
 #[derive(serde::Deserialize)]
@@ -1387,6 +1400,7 @@ struct DeltaItem {
     is_read: Option<bool>,
     flag: Option<GraphFlag>,
     has_attachments: Option<bool>,
+    importance: Option<String>,
     #[serde(rename = "@removed")]
     removed: Option<serde_json::Value>,
 }
@@ -1464,7 +1478,7 @@ fn folder_delta_url(folder_id: &str) -> String {
         segments.push("delta");
     }
     url.set_query(Some(
-        "$select=id,subject,from,toRecipients,receivedDateTime,bodyPreview,isRead,flag,hasAttachments&$top=50",
+        "$select=id,subject,from,toRecipients,receivedDateTime,bodyPreview,isRead,flag,hasAttachments,importance&$top=50",
     ));
     url.into()
 }
@@ -1585,6 +1599,9 @@ fn draft_body_json(message: &OutgoingMessage) -> serde_json::Value {
         "toRecipients": recipients_json(&message.to),
         "ccRecipients": recipients_json(&message.cc),
         "bccRecipients": recipients_json(&message.bcc),
+        "importance": message.importance.as_str(),
+        "isReadReceiptRequested": message.request_read_receipt,
+        "isDeliveryReceiptRequested": message.request_delivery_receipt,
     })
 }
 
@@ -1924,6 +1941,7 @@ impl From<GraphMessage> for MessageSummary {
             is_read: m.is_read,
             is_flagged: flag_is_flagged(m.flag.as_ref()),
             has_attachments: m.has_attachments,
+            importance: Importance::parse(m.importance.as_deref()),
         }
     }
 }

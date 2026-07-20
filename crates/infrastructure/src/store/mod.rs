@@ -12,7 +12,7 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use rusqlite::{Connection, OptionalExtension};
-use wattmail_domain::{Folder, FolderRole, MailError, MailStore, MessageSummary};
+use wattmail_domain::{Folder, FolderRole, Importance, MailError, MailStore, MessageSummary};
 
 use crate::crypto::FieldCipher;
 
@@ -29,7 +29,8 @@ use crate::crypto::FieldCipher;
 ///
 /// v8 adds the folder `role` column (well-known/distinguished-folder tag, server
 /// truth); the rebuild repopulates it from the next folder list.
-const SCHEMA_VERSION: i64 = 8;
+/// v9 adds the message `importance` column (high/low marker in the list).
+const SCHEMA_VERSION: i64 = 9;
 
 const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS messages (
@@ -42,7 +43,8 @@ CREATE TABLE IF NOT EXISTS messages (
     preview         TEXT NOT NULL,
     is_read         INTEGER NOT NULL,
     is_flagged      INTEGER NOT NULL DEFAULT 0,
-    has_attachments INTEGER NOT NULL DEFAULT 0
+    has_attachments INTEGER NOT NULL DEFAULT 0,
+    importance      TEXT NOT NULL DEFAULT 'normal'
 );
 CREATE INDEX IF NOT EXISTS idx_messages_folder_received ON messages(folder_id, received DESC);
 CREATE TABLE IF NOT EXISTS sync_state (
@@ -77,6 +79,9 @@ struct EncryptedRow {
     is_read: i64,
     is_flagged: i64,
     has_attachments: i64,
+    /// [`Importance::as_str`] value. Metadata like the flags above (not message
+    /// content), so stored plaintext.
+    importance: &'static str,
 }
 
 /// An encrypted folder row, ready to insert (built off the blocking thread).
@@ -225,13 +230,14 @@ impl MailStore for SqliteStore {
                 is_read: i64::from(m.is_read),
                 is_flagged: i64::from(m.is_flagged),
                 has_attachments: i64::from(m.has_attachments),
+                importance: m.importance.as_str(),
             })
             .collect();
 
         self.run(move |conn| {
             let mut stmt = conn.prepare(
-                "INSERT INTO messages (id, folder_id, subject, sender, recipients, received, preview, is_read, is_flagged, has_attachments)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+                "INSERT INTO messages (id, folder_id, subject, sender, recipients, received, preview, is_read, is_flagged, has_attachments, importance)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
                  ON CONFLICT(id) DO UPDATE SET
                      folder_id       = excluded.folder_id,
                      subject         = excluded.subject,
@@ -241,7 +247,8 @@ impl MailStore for SqliteStore {
                      preview         = excluded.preview,
                      is_read         = excluded.is_read,
                      is_flagged      = excluded.is_flagged,
-                     has_attachments = excluded.has_attachments",
+                     has_attachments = excluded.has_attachments,
+                     importance      = excluded.importance",
             )?;
             for r in &rows {
                 stmt.execute(rusqlite::params![
@@ -255,6 +262,7 @@ impl MailStore for SqliteStore {
                     r.is_read,
                     r.is_flagged,
                     r.has_attachments,
+                    r.importance,
                 ])?;
             }
             Ok(())
@@ -285,7 +293,7 @@ impl MailStore for SqliteStore {
         let mut rows = self
             .run(move |conn| {
                 let mut stmt = conn.prepare(
-                    "SELECT id, subject, sender, recipients, received, preview, is_read, is_flagged, has_attachments
+                    "SELECT id, subject, sender, recipients, received, preview, is_read, is_flagged, has_attachments, importance
                      FROM messages WHERE folder_id = ?1 ORDER BY received DESC LIMIT ?2",
                 )?;
                 let rows = stmt.query_map(rusqlite::params![folder_id, top], |row| {
@@ -299,6 +307,7 @@ impl MailStore for SqliteStore {
                         is_read: row.get::<_, i64>(6)? != 0,
                         is_flagged: row.get::<_, i64>(7)? != 0,
                         has_attachments: row.get::<_, i64>(8)? != 0,
+                        importance: Importance::parse(Some(&row.get::<_, String>(9)?)),
                     })
                 })?;
                 rows.collect::<rusqlite::Result<Vec<_>>>()
@@ -562,6 +571,7 @@ mod tests {
             is_read,
             is_flagged: false,
             has_attachments: false,
+            importance: Importance::Normal,
         }
     }
 

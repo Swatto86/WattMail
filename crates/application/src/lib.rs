@@ -600,7 +600,8 @@ mod tests {
     use std::collections::HashMap;
     use std::sync::Mutex;
     use wattmail_domain::{
-        EmailAddress, Folder, MessageBody, MessageHeader, MessageSummary, SyncBatch, SyncToken,
+        EmailAddress, Folder, Importance, MessageBody, MessageHeader, MessageSummary, SyncBatch,
+        SyncToken,
     };
 
     fn summary(id: &str) -> MessageSummary {
@@ -614,6 +615,7 @@ mod tests {
             is_read: false,
             is_flagged: false,
             has_attachments: false,
+            importance: Importance::Normal,
         }
     }
 
@@ -807,6 +809,7 @@ mod tests {
             html: String::new(),
             remote_content_blocked: false,
             is_designed: false,
+            importance: Importance::Normal,
         }
     }
 

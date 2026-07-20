@@ -27,7 +27,7 @@ use wattmail_application::{
     update_event as app_update_event,
 };
 use wattmail_domain::{
-    CalendarProvider, EventDateTime, Folder, InviteResponse, MailProvider, MessageRule,
+    CalendarProvider, EventDateTime, Folder, Importance, InviteResponse, MailProvider, MessageRule,
     MessageSummary, NewEvent, OutgoingAttachment, OutgoingMessage,
 };
 use wattmail_infrastructure::{build_calendar_provider, build_mail_provider, ProviderKind};
@@ -82,6 +82,8 @@ pub struct MessageDto {
     pub is_read: bool,
     pub is_flagged: bool,
     pub has_attachments: bool,
+    /// "low" | "normal" | "high" (sender-set importance).
+    pub importance: String,
 }
 
 #[derive(Serialize)]
@@ -104,6 +106,7 @@ fn message_dto(m: MessageSummary) -> MessageDto {
         is_read: m.is_read,
         is_flagged: m.is_flagged,
         has_attachments: m.has_attachments,
+        importance: m.importance.as_str().to_string(),
     }
 }
 
@@ -299,6 +302,8 @@ pub struct MessageViewDto {
     pub bcc: Vec<String>,
     pub received: String,
     pub html: String,
+    /// "low" | "normal" | "high" (sender-set importance).
+    pub importance: String,
     pub remote_blocked: bool,
     /// True when the email sets its own (non-white) background — render it on a
     /// light card; false lets plain mail follow the app theme in dark mode.
@@ -325,6 +330,7 @@ pub async fn load_message(
         bcc: body.bcc,
         received: body.received,
         html: body.html,
+        importance: body.importance.as_str().to_string(),
         remote_blocked: body.remote_content_blocked,
         designed: body.is_designed,
     })
@@ -607,6 +613,9 @@ pub async fn send_message(
     inline_images: Vec<InlineImageDto>,
     forwarded_attachments: Vec<ForwardedAttachmentDto>,
     reply_to_id: Option<String>,
+    importance: Option<String>,
+    request_read_receipt: Option<bool>,
+    request_delivery_receipt: Option<bool>,
 ) -> Result<(), String> {
     let (_account, provider) = active_provider(&accounts).await?;
     let attachments = collect_attachments(
@@ -624,6 +633,9 @@ pub async fn send_message(
         subject,
         body_html,
         attachments,
+        importance: Importance::parse(importance.as_deref()),
+        request_read_receipt: request_read_receipt.unwrap_or(false),
+        request_delivery_receipt: request_delivery_receipt.unwrap_or(false),
     };
     match reply_to_id {
         Some(original_id) => app_send_reply(&*provider, &original_id, &message).await,
@@ -813,7 +825,9 @@ fn extension_for(content_type: &str) -> &'static str {
 /// Save a draft (subject/body/recipients only — attachments on drafts are out of
 /// scope). With no `id`, creates a new draft; with one, updates it in place.
 /// Returns the draft's id so the frontend can track it for later saves/sends.
+// Arity mirrors the compose IPC surface (same tradeoff as send_message).
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub async fn save_draft(
     accounts: State<'_, AccountManager>,
     id: Option<String>,
@@ -822,6 +836,9 @@ pub async fn save_draft(
     bcc: Vec<String>,
     subject: String,
     body_html: String,
+    importance: Option<String>,
+    request_read_receipt: Option<bool>,
+    request_delivery_receipt: Option<bool>,
 ) -> Result<String, String> {
     let (_account, provider) = active_provider(&accounts).await?;
     let message = OutgoingMessage {
@@ -831,6 +848,9 @@ pub async fn save_draft(
         subject,
         body_html,
         attachments: Vec::new(),
+        importance: Importance::parse(importance.as_deref()),
+        request_read_receipt: request_read_receipt.unwrap_or(false),
+        request_delivery_receipt: request_delivery_receipt.unwrap_or(false),
     };
     app_save_draft(&*provider, id.as_deref(), &message)
         .await
@@ -854,6 +874,9 @@ pub struct DraftPrefillDto {
     pub bcc: Vec<String>,
     pub subject: String,
     pub body_html: String,
+    pub importance: String,
+    pub request_read_receipt: bool,
+    pub request_delivery_receipt: bool,
     pub has_attachments: bool,
 }
 
@@ -873,6 +896,9 @@ pub async fn load_draft(
         bcc: draft.bcc,
         subject: draft.subject,
         body_html: draft.body_html,
+        importance: draft.importance.as_str().to_string(),
+        request_read_receipt: draft.request_read_receipt,
+        request_delivery_receipt: draft.request_delivery_receipt,
         has_attachments: draft.has_attachments,
     })
 }

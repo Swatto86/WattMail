@@ -47,6 +47,7 @@ interface Message {
   isRead: boolean;
   isFlagged: boolean;
   hasAttachments: boolean;
+  importance: "low" | "normal" | "high";
 }
 interface Inbox {
   account: Account | null;
@@ -62,6 +63,7 @@ interface MessageView {
   bcc: string[]; // only populated on the sender's own copy (Sent Items)
   received: string;
   html: string; // already sanitized in Rust
+  importance: "low" | "normal" | "high";
   remoteBlocked: boolean;
   designed: boolean; // email sets its own (non-white) background -> render on a light card
 }
@@ -87,6 +89,9 @@ interface DraftPrefill {
   bcc: string[];
   subject: string;
   bodyHtml: string; // raw, unsanitized body for the editor
+  importance: "low" | "normal" | "high";
+  requestReadReceipt: boolean;
+  requestDeliveryReceipt: boolean;
   hasAttachments: boolean; // draft has server-side attachments WattMail can't edit
 }
 interface AttachmentInfo {
@@ -535,11 +540,27 @@ appRoot.innerHTML = /* html */ `
         <button type="button" data-cmd="insertOrderedList" title="Numbered list">1.</button>
         <button type="button" data-cmd="createLink" title="Insert link">&#128279;</button>
         <button type="button" data-cmd="removeFormat" title="Clear formatting">&#10005;</button>
+        <select id="c-fontsize" class="compose-fontsize" title="Text size">
+          <option value="">Size</option>
+          <option value="2">Small</option>
+          <option value="3">Normal</option>
+          <option value="5">Large</option>
+          <option value="6">Huge</option>
+        </select>
+        <input type="color" id="c-forecolor" class="compose-color" title="Text colour" value="#c0392b" />
+        <input type="color" id="c-hilite" class="compose-color" title="Highlight colour" value="#ffff00" />
+        <span class="compose-toolbar-spacer"></span>
+        <button type="button" id="c-imp-high" class="compose-imp" title="High importance">!</button>
+        <button type="button" id="c-imp-low" class="compose-imp" title="Low importance">&darr;</button>
       </div>
       <div id="c-body" class="compose-body" contenteditable="true" role="textbox" aria-label="Message body"></div>
       <div class="compose-attach-row">
         <button id="c-attach" class="btn btn-xs" type="button">&#128206; Attach</button>
         <div id="c-attachments" class="compose-attachments"></div>
+      </div>
+      <div class="compose-options">
+        <label title="Recipients' clients are asked to notify you when the message is read (they can decline)"><input type="checkbox" id="c-read-receipt" /> Request read receipt</label>
+        <label title="The mail server reports when the message is delivered"><input type="checkbox" id="c-delivery-receipt" /> Request delivery receipt</label>
       </div>
       <div id="compose-msg" class="settings-msg"></div>
       <div class="settings-actions" style="gap: 8px">
@@ -684,6 +705,13 @@ const correspondentsList = document.querySelector<HTMLDivElement>("#corresponden
 const cSubjectInput = document.querySelector<HTMLInputElement>("#c-subject")!;
 const cBodyInput = document.querySelector<HTMLDivElement>("#c-body")!;
 const composeToolbar = document.querySelector<HTMLDivElement>("#c-toolbar")!;
+const cFontSize = document.querySelector<HTMLSelectElement>("#c-fontsize")!;
+const cForeColor = document.querySelector<HTMLInputElement>("#c-forecolor")!;
+const cHilite = document.querySelector<HTMLInputElement>("#c-hilite")!;
+const cImpHighBtn = document.querySelector<HTMLButtonElement>("#c-imp-high")!;
+const cImpLowBtn = document.querySelector<HTMLButtonElement>("#c-imp-low")!;
+const cReadReceipt = document.querySelector<HTMLInputElement>("#c-read-receipt")!;
+const cDeliveryReceipt = document.querySelector<HTMLInputElement>("#c-delivery-receipt")!;
 const composeMsg = document.querySelector<HTMLDivElement>("#compose-msg")!;
 const composeCancel = document.querySelector<HTMLButtonElement>("#compose-cancel")!;
 const composeSaveDraftBtn = document.querySelector<HTMLButtonElement>("#compose-savedraft")!;
@@ -850,13 +878,19 @@ function messageRowHtml(m: Message, showRecipient: boolean): string {
     : "";
   const who = showRecipient ? `To: ${esc(m.to)}` : esc(senderName(m.from));
   const whoTitle = showRecipient ? esc(m.to) : esc(m.from);
+  const importance =
+    m.importance === "high"
+      ? `<span class="msg-importance-high" title="High importance">!</span>`
+      : m.importance === "low"
+        ? `<span class="msg-importance-low" title="Low importance">&darr;</span>`
+        : "";
   return `
         <div class="msg ${unread}${flagged}" data-id="${esc(m.id)}">
           <div class="msg-dot">${dot}</div>
           <div class="msg-main">
             <div class="msg-top">
               <span class="msg-from" title="${whoTitle}">${who}</span>
-              <span class="msg-date">${attach}${flag}${esc(fmtDate(m.received))}</span>
+              <span class="msg-date">${importance}${attach}${flag}${esc(fmtDate(m.received))}</span>
             </div>
             <div class="msg-subject" title="${esc(m.subject)}">${esc(m.subject)}</div>
             <div class="msg-preview">${esc(m.preview)}</div>
@@ -1338,12 +1372,19 @@ function renderReader(msg: MessageView): void {
   const to = msg.to.length ? ` · to ${esc(msg.to.join(", "))}` : "";
   const cc = msg.cc.length ? `<div class="reader-meta">cc ${esc(msg.cc.join(", "))}</div>` : "";
   const bcc = msg.bcc.length ? `<div class="reader-meta">bcc ${esc(msg.bcc.join(", "))}</div>` : "";
+  const importance =
+    msg.importance === "high"
+      ? `<div class="reader-importance high">! This message was sent with high importance.</div>`
+      : msg.importance === "low"
+        ? `<div class="reader-importance">&darr; This message was sent with low importance.</div>`
+        : "";
   const banner = msg.remoteBlocked
     ? `<button id="load-images" class="reader-banner" type="button">Images blocked &mdash; click to load images for this message</button>`
     : "";
   readerEl.innerHTML = `
     <div class="reader-head">
       <div class="reader-subject">${esc(msg.subject)}</div>
+      ${importance}
       <div class="reader-meta">${esc(msg.from)}</div>
       <div class="reader-meta">${esc(fmtDateFull(msg.received))}${to}</div>
       ${cc}${bcc}
@@ -3824,6 +3865,10 @@ function openCompose(opts: {
   // Non-inline file attachments from the original message (forward only).
   // The user can remove any of these individually before sending.
   forwardedAtts?: ForwardedAttachmentInfo[];
+  // Importance / receipt-request state (restored when resuming a draft).
+  importance?: "low" | "normal" | "high";
+  requestReadReceipt?: boolean;
+  requestDeliveryReceipt?: boolean;
 }): void {
   void loadCorrespondentSuggestions();
   composeSession += 1; // invalidate any in-flight save from a prior session
@@ -3851,6 +3896,9 @@ function openCompose(opts: {
   composeAttachPaths = [];
   composeForwardedAtts = opts.forwardedAtts ? [...opts.forwardedAtts] : [];
   composeServerAtts = [];
+  setComposeImportance(opts.importance ?? "normal");
+  cReadReceipt.checked = opts.requestReadReceipt ?? false;
+  cDeliveryReceipt.checked = opts.requestDeliveryReceipt ?? false;
   renderComposeAttachments();
   composeMsg.textContent = "";
   delete composeMsg.dataset.error;
@@ -3885,7 +3933,18 @@ function closeCompose(): void {
 // The compose baseline captured at open, so composeIsDirty() can tell whether
 // the user has changed anything beyond the reply/forward/draft prefill (the
 // prefilled recipients, quoted body, and forwarded attachments are NOT dirty).
-let composeBaseline = { to: "", cc: "", bcc: "", subject: "", body: "", attach: 0, fwd: 0 };
+let composeBaseline = {
+  to: "",
+  cc: "",
+  bcc: "",
+  subject: "",
+  body: "",
+  attach: 0,
+  fwd: 0,
+  imp: "normal" as string,
+  rr: false,
+  dr: false,
+};
 function captureComposeBaseline(): void {
   composeBaseline = {
     to: cToInput.value,
@@ -3895,6 +3954,9 @@ function captureComposeBaseline(): void {
     body: cBodyInput.innerHTML,
     attach: composeAttachPaths.length,
     fwd: composeForwardedAtts.length,
+    imp: composeImportance,
+    rr: cReadReceipt.checked,
+    dr: cDeliveryReceipt.checked,
   };
 }
 function composeIsDirty(): boolean {
@@ -3905,9 +3967,28 @@ function composeIsDirty(): boolean {
     cSubjectInput.value !== composeBaseline.subject ||
     cBodyInput.innerHTML !== composeBaseline.body ||
     composeAttachPaths.length !== composeBaseline.attach ||
-    composeForwardedAtts.length !== composeBaseline.fwd
+    composeForwardedAtts.length !== composeBaseline.fwd ||
+    composeImportance !== composeBaseline.imp ||
+    cReadReceipt.checked !== composeBaseline.rr ||
+    cDeliveryReceipt.checked !== composeBaseline.dr
   );
 }
+
+// ---- Compose importance ----
+// High/low are mutually exclusive toggles (click again to clear), mirroring
+// Outlook's ! / ↓ buttons. Sent as the Graph message `importance`.
+let composeImportance: "low" | "normal" | "high" = "normal";
+function setComposeImportance(v: "low" | "normal" | "high"): void {
+  composeImportance = v;
+  cImpHighBtn.classList.toggle("active", v === "high");
+  cImpLowBtn.classList.toggle("active", v === "low");
+}
+cImpHighBtn.addEventListener("click", () =>
+  setComposeImportance(composeImportance === "high" ? "normal" : "high"),
+);
+cImpLowBtn.addEventListener("click", () =>
+  setComposeImportance(composeImportance === "low" ? "normal" : "low"),
+);
 
 // ---- Undo send ----
 // A short countdown between clicking Send and the message actually leaving, so
@@ -4027,6 +4108,9 @@ async function runAutosave(): Promise<void> {
       bcc: parseAddresses(cBccInput.value),
       subject: cSubjectInput.value,
       bodyHtml: cBodyInput.innerHTML,
+      importance: composeImportance,
+      requestReadReceipt: cReadReceipt.checked,
+      requestDeliveryReceipt: cDeliveryReceipt.checked,
     });
     // Compose was closed/replaced while this save was in flight — the returned
     // id belongs to that gone session; adopting it would hijack the new one.
@@ -4153,6 +4237,9 @@ async function resumeDraft(id: string): Promise<void> {
       bodyHtml: d.bodyHtml,
       draftId: id,
       draftIsResumed: true,
+      importance: d.importance,
+      requestReadReceipt: d.requestReadReceipt,
+      requestDeliveryReceipt: d.requestDeliveryReceipt,
     });
     // Attachments saved on the draft (by WattMail or another client) come in
     // as removable server chips; on a listing failure, fall back to a notice
@@ -4249,6 +4336,9 @@ async function saveDraft(): Promise<void> {
       bcc: parseAddresses(cBccInput.value),
       subject: cSubjectInput.value,
       bodyHtml: cBodyInput.innerHTML,
+      importance: composeImportance,
+      requestReadReceipt: cReadReceipt.checked,
+      requestDeliveryReceipt: cDeliveryReceipt.checked,
     });
     // Compose closed/replaced mid-save: the draft is safely persisted server-side,
     // but writing back its id (and attachments/baseline) would land on the new
@@ -4387,6 +4477,9 @@ async function sendCompose(): Promise<void> {
         bcc,
         subject,
         bodyHtml: images.length > 0 ? html : bodyHtml,
+        importance: composeImportance,
+        requestReadReceipt: cReadReceipt.checked,
+        requestDeliveryReceipt: cDeliveryReceipt.checked,
       });
       await invoke("send_draft", { id: draftId });
       currentDraftId = null;
@@ -4416,6 +4509,9 @@ async function sendCompose(): Promise<void> {
         // bytes per ref.
         forwardedAttachments: forwardedAttachmentDtos(),
         replyToId: currentReplyToId,
+        importance: composeImportance,
+        requestReadReceipt: cReadReceipt.checked,
+        requestDeliveryReceipt: cDeliveryReceipt.checked,
       });
       // A fresh send that had an autosaved draft: remove the leftover so Drafts
       // isn't left holding a copy of the message we just sent.
@@ -5286,6 +5382,33 @@ composeToolbar.addEventListener("mousedown", (e) => {
     document.execCommand(cmd, false);
   }
 });
+// Font-size / colour controls: opening a native select or colour picker steals
+// focus (collapsing the editor selection execCommand needs), so snapshot the
+// selection on mousedown and restore it before applying — the createLink idiom.
+let toolbarSavedRange: Range | null = null;
+function toolbarSnapshotSelection(): void {
+  const sel = window.getSelection();
+  toolbarSavedRange = sel && sel.rangeCount > 0 ? sel.getRangeAt(0).cloneRange() : null;
+}
+function toolbarApply(cmd: string, value: string): void {
+  cBodyInput.focus();
+  if (toolbarSavedRange) {
+    const sel = window.getSelection();
+    sel?.removeAllRanges();
+    sel?.addRange(toolbarSavedRange);
+  }
+  document.execCommand(cmd, false, value);
+}
+cFontSize.addEventListener("mousedown", toolbarSnapshotSelection);
+cFontSize.addEventListener("change", () => {
+  if (cFontSize.value) toolbarApply("fontSize", cFontSize.value);
+  cFontSize.value = ""; // back to the "Size" placeholder
+});
+cForeColor.addEventListener("mousedown", toolbarSnapshotSelection);
+cForeColor.addEventListener("change", () => toolbarApply("foreColor", cForeColor.value));
+cHilite.addEventListener("mousedown", toolbarSnapshotSelection);
+cHilite.addEventListener("change", () => toolbarApply("hiliteColor", cHilite.value));
+
 // Paste: prefer pasted image(s); else sanitized rich HTML; else plain text.
 // All HTML is allow-list sanitized before insertion (the clipboard can carry
 // hostile markup from any web page).
