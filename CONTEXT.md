@@ -5,7 +5,7 @@
 > new milestone state, a decision made/reversed, or an open question resolved.
 > Keep newest progress entries at the top of the log.
 >
-> **Last updated:** 2026-07-01
+> **Last updated:** 2026-07-20
 
 ---
 
@@ -95,6 +95,69 @@ Entra app registration (public, not secret):
 ---
 
 ## Progress log
+
+### 2026-07-20 — Cc/Bcc in reader + common-client feature batch (v0.6.0)
+- **Bug (the reported one): sent mail showed no Cc/Bcc.** Three-fold root cause:
+  the message fetch never `$select`ed `bccRecipients`, `MessageBody` carried
+  only bare `cc_addresses` (reply-all fuel, not display), and the reader
+  rendered From/To only. Now `cc`/`bcc` display fields flow through
+  MessageBody → DTO → reader meta rows. Bcc only exists on the sender's own
+  copy (Sent Items) — providers never deliver it — so it shows there only.
+- **Feature-gap scan** (5-domain inventory workflow, every claimed gap
+  adversarially verified — 33 confirmed, 0 refuted) then a 15-item batch of the
+  universal/expected ones:
+  - *Triage*: **Archive** (ctx menu + `e`, role-resolved folder, reuses
+    move_message), **Mark as junk / Not junk** (moves to junkemail/inbox),
+    **bulk actions** on the multi-select (read/unread/archive/move/delete —
+    folder-picker drill-in reused), **Ctrl+A** select-all-visible.
+  - *Folder ops*: **Mark all as read** and **Empty Deleted Items/Junk** —
+    Graph `$batch` drain loops (20/chunk, follows `@odata.nextLink` past empty
+    filter pages, poison-message abort via first_batch_failure), cache
+    write-through (`MailStore::mark_folder_read` / `forget_folder`); Empty is
+    danger-confirmed AND role-checked in the application layer (defense in
+    depth — only deleteditems/junkemail can drain).
+  - *Importance end-to-end*: `importance` in every summary/message `$select` +
+    delta (incl. importance-only flags-change), **SQLite schema v9** (importance
+    column, drop-and-rebuild), list `!`/`↓` badges, reader banner, compose
+    High/Low toggles; settable on send/reply/draft (sendMail + draft_body_json),
+    round-trips draft resume.
+  - *Receipts*: read/delivery receipt request checkboxes → OutgoingMessage →
+    Graph `isReadReceiptRequested`/`isDeliveryReceiptRequested`, draft-persisted.
+  - *Compose toolbar*: font-size select + text/highlight colour pickers
+    (selection snapshot/restore around the native pickers, createLink idiom).
+  - *Attachments*: **image lightbox** (backend-served `data:` URL; content type
+    validated server-side against the provider's own listing, image/* only,
+    15 MB cap), **PDF opens in system viewer** (temp file, sanitized stem,
+    extension FORCED `.pdf` so mail can never hand the OS an executable),
+    per-chip save, **Save all** into a picked folder (names sanitized
+    backend-side — IPC trust boundary, same rule as the .eml export).
+  - *Out of office*: automatic replies over `GET/PATCH /me/mailboxSettings`
+    (trait-defaulted Unsupported; rides the already-granted
+    MailboxSettings.ReadWrite — no re-consent), Settings-row editor
+    (off/on/scheduled + window, internal/external messages, audience), gated on
+    `supportsRules` (Exchange-only). Messages flatten HTML↔text at the provider
+    boundary; scheduled bounds are saved as **UTC instants** and converted back
+    for display, so the window round-trips exactly (a window set from Outlook in
+    a non-UTC named zone falls back to raw wall-clock display).
+  - *Polish*: **Print** (reader-iframe `print()`, `allow-modals` added to the
+    sandbox — scripts stay disabled so mail content can't invoke it; Ctrl+P),
+    sender **initials avatars** (deterministic hue), cheat-sheet updated.
+- **Regression sweep** (5 adversarial lenses × 2 refuters per finding): 7
+  confirmed → all fixed pre-release (nextLink drain bug; OOF html→text choking
+  on MSO conditional comments/quoted `>`; importance-only delta silently
+  dropped — same class as v0.5.0's hasAttachments fix, fixed the same targeted
+  way; OOF window zone shift; empty-folder server-side scope check;
+  importance/receipt toggles not arming autosave; bulk-Archive offered inside
+  Archive). 1 contested finding accepted as-is: Empty Junk hard-DELETEs to
+  Recoverable Items — identical semantics to the app's existing permanent
+  delete, and the confirm says so.
+- Gate green throughout (npm build + fmt + clippy `-D warnings` +
+  `cargo test --workspace`, now 81 tests). **Compile+test verified, not
+  live-run.** Live sanity worth doing on first use: open a sent message with
+  Cc/Bcc, archive + junk a message, mark-all-read and empty Deleted Items on
+  small folders, send with high importance + read receipt (check Outlook shows
+  both), preview an image / open a PDF attachment, set + reopen a scheduled
+  OOF window, print a message.
 
 ### 2026-07-18 — Pasted-formatting fidelity + bug-sweep batch (v0.5.0)
 - **Feature — preserve pasted text formatting.** The compose paste/drop path
