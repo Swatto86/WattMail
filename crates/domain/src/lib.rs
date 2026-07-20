@@ -170,10 +170,15 @@ pub struct MessageBody {
 #[derive(Debug, Clone)]
 pub struct AutoReplySettings {
     pub status: AutoReplyStatus,
-    /// Scheduled window bounds as local wall-clock ISO ("2026-07-21T09:00:00"),
-    /// meaningful only when `status` is [`AutoReplyStatus::Scheduled`].
+    /// Scheduled window bounds as wall-clock ISO ("2026-07-21T09:00:00") in
+    /// `scheduled_time_zone`, meaningful only when `status` is
+    /// [`AutoReplyStatus::Scheduled`].
     pub scheduled_start: Option<String>,
     pub scheduled_end: Option<String>,
+    /// The zone the bounds above are expressed in, as the provider reported it
+    /// (Graph normally serves "UTC" regardless of how the window was set).
+    /// `None` when the provider reported no window.
+    pub scheduled_time_zone: Option<String>,
     /// Plain text. Providers store HTML — conversion happens at the provider
     /// boundary, both ways.
     pub internal_message: String,
@@ -680,6 +685,9 @@ pub enum MessageChange {
         /// The message's attachment state, when the notification carried it (e.g.
         /// an attachment added/removed from another client). `None` = untouched.
         has_attachments: Option<bool>,
+        /// The message's importance, when the notification carried it. `None` =
+        /// untouched.
+        importance: Option<Importance>,
     },
     Removed(String),
 }
@@ -921,6 +929,9 @@ pub trait MailStore: Send + Sync {
     /// Update only the cached attachment indicator for a message (a targeted
     /// delta change). A missing row is a no-op until the next full upsert.
     async fn set_has_attachments(&self, id: &str, has: bool) -> Result<(), MailError>;
+    /// Update only the cached importance for a message (a targeted delta
+    /// change). A missing row is a no-op until the next full upsert.
+    async fn set_importance(&self, id: &str, importance: Importance) -> Result<(), MailError>;
     /// Replace the cached folder list (in sidebar order) so it survives offline.
     async fn save_folders(&self, folders: Vec<Folder>) -> Result<(), MailError>;
     /// The cached folder list, in saved sidebar order.

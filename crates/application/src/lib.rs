@@ -5,9 +5,9 @@
 
 use wattmail_domain::{
     Attachment, AutoReplySettings, CalendarEvent, CalendarProvider, DraftPrefill, Folder,
-    InviteResponse, MailError, MailProvider, MailStore, MeetingInvite, MessageBody, MessageChange,
-    MessageHeader, MessageSummary, NewEvent, OutgoingAttachment, OutgoingMessage, SyncToken,
-    UserProfile,
+    FolderRole, InviteResponse, MailError, MailProvider, MailStore, MeetingInvite, MessageBody,
+    MessageChange, MessageHeader, MessageSummary, NewEvent, OutgoingAttachment, OutgoingMessage,
+    SyncToken, UserProfile,
 };
 
 const ACCOUNT_NAME_KEY: &str = "account.displayName";
@@ -202,13 +202,28 @@ pub async fn mark_folder_read(
     store.mark_folder_read(folder_id).await
 }
 
-/// Permanently delete every message in a folder (Deleted Items / Junk), then
-/// drop the folder's cached rows.
+/// Permanently delete every message in a folder, then drop the folder's cached
+/// rows. Restricted to Deleted Items / Junk — the only folders where deletion
+/// is already permanent by design. The check runs here, not just in the UI, so
+/// no caller can hard-wipe an ordinary folder through this path.
 pub async fn empty_folder(
     provider: &dyn MailProvider,
     store: &dyn MailStore,
     folder_id: &str,
 ) -> Result<(), MailError> {
+    let emptiable = store.cached_folders().await?.into_iter().any(|f| {
+        f.id == folder_id
+            && matches!(
+                f.role,
+                Some(FolderRole::DeletedItems) | Some(FolderRole::JunkEmail)
+            )
+    });
+    if !emptiable {
+        return Err(MailError::Api {
+            status: 0,
+            message: "only Deleted Items and Junk Email can be emptied".into(),
+        });
+    }
     provider.empty_folder(folder_id).await?;
     store.forget_folder(folder_id).await
 }
@@ -263,6 +278,7 @@ pub async fn sync_folder(
                 is_read,
                 is_flagged,
                 has_attachments,
+                importance,
             } => {
                 flush_upserts(store, folder_id, &mut upserts).await?;
                 // Update only the fields the notification carried; a missing row
@@ -275,6 +291,9 @@ pub async fn sync_folder(
                 }
                 if let Some(has) = has_attachments {
                     store.set_has_attachments(&id, has).await?;
+                }
+                if let Some(imp) = importance {
+                    store.set_importance(&id, imp).await?;
                 }
             }
             MessageChange::Removed(id) => {
@@ -692,6 +711,12 @@ mod tests {
             }
             Ok(())
         }
+        async fn set_importance(&self, id: &str, importance: Importance) -> Result<(), MailError> {
+            if let Some(m) = self.messages.lock().unwrap().get_mut(id) {
+                m.importance = importance;
+            }
+            Ok(())
+        }
         async fn save_folders(&self, _folders: Vec<Folder>) -> Result<(), MailError> {
             Ok(())
         }
@@ -809,6 +834,21 @@ mod tests {
             !store.messages.lock().unwrap().contains_key("A"),
             "removed message must not be resurrected by the earlier upsert"
         );
+    }
+
+    #[tokio::test]
+    async fn empty_folder_refuses_folders_without_a_deletable_role() {
+        // The scope check must hold in the application layer itself — a caller
+        // handing in an ordinary folder id (no deleteditems/junkemail role in
+        // the cached list) is rejected before the provider is ever asked.
+        let store = MockStore::default();
+        let provider = MockProvider {
+            batch: Mutex::new(None),
+        };
+        let err = empty_folder(&provider, &store, "ordinary-folder")
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("only Deleted Items"));
     }
 
     fn body_with(from: &str, reply_to: &[&str], to: &[&str], cc: &[&str]) -> MessageBody {

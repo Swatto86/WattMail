@@ -4158,12 +4158,18 @@ function setComposeImportance(v: "low" | "normal" | "high"): void {
   cImpHighBtn.classList.toggle("active", v === "high");
   cImpLowBtn.classList.toggle("active", v === "low");
 }
-cImpHighBtn.addEventListener("click", () =>
-  setComposeImportance(composeImportance === "high" ? "normal" : "high"),
-);
-cImpLowBtn.addEventListener("click", () =>
-  setComposeImportance(composeImportance === "low" ? "normal" : "low"),
-);
+// User toggles arm the autosave like any other edit (openCompose's prefill
+// path calls setComposeImportance directly, so it never arms from a resume).
+cImpHighBtn.addEventListener("click", () => {
+  setComposeImportance(composeImportance === "high" ? "normal" : "high");
+  scheduleAutosave();
+});
+cImpLowBtn.addEventListener("click", () => {
+  setComposeImportance(composeImportance === "low" ? "normal" : "low");
+  scheduleAutosave();
+});
+cReadReceipt.addEventListener("change", scheduleAutosave);
+cDeliveryReceipt.addEventListener("change", scheduleAutosave);
 
 // ---- Undo send ----
 // A short countdown between clicking Send and the message actually leaving, so
@@ -4861,7 +4867,10 @@ function renderBulkMenu(count: number): void {
     `<button class="ctx-item" data-act="bulkRead">Mark ${count} as read</button>`,
     `<button class="ctx-item" data-act="bulkUnread">Mark ${count} as unread</button>`,
   ];
-  if (folderByRole("archive"))
+  // Same suppression as the single-item menu / 'e' shortcut: no Archive offer
+  // while already browsing the Archive folder (search keeps it — cross-folder).
+  const role = searchActive ? null : currentFolderRole();
+  if (folderByRole("archive") && role !== "archive")
     items.push(`<button class="ctx-item" data-act="bulkArchive">Archive ${count} messages</button>`);
   items.push(
     `<button class="ctx-item" data-act="moveMenu">Move ${count} to folder…</button>`,
@@ -5730,9 +5739,29 @@ interface AutoReplyState {
   status: "disabled" | "alwaysEnabled" | "scheduled";
   scheduledStart: string | null;
   scheduledEnd: string | null;
+  scheduledTimeZone: string | null; // zone of the bounds, per the provider (usually "UTC")
   internalMessage: string;
   externalMessage: string;
   externalAudience: "none" | "contactsOnly" | "all";
+}
+
+// Graph serves scheduled bounds in UTC regardless of how they were set, and we
+// always SAVE in UTC — so the round trip through these two is exact. A window
+// stored in some other named zone (set from Outlook) can't be converted without
+// a tz database; it falls back to showing the raw wall-clock.
+function utcBoundToLocalInput(dateTime: string): string {
+  const d = new Date(`${dateTime.slice(0, 19)}Z`);
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+function localInputToUtcBound(value: string): string {
+  return new Date(value).toISOString().slice(0, 19);
+}
+function oofBoundForInput(dateTime: string | null, zone: string | null): string {
+  if (!dateTime) return "";
+  return (zone ?? "").toLowerCase() === "utc"
+    ? utcBoundToLocalInput(dateTime)
+    : dateTime.slice(0, 16);
 }
 
 function oofStatusValue(): string {
@@ -5763,9 +5792,8 @@ async function openOof(): Promise<void> {
         `input[name="oof-status"][value="${s.status}"]`,
       ) ?? document.querySelector<HTMLInputElement>('input[name="oof-status"][value="disabled"]')!;
     radio.checked = true;
-    // Graph serves "YYYY-MM-DDTHH:MM:SS.…"; datetime-local wants "YYYY-MM-DDTHH:MM".
-    oofStart.value = (s.scheduledStart ?? "").slice(0, 16);
-    oofEnd.value = (s.scheduledEnd ?? "").slice(0, 16);
+    oofStart.value = oofBoundForInput(s.scheduledStart, s.scheduledTimeZone);
+    oofEnd.value = oofBoundForInput(s.scheduledEnd, s.scheduledTimeZone);
     oofInternal.value = s.internalMessage;
     oofExternal.value = s.externalMessage;
     oofAudience.value = s.externalAudience;
@@ -5793,14 +5821,16 @@ async function saveOof(): Promise<void> {
   oofSaveBtn.disabled = true;
   oofMsg.textContent = "Saving…";
   try {
+    // Bounds are converted to UTC instants here, so what Graph stores (and
+    // later serves back in UTC) round-trips exactly through the local inputs.
     await invoke("set_auto_reply", {
       status,
-      scheduledStart: status === "scheduled" ? `${oofStart.value}:00` : null,
-      scheduledEnd: status === "scheduled" ? `${oofEnd.value}:00` : null,
+      scheduledStart: status === "scheduled" ? localInputToUtcBound(oofStart.value) : null,
+      scheduledEnd: status === "scheduled" ? localInputToUtcBound(oofEnd.value) : null,
       internalMessage: oofInternal.value,
       externalMessage: oofExternal.value,
       externalAudience: oofAudience.value,
-      timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+      timeZone: "UTC",
     });
     closeOof();
     statusEl.textContent =

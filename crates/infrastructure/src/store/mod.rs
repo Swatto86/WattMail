@@ -388,6 +388,19 @@ impl MailStore for SqliteStore {
         .await
     }
 
+    async fn set_importance(&self, id: &str, importance: Importance) -> Result<(), MailError> {
+        let id = id.to_string();
+        let value = importance.as_str();
+        self.run(move |conn| {
+            conn.execute(
+                "UPDATE messages SET importance = ?1 WHERE id = ?2",
+                rusqlite::params![value, id],
+            )?;
+            Ok(())
+        })
+        .await
+    }
+
     async fn mark_folder_read(&self, folder_id: &str) -> Result<(), MailError> {
         let folder_id = folder_id.to_string();
         self.run(move |conn| {

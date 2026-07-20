@@ -237,6 +237,35 @@ impl GraphClient {
         Ok(roles_from_batch(batch))
     }
 
+    /// The first non-empty page of message ids for `first_url`, following
+    /// `@odata.nextLink` past empty pages (Graph can serve a sparse/empty page
+    /// with a skip-token while still evaluating a `$filter`). Returns empty
+    /// only when the collection is genuinely exhausted. Bounded so a
+    /// pathological chain of empty pages errors instead of spinning.
+    async fn first_id_batch(&self, first_url: &str) -> Result<Vec<String>, MailError> {
+        const MAX_EMPTY_PAGES: usize = 50;
+        let mut url = first_url.to_string();
+        for _ in 0..MAX_EMPTY_PAGES {
+            let page: GraphPage<GraphMessageId> = self
+                .get(&url)
+                .await?
+                .json()
+                .await
+                .map_err(|e| MailError::Decode(e.to_string()))?;
+            if !page.value.is_empty() {
+                return Ok(page.value.into_iter().map(|m| m.id).collect());
+            }
+            match page.next_link {
+                Some(next) => url = next,
+                None => return Ok(Vec::new()),
+            }
+        }
+        Err(MailError::Api {
+            status: 0,
+            message: "message paging did not converge".into(),
+        })
+    }
+
     /// POST a `$batch` of sub-requests and fail on the first sub-request that
     /// didn't succeed (a `$batch` itself returns 200 even when items fail).
     /// Bulk callers rely on this to stop re-looping over a message that
@@ -712,23 +741,13 @@ impl MailProvider for GraphClient {
         // any per-item failure aborts the loop — otherwise a poison message
         // would come back unread every round and spin forever.
         const MAX_ROUNDS: usize = 500;
+        let mut url = url::Url::parse(&folder_messages_url(folder_id)).expect("valid folder URL");
+        url.set_query(Some("$filter=isRead eq false&$select=id&$top=20"));
         for _ in 0..MAX_ROUNDS {
-            let mut url =
-                url::Url::parse(&folder_messages_url(folder_id)).expect("valid folder URL");
-            url.set_query(Some("$filter=isRead eq false&$select=id&$top=20"));
-            let page: GraphPage<GraphMessageId> = self
-                .get(url.as_str())
-                .await?
-                .json()
-                .await
-                .map_err(|e| MailError::Decode(e.to_string()))?;
-            if page.value.is_empty() {
-                if page.next_link.is_none() {
-                    return Ok(());
-                }
-                continue; // empty page mid-collection: re-query
+            let ids = self.first_id_batch(url.as_str()).await?;
+            if ids.is_empty() {
+                return Ok(());
             }
-            let ids: Vec<String> = page.value.into_iter().map(|m| m.id).collect();
             self.run_batch(mark_read_batch_requests(&ids)).await?;
         }
         Err(MailError::Api {
@@ -742,23 +761,13 @@ impl MailProvider for GraphClient {
         // ever offered for Deleted Items / Junk, where deletion is permanent by
         // design — Graph moves the items to Recoverable Items).
         const MAX_ROUNDS: usize = 500;
+        let mut url = url::Url::parse(&folder_messages_url(folder_id)).expect("valid folder URL");
+        url.set_query(Some("$select=id&$top=20"));
         for _ in 0..MAX_ROUNDS {
-            let mut url =
-                url::Url::parse(&folder_messages_url(folder_id)).expect("valid folder URL");
-            url.set_query(Some("$select=id&$top=20"));
-            let page: GraphPage<GraphMessageId> = self
-                .get(url.as_str())
-                .await?
-                .json()
-                .await
-                .map_err(|e| MailError::Decode(e.to_string()))?;
-            if page.value.is_empty() {
-                if page.next_link.is_none() {
-                    return Ok(());
-                }
-                continue;
+            let ids = self.first_id_batch(url.as_str()).await?;
+            if ids.is_empty() {
+                return Ok(());
             }
-            let ids: Vec<String> = page.value.into_iter().map(|m| m.id).collect();
             self.run_batch(delete_batch_requests(&ids)).await?;
         }
         Err(MailError::Api {
@@ -911,6 +920,10 @@ impl MailProvider for GraphClient {
                         is_read: item.is_read,
                         is_flagged: item.flag.as_ref().map(|f| flag_is_flagged(Some(f))),
                         has_attachments: item.has_attachments,
+                        importance: item
+                            .importance
+                            .as_deref()
+                            .map(|i| Importance::parse(Some(i))),
                     });
                 } else {
                     changes.push(MessageChange::Upserted(MessageSummary {
@@ -1547,6 +1560,7 @@ struct GraphAutoReplies {
 #[serde(rename_all = "camelCase")]
 struct GraphDateTimeOnly {
     date_time: Option<String>,
+    time_zone: Option<String>,
 }
 
 fn auto_reply_from_graph(body: GraphMailboxSettings) -> AutoReplySettings {
@@ -1555,12 +1569,17 @@ fn auto_reply_from_graph(body: GraphMailboxSettings) -> AutoReplySettings {
             status: AutoReplyStatus::Disabled,
             scheduled_start: None,
             scheduled_end: None,
+            scheduled_time_zone: None,
             internal_message: String::new(),
             external_message: String::new(),
             external_audience: ExternalAudience::None,
         },
         Some(a) => AutoReplySettings {
             status: AutoReplyStatus::parse(a.status.as_deref().unwrap_or("")),
+            scheduled_time_zone: a
+                .scheduled_start_date_time
+                .as_ref()
+                .and_then(|d| d.time_zone.clone()),
             scheduled_start: a.scheduled_start_date_time.and_then(|d| d.date_time),
             scheduled_end: a.scheduled_end_date_time.and_then(|d| d.date_time),
             internal_message: email_html_to_text(&a.internal_reply_message.unwrap_or_default()),
@@ -1593,16 +1612,37 @@ fn auto_reply_json(s: &AutoReplySettings, time_zone: &str) -> serde_json::Value 
     serde_json::json!({ "automaticRepliesSetting": setting })
 }
 
+/// Byte offset of the '>' that really closes the tag starting at `rest` (which
+/// begins with '<'). Comments close at `-->` (an MSO conditional like
+/// `<!--[if gte mso 9]>…<![endif]-->` holds inner '>'s), and a literal '>'
+/// inside a quoted attribute value doesn't close the tag either.
+fn tag_end(rest: &str) -> Option<usize> {
+    if rest.starts_with("<!--") {
+        return rest.find("-->").map(|p| p + 2);
+    }
+    let mut quote: Option<char> = None;
+    for (i, c) in rest.char_indices().skip(1) {
+        match (quote, c) {
+            (Some(q), c) if c == q => quote = None,
+            (None, '"') | (None, '\'') => quote = Some(c),
+            (None, '>') => return Some(i),
+            _ => {}
+        }
+    }
+    None
+}
+
 /// Flatten the HTML Graph stores for a reply message into the plain text the
 /// settings textarea edits: `<br>`/block closings become newlines, other tags
-/// drop, and the few entities the escape path produces decode back.
+/// (and comments) drop, and the few entities the escape path produces decode
+/// back.
 fn email_html_to_text(html: &str) -> String {
     let mut out = String::with_capacity(html.len());
     let mut rest = html;
     while let Some(pos) = rest.find('<') {
         out.push_str(&rest[..pos]);
         rest = &rest[pos..];
-        let end = match rest.find('>') {
+        let end = match tag_end(rest) {
             Some(e) => e,
             None => break, // unterminated tag: drop the tail
         };
@@ -2267,11 +2307,33 @@ mod tests {
     }
 
     #[test]
+    fn email_html_to_text_survives_mso_comments_and_quoted_gt() {
+        // MSO conditional comments hold inner '>'s before the real `-->`;
+        // attribute values may hold a literal '>'. Neither may leak markup
+        // into the visible text.
+        assert_eq!(
+            email_html_to_text(
+                "<!--[if gte mso 9]><xml><o:shapedefaults/></xml><![endif]-->Back Monday."
+            ),
+            "Back Monday."
+        );
+        assert_eq!(
+            email_html_to_text(r#"<a href="https://x.example/q?a>b">Away</a> now"#),
+            "Away now"
+        );
+        assert_eq!(
+            email_html_to_text("<div>line one<br>line two</div>"),
+            "line one\nline two"
+        );
+    }
+
+    #[test]
     fn auto_reply_json_includes_window_only_when_scheduled() {
         let base = AutoReplySettings {
             status: AutoReplyStatus::AlwaysEnabled,
             scheduled_start: Some("2026-07-21T09:00".into()),
             scheduled_end: Some("2026-07-25T17:00".into()),
+            scheduled_time_zone: None,
             internal_message: "Out <today> & tomorrow".into(),
             external_message: "line1\nline2".into(),
             external_audience: ExternalAudience::All,

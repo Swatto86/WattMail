@@ -447,9 +447,11 @@ pub async fn move_message(
 pub struct AutoReplyDto {
     /// "disabled" | "alwaysEnabled" | "scheduled".
     pub status: String,
-    /// Local wall-clock ISO bounds of the scheduled window, when set.
+    /// Wall-clock ISO bounds of the scheduled window (in `scheduled_time_zone`).
     pub scheduled_start: Option<String>,
     pub scheduled_end: Option<String>,
+    /// Zone the bounds are expressed in, as the provider reported (usually "UTC").
+    pub scheduled_time_zone: Option<String>,
     pub internal_message: String,
     pub external_message: String,
     /// "none" | "contactsOnly" | "all".
@@ -467,6 +469,7 @@ pub async fn get_auto_reply(accounts: State<'_, AccountManager>) -> Result<AutoR
         status: s.status.as_str().to_string(),
         scheduled_start: s.scheduled_start,
         scheduled_end: s.scheduled_end,
+        scheduled_time_zone: s.scheduled_time_zone,
         internal_message: s.internal_message,
         external_message: s.external_message,
         external_audience: s.external_audience.as_str().to_string(),
@@ -492,6 +495,9 @@ pub async fn set_auto_reply(
         status: wattmail_domain::AutoReplyStatus::parse(&status),
         scheduled_start,
         scheduled_end,
+        // Outbound bounds are expressed in the command's `time_zone` argument;
+        // this field only carries the provider's zone on the read path.
+        scheduled_time_zone: None,
         internal_message,
         external_message,
         external_audience: wattmail_domain::ExternalAudience::parse(&external_audience),
