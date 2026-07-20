@@ -4,9 +4,10 @@
 //! composition root.
 
 use wattmail_domain::{
-    Attachment, CalendarEvent, CalendarProvider, DraftPrefill, Folder, InviteResponse, MailError,
-    MailProvider, MailStore, MeetingInvite, MessageBody, MessageChange, MessageHeader,
-    MessageSummary, NewEvent, OutgoingAttachment, OutgoingMessage, SyncToken, UserProfile,
+    Attachment, AutoReplySettings, CalendarEvent, CalendarProvider, DraftPrefill, Folder,
+    InviteResponse, MailError, MailProvider, MailStore, MeetingInvite, MessageBody, MessageChange,
+    MessageHeader, MessageSummary, NewEvent, OutgoingAttachment, OutgoingMessage, SyncToken,
+    UserProfile,
 };
 
 const ACCOUNT_NAME_KEY: &str = "account.displayName";
@@ -171,6 +172,23 @@ pub async fn move_message(
 ) -> Result<(), MailError> {
     provider.move_message(id, destination_folder_id).await?;
     store.remove_message(id).await
+}
+
+/// The mailbox's automatic-replies (out-of-office) state.
+pub async fn auto_reply_settings(
+    provider: &dyn MailProvider,
+) -> Result<AutoReplySettings, MailError> {
+    provider.auto_reply_settings().await
+}
+
+/// Replace the mailbox's automatic-replies state. `time_zone` is the IANA zone
+/// the scheduled window's wall-clock bounds are expressed in.
+pub async fn set_auto_reply_settings(
+    provider: &dyn MailProvider,
+    settings: &AutoReplySettings,
+    time_zone: &str,
+) -> Result<(), MailError> {
+    provider.set_auto_reply_settings(settings, time_zone).await
 }
 
 /// Mark every message in a folder as read — server-side first, then the

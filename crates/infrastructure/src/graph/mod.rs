@@ -9,10 +9,10 @@ use std::sync::LazyLock;
 use async_trait::async_trait;
 use base64::Engine;
 use wattmail_domain::{
-    Attachment, DraftPrefill, EmailAddress, Folder, FolderRole, Importance, MailError,
-    MailProvider, MessageBody, MessageChange, MessageHeader, MessageRule, MessageRuleActions,
-    MessageRuleConditions, MessageSummary, OutgoingAttachment, OutgoingMessage, SyncBatch,
-    SyncToken, UserProfile,
+    Attachment, AutoReplySettings, AutoReplyStatus, DraftPrefill, EmailAddress, ExternalAudience,
+    Folder, FolderRole, Importance, MailError, MailProvider, MessageBody, MessageChange,
+    MessageHeader, MessageRule, MessageRuleActions, MessageRuleConditions, MessageSummary,
+    OutgoingAttachment, OutgoingMessage, SyncBatch, SyncToken, UserProfile,
 };
 
 pub(super) const GRAPH_BASE: &str = "https://graph.microsoft.com/v1.0";
@@ -675,6 +675,35 @@ impl MailProvider for GraphClient {
             return Ok(());
         }
         self.move_message(id, "deleteditems").await
+    }
+
+    async fn auto_reply_settings(&self) -> Result<AutoReplySettings, MailError> {
+        let body: GraphMailboxSettings = self
+            .get(&format!(
+                "{GRAPH_BASE}/me/mailboxSettings?$select=automaticRepliesSetting"
+            ))
+            .await?
+            .json()
+            .await
+            .map_err(|e| MailError::Decode(e.to_string()))?;
+        Ok(auto_reply_from_graph(body))
+    }
+
+    async fn set_auto_reply_settings(
+        &self,
+        settings: &AutoReplySettings,
+        time_zone: &str,
+    ) -> Result<(), MailError> {
+        let response = self
+            .http
+            .patch(format!("{GRAPH_BASE}/me/mailboxSettings"))
+            .bearer_auth(&self.access_token)
+            .json(&auto_reply_json(settings, time_zone))
+            .send()
+            .await
+            .map_err(|e| MailError::Network(e.to_string()))?;
+        check_status(response).await?;
+        Ok(())
     }
 
     async fn mark_folder_read(&self, folder_id: &str) -> Result<(), MailError> {
@@ -1495,6 +1524,114 @@ fn folder_messages_url(folder_id: &str) -> String {
     url.into()
 }
 
+// ---- Automatic replies (out-of-office) ----
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GraphMailboxSettings {
+    automatic_replies_setting: Option<GraphAutoReplies>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GraphAutoReplies {
+    status: Option<String>,
+    external_audience: Option<String>,
+    scheduled_start_date_time: Option<GraphDateTimeOnly>,
+    scheduled_end_date_time: Option<GraphDateTimeOnly>,
+    internal_reply_message: Option<String>,
+    external_reply_message: Option<String>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GraphDateTimeOnly {
+    date_time: Option<String>,
+}
+
+fn auto_reply_from_graph(body: GraphMailboxSettings) -> AutoReplySettings {
+    match body.automatic_replies_setting {
+        None => AutoReplySettings {
+            status: AutoReplyStatus::Disabled,
+            scheduled_start: None,
+            scheduled_end: None,
+            internal_message: String::new(),
+            external_message: String::new(),
+            external_audience: ExternalAudience::None,
+        },
+        Some(a) => AutoReplySettings {
+            status: AutoReplyStatus::parse(a.status.as_deref().unwrap_or("")),
+            scheduled_start: a.scheduled_start_date_time.and_then(|d| d.date_time),
+            scheduled_end: a.scheduled_end_date_time.and_then(|d| d.date_time),
+            internal_message: email_html_to_text(&a.internal_reply_message.unwrap_or_default()),
+            external_message: email_html_to_text(&a.external_reply_message.unwrap_or_default()),
+            external_audience: ExternalAudience::parse(
+                a.external_audience.as_deref().unwrap_or(""),
+            ),
+        },
+    }
+}
+
+/// The PATCH body for `/me/mailboxSettings`. Scheduled bounds are sent only in
+/// `scheduled` status (Graph rejects a window on a disabled setting as noise,
+/// and keeping them out avoids clobbering a server-held window when toggling).
+fn auto_reply_json(s: &AutoReplySettings, time_zone: &str) -> serde_json::Value {
+    let mut setting = serde_json::json!({
+        "status": s.status.as_str(),
+        "externalAudience": s.external_audience.as_str(),
+        "internalReplyMessage": text_to_email_html(&s.internal_message),
+        "externalReplyMessage": text_to_email_html(&s.external_message),
+    });
+    if s.status == AutoReplyStatus::Scheduled {
+        if let (Some(start), Some(end)) = (&s.scheduled_start, &s.scheduled_end) {
+            setting["scheduledStartDateTime"] =
+                serde_json::json!({ "dateTime": start, "timeZone": time_zone });
+            setting["scheduledEndDateTime"] =
+                serde_json::json!({ "dateTime": end, "timeZone": time_zone });
+        }
+    }
+    serde_json::json!({ "automaticRepliesSetting": setting })
+}
+
+/// Flatten the HTML Graph stores for a reply message into the plain text the
+/// settings textarea edits: `<br>`/block closings become newlines, other tags
+/// drop, and the few entities the escape path produces decode back.
+fn email_html_to_text(html: &str) -> String {
+    let mut out = String::with_capacity(html.len());
+    let mut rest = html;
+    while let Some(pos) = rest.find('<') {
+        out.push_str(&rest[..pos]);
+        rest = &rest[pos..];
+        let end = match rest.find('>') {
+            Some(e) => e,
+            None => break, // unterminated tag: drop the tail
+        };
+        let tag = rest[1..end].trim().to_ascii_lowercase();
+        if tag.starts_with("br") || tag == "/p" || tag == "/div" {
+            out.push('\n');
+        }
+        rest = &rest[end + 1..];
+    }
+    out.push_str(rest);
+    out.replace("&nbsp;", " ")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&#39;", "'")
+        .replace("&amp;", "&")
+        .trim()
+        .to_string()
+}
+
+/// Escape plain text and join lines with `<br>` — the shape Graph stores.
+fn text_to_email_html(text: &str) -> String {
+    text.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace("\r\n", "\n")
+        .replace('\n', "<br>")
+}
+
 /// The `/me/…` form of a message URL for use inside a `$batch` — sub-request
 /// URLs are relative to the version root, with the opaque id still encoded as
 /// a path segment (same encoding as [`message_endpoint`]).
@@ -2101,6 +2238,65 @@ mod tests {
         assert!(url.ends_with("/messages"));
         assert!(url.contains("%2F")); // '/' encoded, not splitting the segment
         assert!(!url.contains('?'));
+    }
+
+    #[test]
+    fn auto_reply_decodes_graph_shape_and_flattens_html() {
+        let body: GraphMailboxSettings = serde_json::from_str(
+            r#"{
+              "automaticRepliesSetting": {
+                "status": "scheduled",
+                "externalAudience": "contactsOnly",
+                "scheduledStartDateTime": { "dateTime": "2026-07-21T09:00:00.0000000", "timeZone": "Europe/London" },
+                "scheduledEndDateTime": { "dateTime": "2026-07-25T17:00:00.0000000", "timeZone": "Europe/London" },
+                "internalReplyMessage": "<html><body><div>Away till Friday.<br>Call Bob &amp; team.</div></body></html>",
+                "externalReplyMessage": ""
+              }
+            }"#,
+        )
+        .unwrap();
+        let s = auto_reply_from_graph(body);
+        assert_eq!(s.status, AutoReplyStatus::Scheduled);
+        assert_eq!(s.external_audience, ExternalAudience::ContactsOnly);
+        assert_eq!(
+            s.scheduled_start.as_deref(),
+            Some("2026-07-21T09:00:00.0000000")
+        );
+        assert_eq!(s.internal_message, "Away till Friday.\nCall Bob & team.");
+        assert_eq!(s.external_message, "");
+    }
+
+    #[test]
+    fn auto_reply_json_includes_window_only_when_scheduled() {
+        let base = AutoReplySettings {
+            status: AutoReplyStatus::AlwaysEnabled,
+            scheduled_start: Some("2026-07-21T09:00".into()),
+            scheduled_end: Some("2026-07-25T17:00".into()),
+            internal_message: "Out <today> & tomorrow".into(),
+            external_message: "line1\nline2".into(),
+            external_audience: ExternalAudience::All,
+        };
+        let always = auto_reply_json(&base, "Europe/London");
+        let setting = &always["automaticRepliesSetting"];
+        assert_eq!(setting["status"], "alwaysEnabled");
+        assert_eq!(setting["externalAudience"], "all");
+        assert_eq!(
+            setting["internalReplyMessage"],
+            "Out &lt;today&gt; &amp; tomorrow"
+        );
+        assert_eq!(setting["externalReplyMessage"], "line1<br>line2");
+        assert!(setting.get("scheduledStartDateTime").is_none());
+
+        let scheduled = auto_reply_json(
+            &AutoReplySettings {
+                status: AutoReplyStatus::Scheduled,
+                ..base
+            },
+            "Europe/London",
+        );
+        let s = &scheduled["automaticRepliesSetting"]["scheduledStartDateTime"];
+        assert_eq!(s["dateTime"], "2026-07-21T09:00");
+        assert_eq!(s["timeZone"], "Europe/London");
     }
 
     #[test]

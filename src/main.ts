@@ -471,6 +471,10 @@ appRoot.innerHTML = /* html */ `
         <span>Inbox rules<br /><span class="hint">Server-side rules that move or mark messages on arrival</span></span>
         <button id="rules-btn" class="btn btn-sm">Rules&hellip;</button>
       </div>
+      <div class="settings-row" id="oof-row">
+        <span>Automatic replies<br /><span class="hint">Out-of-office replies, sent by the server even while WattMail is closed</span></span>
+        <button id="oof-btn" class="btn btn-sm">Automatic replies&hellip;</button>
+      </div>
       <div class="settings-row">
         <span>About<br /><span class="hint">Version, developer, source, and updates</span></span>
         <button id="about-btn" class="btn btn-sm">About&hellip;</button>
@@ -619,6 +623,39 @@ appRoot.innerHTML = /* html */ `
     </div>
   </div>
 
+  <div id="oof-overlay" class="overlay hidden">
+    <div class="settings-panel oof-panel">
+      <div class="settings-title">Automatic replies (Out of office)</div>
+      <div class="oof-status" role="radiogroup" aria-label="Automatic replies status">
+        <label><input type="radio" name="oof-status" value="disabled" /> Off</label>
+        <label><input type="radio" name="oof-status" value="alwaysEnabled" /> On</label>
+        <label><input type="radio" name="oof-status" value="scheduled" /> Only during a time period</label>
+      </div>
+      <div id="oof-window" class="oof-window hidden">
+        <label>From <input type="datetime-local" id="oof-start" class="input input-bordered input-sm" /></label>
+        <label>Until <input type="datetime-local" id="oof-end" class="input input-bordered input-sm" /></label>
+      </div>
+      <label class="oof-label">Reply inside my organization
+        <textarea id="oof-internal" class="textarea textarea-bordered textarea-sm" rows="4" placeholder="I'm out of the office…"></textarea>
+      </label>
+      <label class="oof-label">Reply to people outside the organization
+        <select id="oof-audience" class="select select-bordered select-sm">
+          <option value="none">Don't send external replies</option>
+          <option value="contactsOnly">My contacts only</option>
+          <option value="all">Anyone</option>
+        </select>
+      </label>
+      <label class="oof-label" id="oof-external-wrap">External reply
+        <textarea id="oof-external" class="textarea textarea-bordered textarea-sm" rows="4"></textarea>
+      </label>
+      <div id="oof-msg" class="settings-msg"></div>
+      <div class="settings-actions">
+        <button id="oof-cancel" class="btn btn-sm">Cancel</button>
+        <button id="oof-save" class="btn btn-sm btn-primary">Save</button>
+      </div>
+    </div>
+  </div>
+
   <div id="shortcuts-overlay" class="overlay hidden">
     <div class="settings-panel shortcuts-panel">
       <div class="settings-title">Keyboard shortcuts</div>
@@ -687,6 +724,19 @@ const setAutostart = document.querySelector<HTMLInputElement>("#set-autostart")!
 const addAccountBtn = document.querySelector<HTMLButtonElement>("#add-account-btn")!;
 const accountsListEl = document.querySelector<HTMLDivElement>("#accounts-list")!;
 const rulesRow = document.querySelector<HTMLDivElement>("#rules-row")!;
+const oofRow = document.querySelector<HTMLDivElement>("#oof-row")!;
+const oofBtn = document.querySelector<HTMLButtonElement>("#oof-btn")!;
+const oofOverlay = document.querySelector<HTMLDivElement>("#oof-overlay")!;
+const oofWindow = document.querySelector<HTMLDivElement>("#oof-window")!;
+const oofStart = document.querySelector<HTMLInputElement>("#oof-start")!;
+const oofEnd = document.querySelector<HTMLInputElement>("#oof-end")!;
+const oofInternal = document.querySelector<HTMLTextAreaElement>("#oof-internal")!;
+const oofExternal = document.querySelector<HTMLTextAreaElement>("#oof-external")!;
+const oofExternalWrap = document.querySelector<HTMLLabelElement>("#oof-external-wrap")!;
+const oofAudience = document.querySelector<HTMLSelectElement>("#oof-audience")!;
+const oofMsg = document.querySelector<HTMLDivElement>("#oof-msg")!;
+const oofSaveBtn = document.querySelector<HTMLButtonElement>("#oof-save")!;
+const oofCancelBtn = document.querySelector<HTMLButtonElement>("#oof-cancel")!;
 const providerOverlay = document.querySelector<HTMLDivElement>("#provider-overlay")!;
 const providerListEl = document.querySelector<HTMLDivElement>("#provider-list")!;
 const providerCancelBtn = document.querySelector<HTMLButtonElement>("#provider-cancel")!;
@@ -2975,6 +3025,8 @@ function renderAccountsSettings(): void {
   // (Exchange work/school only).
   const active = accountList.find((a) => a.active);
   rulesRow.style.display = active && active.supportsRules ? "" : "none";
+  // Automatic replies ride the same Exchange-only mailboxSettings scope as rules.
+  oofRow.style.display = active && active.supportsRules ? "" : "none";
 
   if (accountList.length === 0) {
     accountsListEl.innerHTML = `<div class="accounts-empty">No accounts signed in.</div>`;
@@ -5651,6 +5703,100 @@ setSignature.addEventListener("change", () => {
     .catch((e) => (settingsMsg.textContent = `Could not save signature: ${e}`));
 });
 rulesBtn.addEventListener("click", () => void openRules());
+
+// ---- Automatic replies (out of office) ----
+interface AutoReplyState {
+  status: "disabled" | "alwaysEnabled" | "scheduled";
+  scheduledStart: string | null;
+  scheduledEnd: string | null;
+  internalMessage: string;
+  externalMessage: string;
+  externalAudience: "none" | "contactsOnly" | "all";
+}
+
+function oofStatusValue(): string {
+  return (
+    document.querySelector<HTMLInputElement>('input[name="oof-status"]:checked')?.value ??
+    "disabled"
+  );
+}
+// Show the schedule window only for "scheduled", the external editor only when
+// external replies are on at all.
+function oofReflect(): void {
+  oofWindow.classList.toggle("hidden", oofStatusValue() !== "scheduled");
+  oofExternalWrap.classList.toggle("hidden", oofAudience.value === "none");
+}
+document
+  .querySelectorAll<HTMLInputElement>('input[name="oof-status"]')
+  .forEach((r) => r.addEventListener("change", oofReflect));
+oofAudience.addEventListener("change", oofReflect);
+
+async function openOof(): Promise<void> {
+  closeSettings(); // never stack over Settings (the About-dialog rule)
+  oofMsg.textContent = "Loading…";
+  oofOverlay.classList.remove("hidden");
+  try {
+    const s = await invoke<AutoReplyState>("get_auto_reply");
+    const radio =
+      document.querySelector<HTMLInputElement>(
+        `input[name="oof-status"][value="${s.status}"]`,
+      ) ?? document.querySelector<HTMLInputElement>('input[name="oof-status"][value="disabled"]')!;
+    radio.checked = true;
+    // Graph serves "YYYY-MM-DDTHH:MM:SS.…"; datetime-local wants "YYYY-MM-DDTHH:MM".
+    oofStart.value = (s.scheduledStart ?? "").slice(0, 16);
+    oofEnd.value = (s.scheduledEnd ?? "").slice(0, 16);
+    oofInternal.value = s.internalMessage;
+    oofExternal.value = s.externalMessage;
+    oofAudience.value = s.externalAudience;
+    oofMsg.textContent = "";
+    oofReflect();
+  } catch (e) {
+    oofMsg.textContent = `Could not load automatic replies: ${e}`;
+  }
+}
+function closeOof(): void {
+  oofOverlay.classList.add("hidden");
+}
+async function saveOof(): Promise<void> {
+  const status = oofStatusValue();
+  if (status === "scheduled") {
+    if (!oofStart.value || !oofEnd.value) {
+      oofMsg.textContent = "Choose both a start and an end time.";
+      return;
+    }
+    if (oofEnd.value <= oofStart.value) {
+      oofMsg.textContent = "The end time must be after the start.";
+      return;
+    }
+  }
+  oofSaveBtn.disabled = true;
+  oofMsg.textContent = "Saving…";
+  try {
+    await invoke("set_auto_reply", {
+      status,
+      scheduledStart: status === "scheduled" ? `${oofStart.value}:00` : null,
+      scheduledEnd: status === "scheduled" ? `${oofEnd.value}:00` : null,
+      internalMessage: oofInternal.value,
+      externalMessage: oofExternal.value,
+      externalAudience: oofAudience.value,
+      timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+    });
+    closeOof();
+    statusEl.textContent =
+      status === "disabled" ? "Automatic replies turned off." : "Automatic replies saved.";
+  } catch (e) {
+    oofMsg.textContent = `Could not save: ${e}`;
+  } finally {
+    oofSaveBtn.disabled = false;
+  }
+}
+oofBtn.addEventListener("click", () => void openOof());
+oofSaveBtn.addEventListener("click", () => void saveOof());
+oofCancelBtn.addEventListener("click", closeOof);
+oofOverlay.addEventListener("click", (e) => {
+  if (e.target === oofOverlay) closeOof();
+});
+
 settingsOverlay.addEventListener("click", (e) => {
   if (e.target === settingsOverlay) closeSettings();
 });
@@ -5665,6 +5811,7 @@ document.addEventListener("keydown", (e) => {
     if (!rulesEditor.classList.contains("hidden")) rulesEditor.classList.add("hidden");
     else closeRules();
   }
+  else if (!oofOverlay.classList.contains("hidden")) closeOof();
   else if (!headersOverlay.classList.contains("hidden")) closeHeaders();
   else if (!aboutOverlay.classList.contains("hidden")) closeAbout();
   else if (!settingsOverlay.classList.contains("hidden")) closeSettings();
@@ -5698,6 +5845,7 @@ function aModalIsOpen(): boolean {
     !rulesOverlay.classList.contains("hidden") ||
     !shortcutsOverlay.classList.contains("hidden") ||
     !providerOverlay.classList.contains("hidden") ||
+    !oofOverlay.classList.contains("hidden") ||
     !lightbox.classList.contains("hidden") ||
     isDialogOpen()
   );

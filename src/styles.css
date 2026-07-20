@@ -658,6 +658,46 @@ body,
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+/* Automatic replies (out of office) editor. */
+.oof-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  max-width: 460px;
+}
+.oof-status {
+  display: flex;
+  gap: 16px;
+  font-size: 13px;
+}
+.oof-status label,
+.oof-label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+}
+.oof-label {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 4px;
+  font-size: 13px;
+}
+.oof-window {
+  display: flex;
+  gap: 12px;
+  font-size: 13px;
+}
+.oof-window label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.oof-window.hidden,
+#oof-external-wrap.hidden {
+  display: none;
+}
+
 /* Image-attachment lightbox: dismiss-anywhere overlay with a contained image. */
 #attachment-lightbox {
   display: flex;

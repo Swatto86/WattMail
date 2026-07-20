@@ -166,6 +166,74 @@ pub struct MessageBody {
     pub importance: Importance,
 }
 
+/// Automatic-replies (out-of-office) state, as Exchange models it.
+#[derive(Debug, Clone)]
+pub struct AutoReplySettings {
+    pub status: AutoReplyStatus,
+    /// Scheduled window bounds as local wall-clock ISO ("2026-07-21T09:00:00"),
+    /// meaningful only when `status` is [`AutoReplyStatus::Scheduled`].
+    pub scheduled_start: Option<String>,
+    pub scheduled_end: Option<String>,
+    /// Plain text. Providers store HTML — conversion happens at the provider
+    /// boundary, both ways.
+    pub internal_message: String,
+    pub external_message: String,
+    pub external_audience: ExternalAudience,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum AutoReplyStatus {
+    #[default]
+    Disabled,
+    AlwaysEnabled,
+    Scheduled,
+}
+
+impl AutoReplyStatus {
+    pub fn parse(raw: &str) -> Self {
+        match raw {
+            s if s.eq_ignore_ascii_case("alwaysEnabled") => AutoReplyStatus::AlwaysEnabled,
+            s if s.eq_ignore_ascii_case("scheduled") => AutoReplyStatus::Scheduled,
+            _ => AutoReplyStatus::Disabled,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            AutoReplyStatus::Disabled => "disabled",
+            AutoReplyStatus::AlwaysEnabled => "alwaysEnabled",
+            AutoReplyStatus::Scheduled => "scheduled",
+        }
+    }
+}
+
+/// Who receives the external (outside-the-organization) automatic reply.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ExternalAudience {
+    #[default]
+    None,
+    ContactsOnly,
+    All,
+}
+
+impl ExternalAudience {
+    pub fn parse(raw: &str) -> Self {
+        match raw {
+            s if s.eq_ignore_ascii_case("contactsOnly") => ExternalAudience::ContactsOnly,
+            s if s.eq_ignore_ascii_case("all") => ExternalAudience::All,
+            _ => ExternalAudience::None,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ExternalAudience::None => "none",
+            ExternalAudience::ContactsOnly => "contactsOnly",
+            ExternalAudience::All => "all",
+        }
+    }
+}
+
 /// A single internet message header (an RFC 5322 `name: value` pair), as
 /// returned by the provider. Order is preserved so the `Received:` chain and
 /// other repeated headers can be read as a trace.
@@ -407,6 +475,22 @@ pub trait MailProvider: Send + Sync {
 
     /// Move a message to another folder.
     async fn move_message(&self, id: &str, destination_folder_id: &str) -> Result<(), MailError>;
+
+    /// The mailbox's automatic-replies (out-of-office) state. Default:
+    /// `Unsupported` (consumer providers have no server-side auto-replies).
+    async fn auto_reply_settings(&self) -> Result<AutoReplySettings, MailError> {
+        Err(MailError::Unsupported)
+    }
+
+    /// Replace the mailbox's automatic-replies state. `time_zone` is the IANA
+    /// zone the scheduled window's wall-clock bounds are expressed in.
+    async fn set_auto_reply_settings(
+        &self,
+        _settings: &AutoReplySettings,
+        _time_zone: &str,
+    ) -> Result<(), MailError> {
+        Err(MailError::Unsupported)
+    }
 
     /// Mark every message in `folder_id` as read. Default: `Unsupported`.
     async fn mark_folder_read(&self, _folder_id: &str) -> Result<(), MailError> {

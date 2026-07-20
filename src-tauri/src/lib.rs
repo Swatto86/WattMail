@@ -139,6 +139,8 @@ pub fn run() {
             commands::move_message,
             commands::mark_folder_read,
             commands::empty_folder,
+            commands::get_auto_reply,
+            commands::set_auto_reply,
             commands::save_attachments_to_dir,
             commands::attachment_data_url,
             commands::open_attachment,

@@ -9,7 +9,8 @@ use tauri::{Manager, State};
 use crate::accounts::{AccountManager, AccountSummary, ManagedAccount};
 use crate::settings::{self, SettingsState};
 use wattmail_application::{
-    add_draft_attachment as app_add_draft_attachment, cached_folders as app_cached_folders,
+    add_draft_attachment as app_add_draft_attachment,
+    auto_reply_settings as app_auto_reply_settings, cached_folders as app_cached_folders,
     calendar_view as app_calendar_view, compose_forward, compose_reply,
     create_event as app_create_event, create_folder as app_create_folder,
     delete_draft_attachment as app_delete_draft_attachment, delete_event as app_delete_event,
@@ -23,8 +24,8 @@ use wattmail_application::{
     rename_folder as app_rename_folder, respond_to_event as app_respond_to_event,
     save_draft as app_save_draft, search_messages as app_search_messages,
     send_draft as app_send_draft, send_message as app_send_message, send_reply as app_send_reply,
-    set_flag as app_set_flag, set_read as app_set_read, sync_folder as app_sync_folder,
-    update_event as app_update_event,
+    set_auto_reply_settings as app_set_auto_reply_settings, set_flag as app_set_flag,
+    set_read as app_set_read, sync_folder as app_sync_folder, update_event as app_update_event,
 };
 use wattmail_domain::{
     CalendarProvider, EventDateTime, Folder, Importance, InviteResponse, MailProvider, MessageRule,
@@ -437,6 +438,65 @@ pub async fn move_message(
 ) -> Result<(), String> {
     let (account, provider) = active_provider(&accounts).await?;
     app_move_message(&*provider, &account.store, &id, &destination_folder_id)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AutoReplyDto {
+    /// "disabled" | "alwaysEnabled" | "scheduled".
+    pub status: String,
+    /// Local wall-clock ISO bounds of the scheduled window, when set.
+    pub scheduled_start: Option<String>,
+    pub scheduled_end: Option<String>,
+    pub internal_message: String,
+    pub external_message: String,
+    /// "none" | "contactsOnly" | "all".
+    pub external_audience: String,
+}
+
+/// The mailbox's automatic-replies (out-of-office) state.
+#[tauri::command]
+pub async fn get_auto_reply(accounts: State<'_, AccountManager>) -> Result<AutoReplyDto, String> {
+    let (_account, provider) = active_provider(&accounts).await?;
+    let s = app_auto_reply_settings(&*provider)
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(AutoReplyDto {
+        status: s.status.as_str().to_string(),
+        scheduled_start: s.scheduled_start,
+        scheduled_end: s.scheduled_end,
+        internal_message: s.internal_message,
+        external_message: s.external_message,
+        external_audience: s.external_audience.as_str().to_string(),
+    })
+}
+
+/// Replace the mailbox's automatic-replies state. `time_zone` is the IANA zone
+/// the scheduled bounds are expressed in (the frontend's local zone).
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+pub async fn set_auto_reply(
+    accounts: State<'_, AccountManager>,
+    status: String,
+    scheduled_start: Option<String>,
+    scheduled_end: Option<String>,
+    internal_message: String,
+    external_message: String,
+    external_audience: String,
+    time_zone: String,
+) -> Result<(), String> {
+    let (_account, provider) = active_provider(&accounts).await?;
+    let settings = wattmail_domain::AutoReplySettings {
+        status: wattmail_domain::AutoReplyStatus::parse(&status),
+        scheduled_start,
+        scheduled_end,
+        internal_message,
+        external_message,
+        external_audience: wattmail_domain::ExternalAudience::parse(&external_audience),
+    };
+    app_set_auto_reply_settings(&*provider, &settings, &time_zone)
         .await
         .map_err(|e| e.to_string())
 }
