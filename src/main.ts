@@ -16,6 +16,7 @@ import {
   IANA_ZONE,
   initCalendar,
   loadCalendar,
+  loadCalendars,
   notificationSettingChanged,
   resetCalendar,
   startEventReminders,
@@ -36,6 +37,7 @@ interface AccountSummary {
   displayName: string;
   active: boolean;
   supportsRules: boolean;
+  supportsMail: boolean; // false for calendar-only accounts (iCloud)
 }
 interface Message {
   id: string;
@@ -393,7 +395,7 @@ appRoot.innerHTML = /* html */ `
         <span id="brand-version" class="brand-version"></span>
       </div>
       <div id="view-nav" class="view-nav hidden" role="group" aria-label="Switch view">
-        <button type="button" data-view="mail" class="active">Mail</button>
+        <button type="button" data-view="mail" id="view-mail-btn" class="active">Mail</button>
         <button type="button" data-view="calendar" id="view-calendar-btn">Calendar</button>
       </div>
       <button id="account" class="account-switch text-xs opacity-70 flex-1 hidden" title="Switch account" type="button"></button>
@@ -522,6 +524,20 @@ appRoot.innerHTML = /* html */ `
       <div id="provider-list" class="provider-list"></div>
       <div id="provider-msg" class="settings-msg"></div>
       <div class="settings-actions"><button id="provider-cancel" class="btn btn-sm">Cancel</button></div>
+    </div>
+  </div>
+
+  <div id="icloud-overlay" class="overlay hidden">
+    <div class="settings-panel">
+      <div class="settings-title">Add an iCloud account</div>
+      <div class="hint" style="margin-bottom: 8px">Calendar only. Generate an app-specific password at appleid.apple.com — your normal Apple Account password won't work with two-factor authentication enabled.</div>
+      <input id="icloud-appleid" class="input input-bordered input-sm compose-input" placeholder="Apple ID" autocomplete="off" />
+      <input id="icloud-password" class="input input-bordered input-sm compose-input" type="password" placeholder="App-specific password" autocomplete="off" />
+      <div id="icloud-msg" class="settings-msg"></div>
+      <div class="settings-actions" style="gap: 8px">
+        <button id="icloud-cancel" class="btn btn-sm">Cancel</button>
+        <button id="icloud-save" class="btn btn-sm btn-primary">Add account</button>
+      </div>
     </div>
   </div>
 
@@ -712,6 +728,7 @@ const mainView = document.querySelector<HTMLDivElement>("#main")!;
 const calendarHost = document.querySelector<HTMLDivElement>("#calendar")!;
 const viewNav = document.querySelector<HTMLDivElement>("#view-nav")!;
 const viewCalendarBtn = document.querySelector<HTMLButtonElement>("#view-calendar-btn")!;
+const viewMailBtn = document.querySelector<HTMLButtonElement>("#view-mail-btn")!;
 const foldersEl = document.querySelector<HTMLDivElement>("#folders")!;
 const listEl = document.querySelector<HTMLDivElement>("#list")!;
 const splitter = document.querySelector<HTMLDivElement>("#splitter")!;
@@ -740,6 +757,12 @@ const oofCancelBtn = document.querySelector<HTMLButtonElement>("#oof-cancel")!;
 const providerOverlay = document.querySelector<HTMLDivElement>("#provider-overlay")!;
 const providerListEl = document.querySelector<HTMLDivElement>("#provider-list")!;
 const providerCancelBtn = document.querySelector<HTMLButtonElement>("#provider-cancel")!;
+const icloudOverlay = document.querySelector<HTMLDivElement>("#icloud-overlay")!;
+const icloudAppleId = document.querySelector<HTMLInputElement>("#icloud-appleid")!;
+const icloudPassword = document.querySelector<HTMLInputElement>("#icloud-password")!;
+const icloudMsg = document.querySelector<HTMLDivElement>("#icloud-msg")!;
+const icloudSaveBtn = document.querySelector<HTMLButtonElement>("#icloud-save")!;
+const icloudCancelBtn = document.querySelector<HTMLButtonElement>("#icloud-cancel")!;
 const settingsMsg = document.querySelector<HTMLDivElement>("#settings-msg")!;
 const settingsClose = document.querySelector<HTMLButtonElement>("#settings-close")!;
 const composeBtn = document.querySelector<HTMLButtonElement>("#compose")!;
@@ -822,6 +845,10 @@ type AppMode = "mail" | "calendar";
 let appMode: AppMode = "mail";
 let signedIn = false;
 let calendarSupported = false;
+// False only for a calendar-only account (iCloud has no mailbox). Defaults to
+// true so a plain mail account never flashes a hidden Mail tab before the
+// account list resolves.
+let mailSupported = true;
 let calendarInited = false;
 
 // Build the calendar module's DOM on first use only.
@@ -845,11 +872,14 @@ function reflectView(): void {
     .forEach((b) => b.classList.toggle("active", b.dataset.view === appMode));
   // Hide the Calendar tab while no signed-in provider reports calendar support.
   viewCalendarBtn.classList.toggle("hidden", !calendarSupported);
+  // Hide the Mail tab for a calendar-only account (iCloud has no mailbox).
+  viewMailBtn.classList.toggle("hidden", !mailSupported);
 }
 
 function switchView(mode: AppMode): void {
   if (mode === appMode) return;
   if (mode === "calendar" && !calendarSupported) return;
+  if (mode === "mail" && !mailSupported) return;
   appMode = mode;
   reflectView();
   if (mode === "calendar") {
@@ -867,6 +897,7 @@ function showSignedOut(): void {
   signedIn = false;
   appMode = "mail";
   calendarSupported = false;
+  mailSupported = true;
   if (calendarInited) resetCalendar();
   signinView.classList.remove("hidden");
   viewNav.classList.add("hidden");
@@ -905,6 +936,21 @@ async function refreshCalendarCapability(): Promise<void> {
   }
   if (!calendarSupported && appMode === "calendar") {
     appMode = "mail";
+  }
+  reflectView();
+}
+
+// Mirrors refreshCalendarCapability, but the capability comes straight off the
+// account list (no separate backend round trip) — iCloud accounts are
+// calendar-only, so the active account's own flag says whether Mail applies.
+function refreshMailCapability(): void {
+  mailSupported = accountList.find((a) => a.active)?.supportsMail ?? true;
+  if (!mailSupported) {
+    if (appMode === "mail") appMode = "calendar";
+    // Nothing else clears the badge for a calendar-only account: the tray count
+    // is only ever refreshed from the folder list, which never loads here, so
+    // the previous account's unread would otherwise linger in the tray.
+    void invoke("set_unread", { count: 0 }).catch(() => {});
   }
   reflectView();
 }
@@ -3088,6 +3134,23 @@ async function loadActiveAccount(): Promise<void> {
   resetReader();
   showSignedIn();
   await refreshCalendarCapability();
+  // Calendar-only accounts (iCloud) have no mailbox at all — this may force
+  // appMode to "calendar" before the check below runs.
+  refreshMailCapability();
+  // The calendar list changes rarely; fetch it once here rather than on every
+  // nav, and reconcile the persisted per-account choice before anything reads
+  // selectedCalendarId (the reminder loop and the view load right below both do).
+  if (calendarSupported) {
+    const activeId = accountList.find((a) => a.active)?.id ?? null;
+    if (activeId) {
+      const listing = loadCalendars(activeId);
+      // Only the calendar view needs the list before it renders. A mail-first
+      // account must not sit through an extra round trip before its mailbox
+      // starts loading; until the listing lands it simply reads the account's
+      // default calendar, which is what it did before there was a picker.
+      if (appMode === "calendar") await listing;
+    }
+  }
   // Event reminders run app-wide from the first active account (idempotent —
   // the loop itself re-checks calendar capability + the notification setting).
   startEventReminders();
@@ -3097,9 +3160,12 @@ async function loadActiveAccount(): Promise<void> {
     ensureCalendarInit();
     void loadCalendar();
   }
-  await loadFolders();
-  await refreshFromCache().catch(() => {});
-  await syncFolder();
+  // A calendar-only account has no mailbox to load, cache from, or sync.
+  if (mailSupported) {
+    await loadFolders();
+    await refreshFromCache().catch(() => {});
+    await syncFolder();
+  }
 }
 
 // The providers a user can add. Tags match the backend's ProviderKind serde
@@ -3107,6 +3173,7 @@ async function loadActiveAccount(): Promise<void> {
 const PROVIDERS: { tag: string; label: string; hint: string }[] = [
   { tag: "office365", label: "Office 365", hint: "Work or school (Microsoft)" },
   { tag: "outlook_consumer", label: "Outlook.com / Hotmail", hint: "Personal Microsoft account" },
+  { tag: "icloud", label: "iCloud", hint: "Calendar only — needs an app-specific password" },
 ];
 
 let providerResolve: ((tag: string | null) => void) | null = null;
@@ -3156,9 +3223,14 @@ providerOverlay.addEventListener("click", (e) => {
 // Interactive add (browser sign-in). Used by the welcome screen, the toolbar
 // switcher, and the settings "Add account" button. Prompts for a provider, then
 // runs that provider's OAuth flow; on success the new account becomes active.
+// iCloud has no browser flow at all, so it forks to its own credential form.
 async function addAccount(): Promise<void> {
   const provider = await pickProvider();
   if (!provider) return;
+  if (provider === "icloud") {
+    openIcloudForm();
+    return;
+  }
   signinBtn.disabled = true;
   addAccountBtn.disabled = true;
   signinMsg.textContent = "Opening your browser to sign in…";
@@ -3177,6 +3249,48 @@ async function addAccount(): Promise<void> {
     addAccountBtn.disabled = false;
   }
 }
+
+// The credential form is its own overlay (not a promise-resolve step like the
+// provider picker) — closing it is terminal, there's nothing left to hand a
+// result back to.
+function openIcloudForm(): void {
+  icloudAppleId.value = "";
+  icloudPassword.value = "";
+  icloudMsg.textContent = "";
+  icloudOverlay.classList.remove("hidden");
+  icloudAppleId.focus();
+}
+function closeIcloud(): void {
+  icloudOverlay.classList.add("hidden");
+  icloudPassword.value = "";
+}
+async function saveIcloudAccount(): Promise<void> {
+  const appleId = icloudAppleId.value.trim();
+  const appPassword = icloudPassword.value;
+  if (!appleId || !appPassword) {
+    icloudMsg.textContent = "An Apple ID and app-specific password are both required.";
+    return;
+  }
+  icloudSaveBtn.disabled = true;
+  icloudMsg.textContent = "Adding account…";
+  try {
+    await invoke<AccountSummary>("add_icloud_account", { appleId, appPassword });
+    closeIcloud();
+    await refreshAccounts();
+    await loadActiveAccount();
+  } catch (e) {
+    // The backend already returns friendly text for a rejected password —
+    // shown as-is, and the form stays open so the user can retry.
+    icloudMsg.textContent = String(e);
+  } finally {
+    icloudSaveBtn.disabled = false;
+  }
+}
+icloudSaveBtn.addEventListener("click", () => void saveIcloudAccount());
+icloudCancelBtn.addEventListener("click", closeIcloud);
+icloudOverlay.addEventListener("click", (e) => {
+  if (e.target === icloudOverlay) closeIcloud();
+});
 
 async function switchAccount(id: string): Promise<void> {
   const active = accountList.find((a) => a.active);
@@ -5857,6 +5971,7 @@ document.addEventListener("keydown", (e) => {
   // closed on its own (one Esc = close picker, a second = close Settings) — it
   // has no separate Esc listener of its own.
   if (!providerOverlay.classList.contains("hidden")) closeProvider(null);
+  else if (!icloudOverlay.classList.contains("hidden")) closeIcloud();
   else if (!shortcutsOverlay.classList.contains("hidden")) closeShortcuts();
   else if (!rulesOverlay.classList.contains("hidden")) {
     if (!rulesEditor.classList.contains("hidden")) rulesEditor.classList.add("hidden");
@@ -5896,6 +6011,7 @@ function aModalIsOpen(): boolean {
     !rulesOverlay.classList.contains("hidden") ||
     !shortcutsOverlay.classList.contains("hidden") ||
     !providerOverlay.classList.contains("hidden") ||
+    !icloudOverlay.classList.contains("hidden") ||
     !oofOverlay.classList.contains("hidden") ||
     !lightbox.classList.contains("hidden") ||
     isDialogOpen()

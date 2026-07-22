@@ -4,10 +4,13 @@ pub mod auth;
 mod crypto;
 pub mod graph;
 mod html;
+pub mod icloud;
 mod provider;
 pub mod store;
 
 pub use auth::{AuthError, AuthService, OAuthConfig, TokenSet};
 pub use graph::GraphClient;
-pub use provider::{build_calendar_provider, build_mail_provider, ProviderKind};
+pub use provider::{
+    build_calendar_provider, build_mail_provider, ProviderCredentials, ProviderKind,
+};
 pub use store::SqliteStore;

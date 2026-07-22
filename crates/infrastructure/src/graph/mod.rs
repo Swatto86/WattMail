@@ -21,11 +21,15 @@ pub(super) const GRAPH_BASE: &str = "https://graph.microsoft.com/v1.0";
 pub struct GraphClient {
     http: reqwest::Client,
     access_token: String,
+    /// The calendar the calendar commands target; `None` uses the mailbox's
+    /// default calendar, which is what every mail operation ignores entirely.
+    calendar_id: Option<String>,
 }
 
 impl GraphClient {
     pub fn new(access_token: impl Into<String>) -> Self {
         Self {
+            calendar_id: None,
             // Bounded so a black-holed request can never hang a command (and
             // its spinner) forever; 60s total leaves room for the ~3 MB
             // base64 attachment uploads on a slow uplink.
@@ -44,9 +48,21 @@ impl GraphClient {
         &self.http
     }
 
+    /// Scope this client's *calendar* operations to one calendar. Mail is
+    /// unaffected. `None` restores the mailbox's default calendar.
+    pub fn with_calendar(mut self, calendar_id: Option<String>) -> Self {
+        self.calendar_id = calendar_id.filter(|id| !id.is_empty());
+        self
+    }
+
     /// The bearer access token, for sibling modules building their own requests.
     pub(super) fn token(&self) -> &str {
         &self.access_token
+    }
+
+    /// The selected calendar id, if the caller scoped this client to one.
+    pub(super) fn calendar_id(&self) -> Option<&str> {
+        self.calendar_id.as_deref()
     }
 
     /// POST with a deliberately empty body. Graph's frontend rejects body-less

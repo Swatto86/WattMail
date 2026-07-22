@@ -18,7 +18,8 @@ use wattmail_application::{
     empty_folder as app_empty_folder, export_message as app_export_message,
     folder_from_cache as app_folder_from_cache,
     has_unforwardable_attachments as app_has_unforwardable_attachments, list_attachments,
-    list_folders as app_list_folders, load_draft as app_load_draft, load_older as app_load_older,
+    list_calendars as app_list_calendars, list_folders as app_list_folders,
+    load_draft as app_load_draft, load_older as app_load_older,
     mark_folder_read as app_mark_folder_read, meeting_invite as app_meeting_invite,
     move_message as app_move_message, read_headers, read_message,
     rename_folder as app_rename_folder, respond_to_event as app_respond_to_event,
@@ -41,26 +42,35 @@ async fn active_provider(
     accounts: &AccountManager,
 ) -> Result<(Arc<ManagedAccount>, Box<dyn MailProvider>), String> {
     let account = accounts.active()?;
-    let token = account
-        .auth
-        .access_token()
-        .await
-        .map_err(|e| e.to_string())?;
-    let provider = build_mail_provider(account.record.provider, token);
+    let credentials = account.credentials().await?;
+    let provider = build_mail_provider(account.record.provider, credentials).ok_or_else(|| {
+        format!(
+            "{} accounts have no mailbox in this build.",
+            account.record.provider.label()
+        )
+    })?;
     Ok((account, provider))
 }
 
-/// Resolve the active account and a *calendar* provider for it.
+/// Resolve the active account and a *calendar* provider for it, scoped to
+/// `calendar_id` when the user has picked a calendar.
+///
+/// Only the view and create paths need the scope: an existing event is addressed
+/// by an id that already identifies its calendar, so update/delete/RSVP pass
+/// `None`.
 async fn active_calendar_provider(
     accounts: &AccountManager,
+    calendar_id: Option<String>,
 ) -> Result<(Arc<ManagedAccount>, Box<dyn CalendarProvider>), String> {
     let account = accounts.active()?;
-    let token = account
-        .auth
-        .access_token()
-        .await
-        .map_err(|e| e.to_string())?;
-    let provider = build_calendar_provider(account.record.provider, token);
+    let credentials = account.credentials().await?;
+    let provider = build_calendar_provider(account.record.provider, credentials, calendar_id)
+        .ok_or_else(|| {
+            format!(
+                "{} accounts have no calendar in this build.",
+                account.record.provider.label()
+            )
+        })?;
     Ok((account, provider))
 }
 
@@ -193,12 +203,17 @@ pub fn remove_account(accounts: State<'_, AccountManager>, id: String) -> Result
 #[tauri::command]
 pub async fn list_folders(accounts: State<'_, AccountManager>) -> Result<Vec<FolderDto>, String> {
     let account = accounts.active()?;
-    let live = match account.auth.access_token().await {
-        Ok(token) => {
-            let provider = build_mail_provider(account.record.provider, token);
-            app_list_folders(&*provider, &account.store).await
-        }
-        Err(e) => Err(wattmail_domain::MailError::Network(e.to_string())),
+    // A calendar-only account has no folders at all — don't spend a round trip
+    // discovering that, and don't fall back to a cache that can never fill.
+    if !account.record.provider.supports_mail() {
+        return Ok(Vec::new());
+    }
+    let live = match account.credentials().await {
+        Ok(credentials) => match build_mail_provider(account.record.provider, credentials) {
+            Some(provider) => app_list_folders(&*provider, &account.store).await,
+            None => Err(wattmail_domain::MailError::Unsupported),
+        },
+        Err(e) => Err(wattmail_domain::MailError::Network(e)),
     };
 
     let folders = match live {
@@ -409,11 +424,14 @@ pub async fn delete_message(
 #[tauri::command]
 pub async fn reauthenticate_account(accounts: State<'_, AccountManager>) -> Result<(), String> {
     let account = accounts.active()?;
-    account
-        .auth
-        .reauthenticate()
-        .await
-        .map_err(|e| e.to_string())
+    match &account.auth {
+        crate::accounts::Credentials::OAuth(auth) => {
+            auth.reauthenticate().await.map_err(|e| e.to_string())
+        }
+        // A stored app-specific password never expires; there is no interactive
+        // flow to re-run, so this is a no-op rather than an error.
+        crate::accounts::Credentials::Basic(_) => Ok(()),
+    }
 }
 
 /// Whether a message carries attachments WattMail can't forward (embedded
@@ -1561,6 +1579,7 @@ pub struct CalendarEventDto {
     pub response_status: String,
     pub web_link: Option<String>,
     pub is_organizer: bool,
+    pub can_respond: bool,
     /// Minutes before `start` the user's reminder should fire; `None` = off.
     pub reminder_minutes: Option<u32>,
 }
@@ -1594,6 +1613,7 @@ fn calendar_event_dto(e: wattmail_domain::CalendarEvent) -> CalendarEventDto {
         response_status: e.response_status.as_str().to_string(),
         web_link: e.web_link,
         is_organizer: e.is_organizer,
+        can_respond: e.can_respond,
         reminder_minutes: e.reminder_minutes_before_start,
     }
 }
@@ -1641,6 +1661,48 @@ pub fn account_supports_calendar(accounts: State<'_, AccountManager>) -> bool {
         .unwrap_or(false)
 }
 
+/// One calendar the signed-in account can read, for the calendar picker.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CalendarInfoDto {
+    pub id: String,
+    pub name: String,
+    pub color: Option<String>,
+    pub is_default: bool,
+    pub can_edit: bool,
+}
+
+/// Every calendar on the active account, for the picker.
+#[tauri::command]
+pub async fn list_calendars(
+    accounts: State<'_, AccountManager>,
+) -> Result<Vec<CalendarInfoDto>, String> {
+    let (_account, provider) = active_calendar_provider(&accounts, None).await?;
+    let calendars = app_list_calendars(&*provider)
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(calendars
+        .into_iter()
+        .map(|c| CalendarInfoDto {
+            id: c.id,
+            name: c.name,
+            color: c.color,
+            is_default: c.is_default,
+            can_edit: c.can_edit,
+        })
+        .collect())
+}
+
+/// Register an iCloud account from an Apple ID and an app-specific password.
+#[tauri::command]
+pub async fn add_icloud_account(
+    accounts: State<'_, AccountManager>,
+    apple_id: String,
+    app_password: String,
+) -> Result<AccountSummary, String> {
+    accounts.add_icloud_account(apple_id, app_password).await
+}
+
 /// Fetch the recurrence-expanded agenda for `[start, end)`, rendered in
 /// `time_zone`. `start`/`end` are absolute ISO-8601 instants (offset/`Z`)
 /// bounding the window; `time_zone` (IANA) only governs how the returned events'
@@ -1651,8 +1713,9 @@ pub async fn calendar_view(
     start: String,
     end: String,
     time_zone: String,
+    calendar_id: Option<String>,
 ) -> Result<Vec<CalendarEventDto>, String> {
-    let (_account, provider) = active_calendar_provider(&accounts).await?;
+    let (_account, provider) = active_calendar_provider(&accounts, calendar_id).await?;
     let events = app_calendar_view(&*provider, &start, &end, &time_zone)
         .await
         .map_err(|e| e.to_string())?;
@@ -1699,8 +1762,9 @@ pub async fn create_event(
     accounts: State<'_, AccountManager>,
     event: NewEventDto,
     time_zone: String,
+    calendar_id: Option<String>,
 ) -> Result<CalendarEventDto, String> {
-    let (_account, provider) = active_calendar_provider(&accounts).await?;
+    let (_account, provider) = active_calendar_provider(&accounts, calendar_id).await?;
     let new_event = new_event_from_dto(event, &time_zone);
     let created = app_create_event(&*provider, &new_event, &time_zone)
         .await
@@ -1717,7 +1781,7 @@ pub async fn update_event(
     event: NewEventDto,
     time_zone: String,
 ) -> Result<CalendarEventDto, String> {
-    let (_account, provider) = active_calendar_provider(&accounts).await?;
+    let (_account, provider) = active_calendar_provider(&accounts, None).await?;
     let updated_event = new_event_from_dto(event, &time_zone);
     let updated = app_update_event(&*provider, &id, &updated_event, &time_zone)
         .await
@@ -1740,7 +1804,7 @@ pub async fn respond_to_event(
         "decline" => InviteResponse::Decline,
         other => return Err(format!("unknown response: {other}")),
     };
-    let (_account, provider) = active_calendar_provider(&accounts).await?;
+    let (_account, provider) = active_calendar_provider(&accounts, None).await?;
     let comment = comment.filter(|c| !c.trim().is_empty());
     app_respond_to_event(&*provider, &id, reply, comment.as_deref(), send_response)
         .await
@@ -1750,7 +1814,7 @@ pub async fn respond_to_event(
 /// Delete an event (the UI offers this only for events the user organizes).
 #[tauri::command]
 pub async fn delete_event(accounts: State<'_, AccountManager>, id: String) -> Result<(), String> {
-    let (_account, provider) = active_calendar_provider(&accounts).await?;
+    let (_account, provider) = active_calendar_provider(&accounts, None).await?;
     app_delete_event(&*provider, &id)
         .await
         .map_err(|e| e.to_string())

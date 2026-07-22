@@ -16,9 +16,44 @@ use serde::Deserialize;
 
 use super::{check_status, GraphClient, GraphEmailAddress, GraphRecipient, GRAPH_BASE};
 use wattmail_domain::{
-    Attendee, CalendarEvent, CalendarProvider, EventDateTime, InviteResponse, MailError,
-    MeetingInvite, NewEvent, ResponseStatus,
+    Attendee, CalendarEvent, CalendarInfo, CalendarProvider, EventDateTime, InviteResponse,
+    MailError, MeetingInvite, NewEvent, ResponseStatus,
 };
+
+/// The `/me/…` prefix that scopes a calendar request. With no calendar selected
+/// this is the mailbox root, so Graph applies its own default calendar.
+fn calendar_scope(client: &GraphClient) -> String {
+    let Some(id) = client.calendar_id() else {
+        return format!("{GRAPH_BASE}/me");
+    };
+    // Graph calendar ids are long base64-ish strings containing `/` and `+`, so
+    // the id is pushed as a path segment and percent-encoded rather than
+    // interpolated raw.
+    let mut url = url::Url::parse(&format!("{GRAPH_BASE}/me/calendars")).expect("valid base");
+    url.path_segments_mut()
+        .expect("base URL has a path")
+        .push(id);
+    url.to_string()
+}
+
+/// The calendar list, as Graph reports it.
+#[derive(Deserialize)]
+struct GraphCalendars {
+    value: Vec<GraphCalendar>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GraphCalendar {
+    id: String,
+    /// Graph names this `name` — there is no `displayName` on a calendar.
+    #[serde(default)]
+    name: String,
+    color: Option<String>,
+    hex_color: Option<String>,
+    is_default_calendar: Option<bool>,
+    can_edit: Option<bool>,
+}
 
 /// Event fields the agenda needs. `body` is fetched so the detail pane can render
 /// the description; `onlineMeeting`/`onlineMeetingUrl` give a join link.
@@ -33,6 +68,42 @@ const MAX_PAGES: u32 = 20;
 
 #[async_trait]
 impl CalendarProvider for GraphClient {
+    async fn list_calendars(&self) -> Result<Vec<CalendarInfo>, MailError> {
+        let response = self
+            .http()
+            .get(format!("{GRAPH_BASE}/me/calendars"))
+            .query(&[
+                (
+                    "$select",
+                    "id,name,color,hexColor,isDefaultCalendar,canEdit",
+                ),
+                ("$top", "100"),
+            ])
+            .bearer_auth(self.token())
+            .send()
+            .await
+            .map_err(|e| MailError::Network(e.to_string()))?;
+
+        let body: GraphCalendars = check_status(response)
+            .await?
+            .json()
+            .await
+            .map_err(|e| MailError::Decode(e.to_string()))?;
+
+        Ok(body
+            .value
+            .into_iter()
+            .map(|c| CalendarInfo {
+                id: c.id,
+                name: c.name,
+                // Prefer the real hex; `color` is a preset name like "lightBlue".
+                color: c.hex_color.filter(|h| !h.is_empty()).or(c.color),
+                is_default: c.is_default_calendar.unwrap_or(false),
+                can_edit: c.can_edit.unwrap_or(true),
+            })
+            .collect())
+    }
+
     async fn calendar_view(
         &self,
         start: &str,
@@ -55,7 +126,7 @@ impl CalendarProvider for GraphClient {
             let request = match &next {
                 None => self
                     .http()
-                    .get(format!("{GRAPH_BASE}/me/calendarView"))
+                    .get(format!("{}/calendarView", calendar_scope(self)))
                     .query(&[
                         ("startDateTime", start),
                         ("endDateTime", end),
@@ -103,7 +174,7 @@ impl CalendarProvider for GraphClient {
 
         let response = self
             .http()
-            .post(format!("{GRAPH_BASE}/me/events"))
+            .post(format!("{}/events", calendar_scope(self)))
             .bearer_auth(self.token())
             .header("Prefer", &prefer)
             .json(&event_payload(event, &tz))
@@ -562,6 +633,8 @@ fn to_domain_event(event: GraphEvent, tz: &str) -> CalendarEvent {
         ),
         web_link: http_url(event.web_link),
         is_organizer: event.is_organizer.unwrap_or(false),
+        // Graph implements the invitation reply path for every event.
+        can_respond: true,
         // A reminder exists only when explicitly on; a missing lead defaults to
         // Outlook's usual 15 minutes, and negative/absurd values are clamped.
         reminder_minutes_before_start: match event.is_reminder_on {

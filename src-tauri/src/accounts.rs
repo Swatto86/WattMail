@@ -16,8 +16,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
+use wattmail_infrastructure::auth::TokenStore;
 use wattmail_infrastructure::{
-    build_mail_provider, AuthService, OAuthConfig, ProviderKind, SqliteStore,
+    build_calendar_provider, build_mail_provider, AuthService, OAuthConfig, ProviderCredentials,
+    ProviderKind, SqliteStore,
 };
 
 /// Id of the adopted pre-multi-account mailbox. Its credentials and cache stay at
@@ -47,10 +49,15 @@ const O365_CLIENT_ID: &str = "60d6101b-3d8a-4a09-8718-ad90c0d88f13";
 const OUTLOOK_CONSUMER_CLIENT_ID: &str = "REPLACE_WITH_CONSUMER_CLIENT_ID";
 
 /// The OAuth configuration for a provider, built from the app credentials above.
-fn oauth_config_for(provider: ProviderKind) -> OAuthConfig {
+fn oauth_config_for(provider: ProviderKind) -> Option<OAuthConfig> {
     match provider {
-        ProviderKind::Office365 => OAuthConfig::office365(O365_TENANT_ID, O365_CLIENT_ID),
-        ProviderKind::OutlookConsumer => OAuthConfig::outlook_consumer(OUTLOOK_CONSUMER_CLIENT_ID),
+        ProviderKind::Office365 => Some(OAuthConfig::office365(O365_TENANT_ID, O365_CLIENT_ID)),
+        ProviderKind::OutlookConsumer => {
+            Some(OAuthConfig::outlook_consumer(OUTLOOK_CONSUMER_CLIENT_ID))
+        }
+        // iCloud has no OAuth at all: CalDAV takes an Apple ID plus an
+        // app-specific password over HTTP Basic.
+        ProviderKind::Icloud => None,
     }
 }
 
@@ -61,6 +68,9 @@ fn is_provider_configured(provider: ProviderKind) -> bool {
     match provider {
         ProviderKind::Office365 => is_real_credential(O365_CLIENT_ID),
         ProviderKind::OutlookConsumer => is_real_credential(OUTLOOK_CONSUMER_CLIENT_ID),
+        // Nothing to configure: the user supplies their own credentials, so
+        // iCloud is always offered.
+        ProviderKind::Icloud => true,
     }
 }
 
@@ -81,6 +91,39 @@ pub fn configured_provider_tags() -> Vec<String> {
 /// Whether a provider exposes server-side inbox rules (Exchange work/school only).
 fn provider_supports_rules(provider: ProviderKind) -> bool {
     matches!(provider, ProviderKind::Office365)
+}
+
+/// How an account authenticates.
+///
+/// Microsoft providers hold an [`AuthService`] that refreshes a short-lived
+/// OAuth access token; iCloud holds a non-expiring app-specific password in the
+/// same chunked keyring store. Separating them in the type is what stops a
+/// caller asking an iCloud account for a bearer token.
+pub enum Credentials {
+    // Boxed: an `AuthService` is an order of magnitude larger than a
+    // `TokenStore`, and every account would otherwise pay for the bigger one.
+    OAuth(Box<AuthService>),
+    Basic(TokenStore),
+}
+
+impl Credentials {
+    /// Whether a usable credential is on disk (the keyring has an entry).
+    pub fn has_cached_credentials(&self) -> bool {
+        match self {
+            // `load_refresh_token` is the generic "read the stored secret" path;
+            // for iCloud that secret is the app-specific password.
+            Self::OAuth(auth) => auth.has_cached_credentials(),
+            Self::Basic(store) => store.load_refresh_token().is_some(),
+        }
+    }
+
+    /// Forget the stored credential.
+    pub fn sign_out(&self) -> Result<(), String> {
+        match self {
+            Self::OAuth(auth) => auth.sign_out().map_err(|e| e.to_string()),
+            Self::Basic(store) => store.clear().map_err(|e| e.to_string()),
+        }
+    }
 }
 
 /// A persisted record of one account (the durable identity; live credentials and
@@ -123,13 +166,43 @@ pub struct AccountSummary {
     pub active: bool,
     /// Whether this account's provider supports server-side inbox rules.
     pub supports_rules: bool,
+    /// Whether this account has a mailbox at all. False for calendar-only
+    /// accounts (iCloud), which the UI uses to hide every mail affordance.
+    pub supports_mail: bool,
 }
 
 /// A live, signed-in account: its credentials and its local cache.
 pub struct ManagedAccount {
     pub record: AccountRecord,
-    pub auth: AuthService,
+    pub auth: Credentials,
     pub store: SqliteStore,
+}
+
+impl ManagedAccount {
+    /// The credential this account's backends are built with, refreshing the
+    /// OAuth access token first when the provider needs one.
+    ///
+    /// The single place the two authentication styles converge, so every
+    /// command stays ignorant of which one an account uses.
+    pub async fn credentials(&self) -> Result<ProviderCredentials, String> {
+        match &self.auth {
+            Credentials::OAuth(auth) => auth
+                .access_token()
+                .await
+                .map(ProviderCredentials::Bearer)
+                .map_err(|e| e.to_string()),
+            Credentials::Basic(store) => store
+                .load_refresh_token()
+                .map(|password| ProviderCredentials::Basic {
+                    user: self.record.email.clone(),
+                    password,
+                })
+                .ok_or_else(|| {
+                    "no saved iCloud password for this account — remove it and add it again"
+                        .to_string()
+                }),
+        }
+    }
 }
 
 struct Inner {
@@ -226,6 +299,7 @@ impl AccountManager {
                 provider: a.record.provider.slug().to_string(),
                 provider_label: a.record.provider.label().to_string(),
                 supports_rules: provider_supports_rules(a.record.provider),
+                supports_mail: a.record.provider.supports_mail(),
                 email: account_email(a),
                 display_name: account_display_name(a),
                 id: a.record.id.clone(),
@@ -270,7 +344,12 @@ impl AccountManager {
                 provider.label()
             ));
         }
-        let config = oauth_config_for(provider);
+        let Some(config) = oauth_config_for(provider) else {
+            return Err(format!(
+                "{} accounts are added with an Apple ID and an app-specific password.",
+                provider.label()
+            ));
+        };
 
         // 1. Interactive login (no store writes happen here).
         let pending =
@@ -281,18 +360,25 @@ impl AccountManager {
             .map_err(|e| e.to_string())?;
 
         // 2. Discover the account's stable identity from the provider's backend.
-        let backend = build_mail_provider(provider, tokens.access_token.clone());
+        let backend = build_mail_provider(
+            provider,
+            ProviderCredentials::Bearer(tokens.access_token.clone()),
+        )
+        .ok_or_else(|| format!("{} has no mailbox backend", provider.label()))?;
         let profile = backend.current_user().await.map_err(|e| e.to_string())?;
         let email = profile.email.to_string();
         let id = account_id_for(&profile.id, &email);
 
         // 3. If this mailbox is already signed in, refresh its credentials in
         //    place and just make it active — never create a duplicate.
-        if let Some(existing) = self.find_existing(&id, &email) {
-            existing
-                .auth
-                .remember_tokens(&tokens)
-                .map_err(|e| e.to_string())?;
+        if let Some(existing) = self.find_existing(provider, &id, &email) {
+            let Credentials::OAuth(auth) = &existing.auth else {
+                return Err(
+                    "an account with that address is already signed in with a different provider"
+                        .to_string(),
+                );
+            };
+            auth.remember_tokens(&tokens).map_err(|e| e.to_string())?;
             let active_id = existing.record.id.clone();
             {
                 let mut inner = self.write();
@@ -310,9 +396,97 @@ impl AccountManager {
             display_name: profile.display_name,
         };
         let account = open_account(record).map_err(|e| e.to_string())?;
-        account
-            .auth
-            .remember_tokens(&tokens)
+        let Credentials::OAuth(auth) = &account.auth else {
+            return Err("expected an OAuth account".to_string());
+        };
+        auth.remember_tokens(&tokens).map_err(|e| e.to_string())?;
+
+        {
+            let mut inner = self.write();
+            inner.accounts.push(Arc::new(account));
+            inner.active_id = Some(id.clone());
+        }
+        self.persist();
+        Ok(self.summary_for(&id))
+    }
+
+    /// Register an iCloud account from an Apple ID and an app-specific password.
+    ///
+    /// Unlike the OAuth providers there is no browser flow: the credentials are
+    /// proved against the live CalDAV server *before* anything is persisted, so
+    /// a typo cannot leave a dead account behind. The password goes only to the
+    /// OS keychain — never to `accounts.json`.
+    pub async fn add_icloud_account(
+        &self,
+        apple_id: String,
+        app_password: String,
+    ) -> Result<AccountSummary, String> {
+        let apple_id = apple_id.trim().to_string();
+        // Apple prints app-specific passwords in spaced groups and people paste
+        // them that way; the spaces are not part of the secret.
+        let app_password: String = app_password
+            .chars()
+            .filter(|c| !c.is_whitespace())
+            .collect();
+        if apple_id.is_empty() || app_password.is_empty() {
+            return Err("Enter your Apple ID and an app-specific password.".to_string());
+        }
+
+        // 1. Prove the credentials work before touching any persistent state.
+        let probe = build_calendar_provider(
+            ProviderKind::Icloud,
+            ProviderCredentials::Basic {
+                user: apple_id.clone(),
+                password: app_password.clone(),
+            },
+            None,
+        )
+        .ok_or_else(|| "could not build the iCloud calendar backend".to_string())?;
+        let calendars = probe.list_calendars().await.map_err(|e| match e {
+            wattmail_domain::MailError::NotAuthenticated => {
+                "iCloud rejected that Apple ID and app-specific password. Generate one at \
+                 appleid.apple.com and paste it here."
+                    .to_string()
+            }
+            other => other.to_string(),
+        })?;
+        if calendars.is_empty() {
+            return Err("That iCloud account has no calendars.".to_string());
+        }
+
+        // 2. Re-adding an existing account refreshes its password in place.
+        let id = account_id_for("", &apple_id);
+        if let Some(existing) = self.find_existing(ProviderKind::Icloud, &id, &apple_id) {
+            let Credentials::Basic(store) = &existing.auth else {
+                return Err(
+                    "an account with that address is already signed in with a different provider"
+                        .to_string(),
+                );
+            };
+            store
+                .save_refresh_token(&app_password)
+                .map_err(|e| e.to_string())?;
+            let active_id = existing.record.id.clone();
+            {
+                let mut inner = self.write();
+                inner.active_id = Some(active_id.clone());
+            }
+            self.persist();
+            return Ok(self.summary_for(&active_id));
+        }
+
+        // 3. Brand new account.
+        let account = open_account(AccountRecord {
+            id: id.clone(),
+            provider: ProviderKind::Icloud,
+            email: apple_id,
+            display_name: String::new(),
+        })?;
+        let Credentials::Basic(store) = &account.auth else {
+            return Err("expected a password-backed account".to_string());
+        };
+        store
+            .save_refresh_token(&app_password)
             .map_err(|e| e.to_string())?;
 
         {
@@ -379,14 +553,25 @@ impl AccountManager {
 
     /// An existing account matching either the stable id or (when known) the
     /// email — the latter catches re-adding the adopted legacy mailbox.
-    fn find_existing(&self, id: &str, email: &str) -> Option<Arc<ManagedAccount>> {
+    fn find_existing(
+        &self,
+        provider: ProviderKind,
+        id: &str,
+        email: &str,
+    ) -> Option<Arc<ManagedAccount>> {
         let inner = self.read();
         inner
             .accounts
             .iter()
             .find(|a| {
                 a.record.id == id
-                    || (!email.is_empty() && a.record.email.eq_ignore_ascii_case(email))
+                    // The email match is scoped to the same provider: one address
+                    // can legitimately be both a work mailbox and an Apple ID, and
+                    // treating those as one account would hand an OAuth record a
+                    // password (or the reverse).
+                    || (!email.is_empty()
+                        && a.record.provider == provider
+                        && a.record.email.eq_ignore_ascii_case(email))
             })
             .cloned()
     }
@@ -403,6 +588,7 @@ impl AccountManager {
                 display_name: String::new(),
                 active: true,
                 supports_rules: false,
+                supports_mail: true,
             })
     }
 
@@ -442,9 +628,13 @@ fn account_display_name(account: &ManagedAccount) -> String {
 /// OAuth config, keyring namespace, and cache file are all derived from the
 /// record's provider + id.
 fn open_account(record: AccountRecord) -> Result<ManagedAccount, String> {
-    let config = oauth_config_for(record.provider);
-    let auth = AuthService::new(config, keyring_prefix(record.provider, &record.id))
-        .map_err(|e| e.to_string())?;
+    let prefix = keyring_prefix(record.provider, &record.id);
+    let auth = match oauth_config_for(record.provider) {
+        Some(config) => Credentials::OAuth(Box::new(
+            AuthService::new(config, prefix).map_err(|e| e.to_string())?,
+        )),
+        None => Credentials::Basic(TokenStore::new(prefix).map_err(|e| e.to_string())?),
+    };
     let store =
         SqliteStore::open(db_path(record.provider, &record.id)).map_err(|e| e.to_string())?;
     Ok(ManagedAccount {
@@ -484,6 +674,9 @@ fn adopt_legacy() -> Option<ManagedAccount> {
 fn keyring_prefix(provider: ProviderKind, id: &str) -> String {
     if provider == ProviderKind::Office365 && id == LEGACY_ID {
         LEGACY_KEYRING_PREFIX.to_string()
+    } else if provider == ProviderKind::Icloud {
+        // The stored secret is an app-specific password, not a refresh token.
+        format!("{}:{id}:app-password", provider.slug())
     } else {
         format!("{}:{id}:refresh-token", provider.slug())
     }

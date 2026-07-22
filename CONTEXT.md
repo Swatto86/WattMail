@@ -5,7 +5,7 @@
 > new milestone state, a decision made/reversed, or an open question resolved.
 > Keep newest progress entries at the top of the log.
 >
-> **Last updated:** 2026-07-20
+> **Last updated:** 2026-07-22
 
 ---
 
@@ -19,6 +19,10 @@ branch `feature/imap-accounts` (parked off main — see the NOTE in the progress
 **Platform reality:** only **Windows** is shipped/proven (NSIS installer + signed
 auto-update). The code is cross-platform-capable (per-OS path + keychain abstraction)
 but macOS/Linux are compile-gated in CI only — never built into a bundle or run live.
+
+**Provider status (v0.7.0):** **iCloud** = calendar-only over CalDAV, always
+offered (the user supplies their own app-specific password, so there is nothing
+to pre-configure); read-only until milestone 2. Earlier status below.
 
 **Provider status (v0.1.20):** Office 365 = live/configured (real client+tenant ids in
 `accounts.rs`). Outlook.com + Gmail = code-complete but **gated off** by
@@ -63,7 +67,8 @@ WattMail/
 ├─ crates/
 │  ├─ domain/                 # EmailAddress, MessageSummary, MailProvider trait — no I/O
 │  ├─ application/            # inbox_preview() use-case over the trait
-│  └─ infrastructure/         # Graph client, OAuth/PKCE flow, chunked keyring token store
+│  └─ infrastructure/         # Graph client, iCloud CalDAV client (icloud/),
+│                             # OAuth/PKCE flow, chunked keyring token store
 └─ apps/auth-spike/           # console proof of the OAuth + Graph round-trip
 ```
 
@@ -95,6 +100,89 @@ Entra app registration (public, not secret):
 ---
 
 ## Progress log
+
+### 2026-07-22 — iCloud calendars over CalDAV (read-only milestone) (v0.7.0)
+
+**Second calendar provider, first non-OAuth account type.** An iCloud account
+signs in with an Apple ID + an app-specific password (Apple offers no OAuth for
+CalDAV) and shows its calendars in the existing calendar tab. Read-only by
+design this milestone; create/edit/delete/RSVP land in milestone 2.
+
+- **New `crates/infrastructure/src/icloud/` module**, five files, none of them
+  appended to an existing one:
+  - `civil.rs` — wall-clock date arithmetic (Hinnant `days_from_civil`), no deps.
+  - `ical.rs` — hand-rolled RFC 5545 reader: unfolding, parameters, RFC 6868,
+    DATE/DATE-TIME/DURATION.
+  - `dav.rs` — CalDAV request bodies + a `multistatus` parser on **quick-xml**
+    (the one dependency added; +10 lines in `Cargo.lock`).
+  - `rrule.rs` — client-side recurrence expansion.
+  - `calendar.rs` — the `CalendarProvider` impl: discovery, HTTP, VEVENT mapping.
+- **Why iCalendar is hand-rolled, not a crate:** `ical` has been archived since
+  2024-08-17, folds by `char` rather than octet and leaves property values
+  escaped; `icalendar` drags in chrono + uuid against an ISO-string domain. Both
+  would have needed this much wrapping anyway.
+- **No timezone database in the Rust tree, permanently.** Graph converts zones
+  server-side via its `Prefer` header; CalDAV cannot. So the iCloud backend
+  passes each event's own wall clock through with the zone iCalendar stated, and
+  the **frontend** resolves it at the single parse point (`parseLocal`) using the
+  browser's IANA data via `Intl.formatToParts`. Rejected chrono + chrono-tz:
+  duplicate tz data, on its own release cadence, for something the frontend
+  already has. A Windows-zone-name alias table covers Outlook-authored TZIDs.
+- **Recurrence is expanded client-side.** iCloud's `<C:expand>` returns
+  inconsistent results for identical requests (Apple Developer Forums 94363), so
+  WattMail fetches the master VEVENT and expands it — the same choice DAVx5
+  makes. Supported: FREQ (non-sub-daily), INTERVAL, COUNT, UNTIL, BYDAY (plain
+  and ordinal), BYMONTHDAY, BYMONTH, plus EXDATE and RECURRENCE-ID overrides.
+  BYSETPOS / non-Monday WKST degrade to showing the series' own start rather
+  than inventing wrong dates.
+- **Window slop.** Rust cannot compare a zoned wall clock to a UTC instant, so
+  the CalDAV time-range filter is widened a day at each edge and the frontend
+  applies an exact *overlap* filter (not containment — containment would drop
+  genuinely-ongoing multi-day events, which the agenda deliberately clamps onto
+  the first visible day).
+- **Credentials.** `ManagedAccount.auth` became
+  `enum Credentials { OAuth(Box<AuthService>), Basic(TokenStore) }`, so asking an
+  iCloud account for a bearer token is not expressible. The app-specific password
+  reuses the existing chunked keyring store under `icloud:<id>:app-password`, and
+  is validated against the live server *before* the account is persisted.
+  `find_existing` now matches email only within the same provider, so one address
+  can be both a work mailbox and an Apple ID.
+- **Calendar picker.** New `CalendarInfo` + required `list_calendars` on
+  `CalendarProvider`; Graph implements it against `/me/calendars` (the field is
+  `name`, not `displayName`). Selection is per-account in localStorage, hidden
+  when an account has one calendar, and reconciled against the fresh list so a
+  server-deleted id never reaches the backend.
+- **Calendar-only accounts.** `ProviderKind::supports_mail()` is false for
+  iCloud; `build_mail_provider` returns `Option` (2 call sites) rather than
+  stubbing 18 trait methods. The UI hides every mail affordance and defaults to
+  the calendar view.
+
+**Adversarial sweep before release** — 6 lenses, every finding refuted or
+confirmed independently; 9 confirmed and fixed, 3 refuted:
+- All-day iCloud events landed a day early west of Greenwich: JS parses a bare
+  `YYYY-MM-DD` as **UTC** midnight but `…T00:00:00` as local, and Graph only ever
+  sends the second shape. Fixed at the parse point for any provider.
+- The zone round-trip was not an exact no-op for Graph — it diverged by an hour
+  inside the autumn DST fold. Now short-circuited when the event's zone is the
+  viewer's own, so the invariant holds by construction.
+- A moved recurrence override rendered at the slot it was moved *away* from.
+- EXDATE written in a different zone form than DTSTART silently failed to match,
+  resurrecting deleted occurrences. Now matched by day.
+- CalDAV redirects had no host allow-list — credentials are re-attached per hop,
+  so an off-domain `Location` would have leaked the app-specific password.
+- A COUNT-bounded series begun years ago returned nothing (the occurrence cap
+  bounded *counting* rather than *output*).
+- Plus: `list_calendars` staleness guard across account switches, RRULE INTERVAL
+  clamp, `MAX_EVENTS` enforced within a resource, RSVP/new-event affordances
+  gated on real provider capability (`can_respond`, `can_edit`).
+
+**Verification level: compile + unit-test only.** 110 tests, `verify.sh` green.
+**Nothing has been run against a live iCloud account** — discovery, auth, the
+partition-host redirect and the REPORT round trip are all unexercised. Live
+sanity list: add an account with an app-specific password; confirm the calendar
+list matches iCloud.com; check a recurring series, a moved occurrence, a deleted
+occurrence, an all-day event and a multi-day event; switch between an iCloud and
+a Graph account both ways.
 
 ### 2026-07-20 — Cc/Bcc in reader + common-client feature batch (v0.6.0)
 - **Bug (the reported one): sent mail showed no Cc/Bcc.** Three-fold root cause:

@@ -163,6 +163,8 @@ pub fn run() {
             commands::meeting_invite,
             commands::account_supports_calendar,
             commands::calendar_view,
+            commands::list_calendars,
+            commands::add_icloud_account,
             commands::create_event,
             commands::update_event,
             commands::respond_to_event,

@@ -801,6 +801,10 @@ pub struct CalendarEvent {
     pub web_link: Option<String>,
     /// True when the signed-in user organizes this event (can edit/delete it).
     pub is_organizer: bool,
+    /// Whether this provider can actually send an RSVP for this event. False
+    /// where the backend has no reply path, so the UI never offers an RSVP
+    /// button that could only fail.
+    pub can_respond: bool,
     /// Minutes before `start` at which the user's reminder should fire, or
     /// `None` when the reminder is off (or the provider doesn't say).
     pub reminder_minutes_before_start: Option<u32>,
@@ -844,10 +848,36 @@ pub enum InviteResponse {
     Decline,
 }
 
+/// One calendar a provider exposes, for the calendar picker.
+///
+/// Microsoft Graph accounts have several (the default, Birthdays, shared ones);
+/// an iCloud account typically has Home/Work/Family plus subscribed feeds. The
+/// chosen [`id`](Self::id) scopes which calendar a view or a new event targets.
+#[derive(Debug, Clone)]
+pub struct CalendarInfo {
+    /// Provider-specific identifier — a Graph calendar id, or a CalDAV
+    /// collection href. Opaque to everything above the infrastructure layer.
+    pub id: String,
+    pub name: String,
+    /// The provider's own colour hint. Graph reports a preset name
+    /// (`lightBlue`), CalDAV a hex string — so it is a hint, never assumed to
+    /// be CSS-parseable.
+    pub color: Option<String>,
+    /// True for the calendar the provider treats as the default target.
+    pub is_default: bool,
+    /// False for a read-only calendar, such as a subscribed holiday feed.
+    pub can_edit: bool,
+}
+
 /// Contract every calendar backend implements. Parallels [`MailProvider`]; the
 /// seam that keeps the application layer ignorant of provider specifics.
 #[async_trait]
 pub trait CalendarProvider: Send + Sync {
+    /// Every calendar this account can read, for the picker. No default impl:
+    /// unlike editing, *enumerating* calendars is something every backend can
+    /// answer, and a synthetic single entry would be a lie for both providers.
+    async fn list_calendars(&self) -> Result<Vec<CalendarInfo>, MailError>;
+
     /// Events overlapping `[start, end)` — both **absolute ISO-8601 instants**
     /// (with offset or `Z`) bounding the window — with recurrence expanded into
     /// individual occurrences, sorted by start ascending and rendered in

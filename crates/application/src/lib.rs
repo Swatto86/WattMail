@@ -4,10 +4,10 @@
 //! composition root.
 
 use wattmail_domain::{
-    Attachment, AutoReplySettings, CalendarEvent, CalendarProvider, DraftPrefill, Folder,
-    FolderRole, InviteResponse, MailError, MailProvider, MailStore, MeetingInvite, MessageBody,
-    MessageChange, MessageHeader, MessageSummary, NewEvent, OutgoingAttachment, OutgoingMessage,
-    SyncToken, UserProfile,
+    Attachment, AutoReplySettings, CalendarEvent, CalendarInfo, CalendarProvider, DraftPrefill,
+    Folder, FolderRole, InviteResponse, MailError, MailProvider, MailStore, MeetingInvite,
+    MessageBody, MessageChange, MessageHeader, MessageSummary, NewEvent, OutgoingAttachment,
+    OutgoingMessage, SyncToken, UserProfile,
 };
 
 const ACCOUNT_NAME_KEY: &str = "account.displayName";
@@ -465,6 +465,13 @@ pub async fn download_attachment(
 
 /// Fetch the recurrence-expanded agenda for `[start, end)`, rendered in
 /// `time_zone` (an IANA zone). `start`/`end` are absolute ISO-8601 instants.
+/// Every calendar the account can read, for the calendar picker.
+pub async fn list_calendars(
+    provider: &dyn CalendarProvider,
+) -> Result<Vec<CalendarInfo>, MailError> {
+    provider.list_calendars().await
+}
+
 pub async fn calendar_view(
     provider: &dyn CalendarProvider,
     start: &str,

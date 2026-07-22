@@ -23,6 +23,7 @@ ammonia.workspace = true
 rusqlite = { version = "0.32", features = ["bundled"] }
 aes-gcm = "0.10"
 regex = "1"
+quick-xml = "0.41"
 
 # Platform-native secure credential stores. Declared per-target so a build only
 # pulls the credential backend for the OS it is compiled for.

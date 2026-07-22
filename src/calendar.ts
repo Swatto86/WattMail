@@ -4,10 +4,14 @@
 // already expanded server-side), an event detail pane with RSVP, and a
 // create-event modal.
 //
-// Time zones: the backend returns each event's start/end as a local wall-clock
-// string in the user's own IANA zone (sent as `time_zone`), so `new Date(start)`
-// parses correctly as local time. All-day events are date-only midnight and are
-// never time-shifted.
+// Time zones: Graph converts timezones server-side and hands back each event's
+// start/end as a wall-clock string already in the viewer's own IANA zone, so
+// parsing it is a no-op conversion. CalDAV (iCloud) can't do that server-side —
+// the Rust tree carries no timezone database — so it passes each event's own
+// wall clock through together with whatever zone iCalendar stated for it
+// (startZone/endZone), which may differ from the viewer's zone; the frontend
+// resolves that using the browser's own IANA data. All-day events are
+// date-only and are never run through zone maths.
 
 import { invoke } from "@tauri-apps/api/core";
 import { openUrl } from "@tauri-apps/plugin-opener";
@@ -39,8 +43,17 @@ interface CalendarEvent {
   responseStatus: string;
   webLink: string | null;
   isOrganizer: boolean;
+  // Whether this provider can actually send an RSVP for this event.
+  canRespond: boolean;
   // Minutes before start the user's reminder should fire; null = reminder off.
   reminderMinutes: number | null;
+}
+interface CalendarInfo {
+  id: string;
+  name: string;
+  color: string | null;
+  isDefault: boolean;
+  canEdit: boolean;
 }
 
 const RANGE_DAYS = 7;
@@ -73,6 +86,14 @@ let nextBtn: HTMLButtonElement;
 let events: CalendarEvent[] = [];
 let selectedId: string | null = null;
 let loadSeq = 0; // guards against out-of-order responses on rapid nav
+let calendarsSeq = 0; // ditto for the calendar list across account switches
+let calPicker: HTMLSelectElement;
+let calendars: CalendarInfo[] = [];
+let selectedCalendarId: string | null = null;
+// Set whenever `loadCalendars` runs (account activation), so the refresh
+// button and the picker's own change handler know which account's selection
+// to persist without main.ts having to thread it through every call.
+let activeAccountId: string | null = null;
 
 // Create-event modal refs (built once, appended to <body>).
 let eventOverlay: HTMLDivElement;
@@ -144,10 +165,117 @@ function addDaysToDateStr(dateStr: string, n: number): string {
   const dt = new Date(y, m - 1, day + n);
   return `${dt.getFullYear()}-${pad(dt.getMonth() + 1)}-${pad(dt.getDate())}`;
 }
-// Parse an event's local wall-clock string into a Date in local time. Invalid /
-// empty strings yield an Invalid Date, which callers guard against.
-function parseLocal(s: string): Date {
-  return new Date(s);
+// Windows zone IDs an Outlook-authored event can carry into iCloud's iCalendar
+// (TZID is free text, and Windows names are what Outlook writes) — mapped to
+// their IANA equivalent so Intl can resolve them. Not exhaustive, just the
+// common ones; anything else falls back to floating time below.
+const WINDOWS_ZONE_MAP: Record<string, string> = {
+  "GMT Standard Time": "Europe/London",
+  GMT: "Etc/GMT",
+  "W. Europe Standard Time": "Europe/Berlin",
+  "Central Europe Standard Time": "Europe/Budapest",
+  "Romance Standard Time": "Europe/Paris",
+  "Eastern Standard Time": "America/New_York",
+  "Central Standard Time": "America/Chicago",
+  "Mountain Standard Time": "America/Denver",
+  "Pacific Standard Time": "America/Los_Angeles",
+  UTC: "UTC",
+  "AUS Eastern Standard Time": "Australia/Sydney",
+  "Tokyo Standard Time": "Asia/Tokyo",
+  "India Standard Time": "Asia/Kolkata",
+  "China Standard Time": "Asia/Shanghai",
+  "Singapore Standard Time": "Asia/Singapore",
+};
+
+function buildZoneFormatter(timeZone: string): Intl.DateTimeFormat {
+  // en-US + h23 so formatToParts hands back plain ASCII digits in 24h form.
+  return new Intl.DateTimeFormat("en-US", {
+    timeZone,
+    hourCycle: "h23",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+  });
+}
+
+// Memoized per zone — render loops call this twice per event — and the
+// failure case is cached too, so an unresolvable zone (e.g. a Windows name
+// with no table entry) isn't retried on every event that carries it.
+const zoneFormatters = new Map<string, Intl.DateTimeFormat | null>();
+function zoneFormatter(timeZone: string): Intl.DateTimeFormat | null {
+  const cached = zoneFormatters.get(timeZone);
+  if (cached !== undefined) return cached;
+  let dtf: Intl.DateTimeFormat | null = null;
+  try {
+    dtf = buildZoneFormatter(timeZone);
+  } catch {
+    // Intl throws RangeError for anything that isn't a valid IANA name —
+    // try the Windows-name mapping before giving up on the zone entirely.
+    const mapped = WINDOWS_ZONE_MAP[timeZone];
+    if (mapped) {
+      try {
+        dtf = buildZoneFormatter(mapped);
+      } catch {
+        dtf = null;
+      }
+    }
+  }
+  zoneFormatters.set(timeZone, dtf);
+  return dtf;
+}
+
+function getOffsetMs(ms: number, timeZone: string): number {
+  // Offset (ms, east-positive) of `timeZone` at instant `ms`: read back the
+  // wall clock that instant shows in the zone, reinterpret those digits as UTC,
+  // and diff. The browser's own IANA data does the work.
+  const dtf = zoneFormatter(timeZone);
+  if (!dtf) return 0;
+  const p: Record<string, string> = {};
+  for (const part of dtf.formatToParts(new Date(ms))) p[part.type] = part.value;
+  const asUtc = Date.UTC(+p.year, +p.month - 1, +p.day, +p.hour, +p.minute, +p.second);
+  return asUtc - ms;
+}
+
+function zonedWallClockToInstant(wallClock: string, timeZone: string): Date {
+  // A wall clock already expressed in the viewer's own zone is what `new Date`
+  // parses natively, so take that path verbatim rather than round-tripping it
+  // through the offset maths below. Graph always sends this case, and the
+  // round trip is not quite an identity: inside the repeated hour of an autumn
+  // DST changeover the two disagree by an hour, which would silently move a
+  // once-a-year meeting — and its reminder — for existing users.
+  if (!timeZone || timeZone === IANA_ZONE) return new Date(wallClock);
+  const naiveUtcMs = Date.parse(wallClock + "Z");
+  if (Number.isNaN(naiveUtcMs)) return new Date(NaN);
+  // Two passes: the offset at the naive guess is wrong right across a DST
+  // boundary, so it is re-read at the candidate instant and applied again.
+  const first = getOffsetMs(naiveUtcMs, timeZone);
+  let instant = naiveUtcMs - first;
+  const second = getOffsetMs(instant, timeZone);
+  if (second !== first) instant = naiveUtcMs - second;
+  return new Date(instant);
+}
+
+// Parse an event's wall-clock string into a Date. Graph events already carry
+// the viewer's own zone, so this is a straight conversion for them; iCloud
+// events resolve against whatever zone they came tagged with. All-day dates
+// have no zone to resolve — running one through zone maths is exactly what
+// slides it onto the wrong day. Invalid/empty strings yield an Invalid Date,
+// which callers guard against.
+function parseLocal(s: string, zone: string, allDay: boolean): Date {
+  if (!allDay) return zonedWallClockToInstant(s, zone);
+  // The date part is built explicitly rather than handed to `new Date(s)`:
+  // ECMA-262 parses a bare "YYYY-MM-DD" as UTC midnight but "YYYY-MM-DDTHH:MM:SS"
+  // as *local* midnight, and every reader below uses local getters. Graph happens
+  // to send the second shape, CalDAV sends the first, and left to that asymmetry
+  // an all-day event slides a day earlier everywhere west of Greenwich.
+  const parts = s.slice(0, 10).split("-").map(Number);
+  if (parts.length !== 3 || parts.some((n) => !Number.isFinite(n))) {
+    return new Date(NaN);
+  }
+  return new Date(parts[0], parts[1] - 1, parts[2]);
 }
 function dayKey(d: Date): string {
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
@@ -226,6 +354,7 @@ export function initCalendar(hostEl: HTMLDivElement): void {
       <button id="cal-next" class="btn btn-xs" title="Next week" aria-label="Next">&#8250;</button>
       <span id="cal-range" class="cal-range-label"></span>
       <span class="cal-spacer"></span>
+      <select id="cal-picker" class="select select-bordered select-xs" title="Calendar" aria-label="Calendar" hidden></select>
       <span class="cal-viewswitch">
         <button id="cal-view-agenda" class="btn btn-xs">Agenda</button>
         <button id="cal-view-month" class="btn btn-xs">Month</button>
@@ -241,8 +370,24 @@ export function initCalendar(hostEl: HTMLDivElement): void {
   agendaEl = host.querySelector<HTMLDivElement>("#cal-agenda")!;
   detailEl = host.querySelector<HTMLDivElement>("#cal-detail")!;
   rangeLabel = host.querySelector<HTMLSpanElement>("#cal-range")!;
+  calPicker = host.querySelector<HTMLSelectElement>("#cal-picker")!;
   // Delegated so row clicks survive every agenda re-render.
   agendaEl.addEventListener("click", onAgendaClick);
+  calPicker.addEventListener("change", () => {
+    selectedCalendarId = calPicker.value || null;
+    if (activeAccountId) {
+      try {
+        localStorage.setItem(calendarStorageKey(activeAccountId), selectedCalendarId ?? "");
+      } catch {
+        /* persistence is best-effort */
+      }
+    }
+    void loadCalendar();
+  });
+  // `loadCalendars` may already have run (account activation happens on sign-in,
+  // before the calendar tab is ever opened), so reflect whatever it fetched
+  // instead of starting the picker from a blank state.
+  renderCalPicker();
 
   prevBtn = host.querySelector<HTMLButtonElement>("#cal-prev")!;
   nextBtn = host.querySelector<HTMLButtonElement>("#cal-next")!;
@@ -262,9 +407,12 @@ export function initCalendar(hostEl: HTMLDivElement): void {
     void loadCalendar();
   });
   host.querySelector<HTMLButtonElement>("#cal-refresh")!.addEventListener("click", () => {
-    void loadCalendar();
+    void refreshCalendars();
   });
   host.querySelector<HTMLButtonElement>("#cal-new")!.addEventListener("click", () => {
+    // A read-only calendar (a subscribed feed, or any iCloud calendar while the
+    // backend is read-only) would only fail on save — don't open the form.
+    if (!selectedCalendarCanEdit()) return;
     openEventModal();
   });
   viewAgendaBtn.addEventListener("click", () => setViewMode("agenda"));
@@ -293,6 +441,91 @@ function reflectViewMode(): void {
   prevBtn.title = month ? "Previous month" : "Previous week";
   nextBtn.title = month ? "Next month" : "Next week";
   agendaEl.classList.toggle("cal-month-mode", month);
+}
+
+// ---- Calendar picker ----
+function calendarStorageKey(accountId: string): string {
+  return `wattmail.selectedCalendar.${accountId}`;
+}
+
+function renderCalPicker(): void {
+  if (!calPicker) return; // initCalendar hasn't built the toolbar yet
+  calPicker.innerHTML = calendars
+    .map(
+      (c) =>
+        `<option value="${esc(c.id)}"${c.id === selectedCalendarId ? " selected" : ""}>${esc(
+          c.name,
+        )}</option>`,
+    )
+    .join("");
+  calPicker.value = selectedCalendarId ?? "";
+  // A Graph user with exactly one calendar must see no new UI at all.
+  calPicker.hidden = calendars.length <= 1;
+  const newBtn = host?.querySelector<HTMLButtonElement>("#cal-new");
+  if (newBtn) newBtn.disabled = !selectedCalendarCanEdit();
+}
+
+// Whether the calendar in view accepts new events. A subscribed feed never
+// does, and neither does any iCloud calendar while that backend is read-only.
+// Unknown (no list loaded) counts as editable, which is how it behaved before
+// there was a picker.
+function selectedCalendarCanEdit(): boolean {
+  const selected = calendars.find((c) => c.id === selectedCalendarId);
+  return selected ? selected.canEdit : calendars.length === 0;
+}
+
+// Fetch the account's calendar list and reconcile the persisted choice against
+// it. Called once per account activation (main.ts) and from the refresh
+// button below — NOT on prev/next/today, which would otherwise hit the
+// backend for a list that essentially never changes mid-session.
+export async function loadCalendars(accountId: string): Promise<void> {
+  // The backend resolves `list_calendars` against whatever account is active
+  // when it runs, so a slow reply for the account we just left would otherwise
+  // overwrite the new one's list — and send its calendar id to the wrong
+  // mailbox on the next view.
+  const seq = ++calendarsSeq;
+  activeAccountId = accountId;
+  let fetched: CalendarInfo[];
+  try {
+    fetched = await invoke<CalendarInfo[]>("list_calendars");
+  } catch {
+    // No multi-calendar support (or a transient failure): picker stays
+    // hidden and calendar_view runs with calendarId: null, i.e. the
+    // backend's own default calendar — the agenda still loads.
+    fetched = [];
+  }
+  if (seq !== calendarsSeq) return; // a newer account switch superseded this
+  calendars = fetched;
+  let stored: string | null = null;
+  try {
+    stored = localStorage.getItem(calendarStorageKey(accountId));
+  } catch {
+    stored = null;
+  }
+  // A stored id the server no longer has (calendar deleted, or a stale value
+  // from before a reconciliation existed) must not be sent as-is — the
+  // backend fails the whole view rather than silently falling back.
+  const chosen =
+    calendars.find((c) => c.id === stored) ?? calendars.find((c) => c.isDefault) ?? calendars[0];
+  selectedCalendarId = chosen?.id ?? null;
+  renderCalPicker();
+}
+
+async function refreshCalendars(): Promise<void> {
+  if (activeAccountId) await loadCalendars(activeAccountId);
+  await loadCalendar();
+}
+
+// True when `ev` really overlaps [windowStart, windowEnd) — an overlap test,
+// not "does it start inside the window": a genuinely-ongoing multi-day event
+// (started before the window, still running) must survive this, since the
+// render-side clamp exists precisely to show those on day one. All-day dates
+// are exempt; they have no zone to run through instant maths in the first place.
+function overlapsWindow(ev: CalendarEvent, windowStart: Date, windowEnd: Date): boolean {
+  if (ev.isAllDay) return true;
+  const s = parseLocal(ev.start, ev.startZone, ev.isAllDay).getTime();
+  const e = parseLocal(ev.end, ev.endZone, ev.isAllDay).getTime();
+  return s < windowEnd.getTime() && e > windowStart.getTime();
 }
 
 // Load (or reload) the current range from the backend and render it.
@@ -326,9 +559,14 @@ export async function loadCalendar(): Promise<void> {
       start: start.toISOString(),
       end: end.toISOString(),
       timeZone: IANA_ZONE,
+      calendarId: selectedCalendarId,
     });
     if (seq !== loadSeq) return; // a newer load superseded this one
-    events = result;
+    // iCloud over-fetches by up to a day at each edge (it can't compare a
+    // zoned wall clock against a UTC instant without a tz database); drop
+    // what doesn't really overlap so it doesn't pile onto day one's clamp.
+    // No-op against Graph, which never over-fetches.
+    events = result.filter((ev) => overlapsWindow(ev, start, end));
     if (viewMode === "month") renderMonth(start);
     else renderAgenda(start);
     // Keep the open event selected if it's still present; else clear detail.
@@ -355,7 +593,7 @@ function renderAgenda(start: Date): void {
   const windowStartKey = dayKey(start);
   const byDay = new Map<string, CalendarEvent[]>();
   for (const ev of events) {
-    const d = parseLocal(ev.start);
+    const d = parseLocal(ev.start, ev.startZone, ev.isAllDay);
     if (isNaN(d.getTime())) continue;
     let key = dayKey(d);
     if (key < windowStartKey) key = windowStartKey;
@@ -383,15 +621,19 @@ function renderAgenda(start: Date): void {
 }
 
 function sortEvents(a: CalendarEvent, b: CalendarEvent): number {
-  // All-day first, then by start time.
+  // All-day first, then by start time. Wall-clock strings can carry different
+  // zones now (iCloud), so they're compared as parsed instants, not strings.
   if (a.isAllDay !== b.isAllDay) return a.isAllDay ? -1 : 1;
-  return a.start.localeCompare(b.start);
+  return (
+    parseLocal(a.start, a.startZone, a.isAllDay).getTime() -
+    parseLocal(b.start, b.startZone, b.isAllDay).getTime()
+  );
 }
 
 function eventRowHtml(ev: CalendarEvent): string {
   const selected = ev.id === selectedId ? " selected" : "";
   const cancelled = ev.isCancelled ? " cancelled" : "";
-  const time = ev.isAllDay ? "All day" : fmtTime(parseLocal(ev.start));
+  const time = ev.isAllDay ? "All day" : fmtTime(parseLocal(ev.start, ev.startZone, ev.isAllDay));
   const recur = ev.isRecurring
     ? `<span class="cal-ev-recur" title="Part of a recurring series">&#8635;</span>`
     : "";
@@ -419,7 +661,7 @@ function renderMonth(gridStart: Date): void {
   const gridStartKey = dayKey(gridStart);
   const byDay = new Map<string, CalendarEvent[]>();
   for (const ev of events) {
-    const d = parseLocal(ev.start);
+    const d = parseLocal(ev.start, ev.startZone, ev.isAllDay);
     if (isNaN(d.getTime())) continue;
     let key = dayKey(d);
     if (key < gridStartKey) key = gridStartKey;
@@ -463,7 +705,7 @@ function monthPillHtml(ev: CalendarEvent): string {
   const allday = ev.isAllDay ? " cal-pill-allday" : "";
   const time = ev.isAllDay
     ? ""
-    : `<span class="cal-pill-time">${esc(fmtTime(parseLocal(ev.start)))}</span> `;
+    : `<span class="cal-pill-time">${esc(fmtTime(parseLocal(ev.start, ev.startZone, ev.isAllDay)))}</span> `;
   return `<div class="cal-event cal-pill${selected}${cancelled}${allday}" data-id="${esc(
     ev.id,
   )}" role="button" tabindex="0" title="${esc(ev.subject)}">${time}${esc(ev.subject)}</div>`;
@@ -510,9 +752,9 @@ function cssEscape(s: string): string {
 
 function fmtWhen(ev: CalendarEvent): string {
   if (ev.isAllDay) {
-    const start = parseLocal(ev.start);
+    const start = parseLocal(ev.start, ev.startZone, ev.isAllDay);
     // All-day end is exclusive next-midnight; show the inclusive last day.
-    const endExclusive = parseLocal(ev.end);
+    const endExclusive = parseLocal(ev.end, ev.endZone, ev.isAllDay);
     const lastDay = addDays(endExclusive, -1);
     const startStr = start.toLocaleDateString(undefined, {
       weekday: "short",
@@ -531,8 +773,8 @@ function fmtWhen(ev: CalendarEvent): string {
     }
     return `All day · ${startStr}`;
   }
-  const start = parseLocal(ev.start);
-  const end = parseLocal(ev.end);
+  const start = parseLocal(ev.start, ev.startZone, ev.isAllDay);
+  const end = parseLocal(ev.end, ev.endZone, ev.isAllDay);
   const dateStr = start.toLocaleDateString(undefined, {
     weekday: "short",
     day: "numeric",
@@ -585,6 +827,7 @@ function renderDetail(ev: CalendarEvent): void {
   // event has attendees" (which would offer RSVP on shared/delegate calendars
   // where the user isn't actually an invitee).
   const canRespond =
+    ev.canRespond &&
     !ev.isOrganizer &&
     ["accepted", "tentativelyAccepted", "declined", "notResponded"].includes(
       ev.responseStatus,
@@ -835,8 +1078,8 @@ function openEventModal(ev?: CalendarEvent): void {
   reflectAllDay();
 
   if (ev) {
-    const start = parseLocal(ev.start);
-    const end = parseLocal(ev.end);
+    const start = parseLocal(ev.start, ev.startZone, ev.isAllDay);
+    const end = parseLocal(ev.end, ev.endZone, ev.isAllDay);
     evStartDate.value = dayKey(start);
     if (ev.isAllDay) {
       // The stored all-day end is the exclusive next midnight; the form shows
@@ -912,7 +1155,11 @@ async function saveEvent(): Promise<void> {
     const et = evEndTime.value || "10:00";
     start = `${sd}T${st}:00`;
     end = `${ed}T${et}:00`;
-    if (parseLocal(end).getTime() <= parseLocal(start).getTime()) {
+    // These are the modal's own date/time inputs, always implicitly in the
+    // viewer's zone — never an event's own startZone/endZone.
+    if (
+      parseLocal(end, IANA_ZONE, allDay).getTime() <= parseLocal(start, IANA_ZONE, allDay).getTime()
+    ) {
       evMsg.textContent = "The end must be after the start.";
       return;
     }
@@ -962,10 +1209,10 @@ async function saveEvent(): Promise<void> {
   try {
     const saved = editingId
       ? await invoke<CalendarEvent>("update_event", { id: editingId, ...payload })
-      : await invoke<CalendarEvent>("create_event", payload);
+      : await invoke<CalendarEvent>("create_event", { ...payload, calendarId: selectedCalendarId });
     closeEventModal();
     // Jump the view to the event's week so it's visible, then select it.
-    const startDate = parseLocal(saved.start);
+    const startDate = parseLocal(saved.start, saved.startZone, saved.isAllDay);
     if (!isNaN(startDate.getTime())) {
       rangeStart = startOfDay(startDate);
     }
@@ -1032,6 +1279,7 @@ async function refreshReminderEvents(): Promise<void> {
       start: now.toISOString(),
       end: end.toISOString(),
       timeZone: IANA_ZONE,
+      calendarId: selectedCalendarId,
     });
     // Commit only if no newer refresh (or account switch) superseded this one.
     if (seq === reminderSeq) reminderEvents = fetched;
@@ -1054,7 +1302,7 @@ function checkReminders(): void {
   let dirty = false;
   for (const ev of reminderEvents) {
     if (ev.reminderMinutes === null || ev.isCancelled) continue;
-    const start = parseLocal(ev.start).getTime();
+    const start = parseLocal(ev.start, ev.startZone, ev.isAllDay).getTime();
     if (isNaN(start)) continue;
     const remindAt = start - ev.reminderMinutes * 60_000;
     // Occurrence ids are unique per instance, but key on start too so an event
@@ -1106,6 +1354,12 @@ export function resetCalendar(): void {
   rangeStart = startOfToday();
   selectedId = null;
   events = [];
+  // The picker is per-account too — the old account's calendar list and
+  // choice must never leak into the new one's toolbar.
+  calendars = [];
+  selectedCalendarId = null;
+  activeAccountId = null;
+  renderCalPicker();
   // The old account's reminders must stop immediately too (the switch path
   // also calls startEventReminders, which refetches for the new account), and
   // any of its fetches still in flight must land dead.
