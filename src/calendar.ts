@@ -62,6 +62,16 @@ const MONTH_GRID_DAYS = 42;
 const MONTH_MAX_PILLS = 3;
 type CalView = "agenda" | "month";
 const VIEW_KEY = "wattmail.calView";
+
+// Adjustable calendar text/pill size — a multiplier the stylesheet applies via
+// calc(). Persisted like the view mode.
+const SIZE_KEY = "wattmail.calSize";
+type TextSize = "s" | "m" | "l";
+const SIZE_SCALE: Record<TextSize, string> = { s: "0.9", m: "1", l: "1.2" };
+let textSize: TextSize = ((): TextSize => {
+  const v = localStorage.getItem(SIZE_KEY);
+  return v === "s" || v === "l" ? v : "m";
+})();
 export const IANA_ZONE = (() => {
   try {
     return Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
@@ -364,11 +374,13 @@ export function initCalendar(hostEl: HTMLDivElement): void {
       <button id="cal-next" class="btn btn-xs" title="Next week" aria-label="Next">&#8250;</button>
       <span id="cal-range" class="cal-range-label"></span>
       <span class="cal-spacer"></span>
+      <span id="cal-color-dot" class="cal-color-dot" title="Calendar colour" hidden></span>
       <select id="cal-picker" class="select select-bordered select-xs" title="Calendar" aria-label="Calendar" hidden></select>
       <span class="cal-viewswitch">
         <button id="cal-view-agenda" class="btn btn-xs">Agenda</button>
         <button id="cal-view-month" class="btn btn-xs">Month</button>
       </span>
+      <button id="cal-size" class="btn btn-xs cal-size-btn" title="Text size" aria-label="Text size">Aa</button>
       <button id="cal-refresh" class="btn btn-xs" title="Refresh">&#8635;</button>
       <button id="cal-new" class="btn btn-xs btn-primary" title="Create event">&#43; New event</button>
     </div>
@@ -385,6 +397,7 @@ export function initCalendar(hostEl: HTMLDivElement): void {
   agendaEl.addEventListener("click", onAgendaClick);
   calPicker.addEventListener("change", () => {
     selectedCalendarId = calPicker.value || null;
+    applyCalendarAccent();
     if (activeAccountId) {
       try {
         localStorage.setItem(calendarStorageKey(activeAccountId), selectedCalendarId ?? "");
@@ -416,6 +429,8 @@ export function initCalendar(hostEl: HTMLDivElement): void {
     rangeStart = startOfToday();
     void loadCalendar();
   });
+  host.querySelector<HTMLButtonElement>("#cal-size")!.addEventListener("click", cycleTextSize);
+  applyTextSize();
   host.querySelector<HTMLButtonElement>("#cal-refresh")!.addEventListener("click", () => {
     void refreshCalendars();
   });
@@ -473,6 +488,58 @@ function renderCalPicker(): void {
   calPicker.hidden = calendars.length <= 1;
   const newBtn = host?.querySelector<HTMLButtonElement>("#cal-new");
   if (newBtn) newBtn.disabled = !selectedCalendarCanEdit();
+  applyCalendarAccent();
+}
+
+// Colour the events by their calendar (the user's chosen scheme). WattMail shows
+// one calendar at a time, so every visible event takes the selected calendar's
+// own colour — the same colour iOS draws it in. Driven through a CSS variable so
+// the stylesheet does the tinting; falls back to the app's primary when the
+// calendar reports no (usable) colour.
+function applyCalendarAccent(): void {
+  if (!host) return;
+  const accent = normalizeColor(calendars.find((c) => c.id === selectedCalendarId)?.color ?? null);
+  if (accent) host.style.setProperty("--cal-accent", accent);
+  else host.style.removeProperty("--cal-accent");
+  const dot = host.querySelector<HTMLElement>("#cal-color-dot");
+  if (dot) {
+    dot.style.background = accent ?? "";
+    dot.hidden = !accent;
+  }
+}
+
+// A provider colour reduced to a CSS `#rrggbb`, or null when it isn't one (a
+// Microsoft Graph preset *name* like "lightBlue", or an empty value) — the
+// caller then falls back to the app primary. iCloud sends 8-digit `#rrggbbaa`;
+// the alpha is dropped so the tint is controlled here, not by the server.
+function normalizeColor(raw: string | null): string | null {
+  if (!raw) return null;
+  const s = raw.trim();
+  const six = /^#([0-9a-fA-F]{6})(?:[0-9a-fA-F]{2})?$/.exec(s);
+  if (six) return `#${six[1].toLowerCase()}`;
+  if (/^#[0-9a-fA-F]{3}$/.test(s)) return s.toLowerCase();
+  return null;
+}
+
+function applyTextSize(): void {
+  if (!host) return;
+  host.style.setProperty("--cal-scale", SIZE_SCALE[textSize]);
+  const label: Record<TextSize, string> = { s: "small", m: "medium", l: "large" };
+  const btn = host.querySelector<HTMLButtonElement>("#cal-size");
+  if (btn) {
+    btn.title = `Text size: ${label[textSize]} (click to change)`;
+    btn.dataset.size = textSize;
+  }
+}
+
+function cycleTextSize(): void {
+  textSize = textSize === "s" ? "m" : textSize === "m" ? "l" : "s";
+  try {
+    localStorage.setItem(SIZE_KEY, textSize);
+  } catch {
+    /* persistence is best-effort */
+  }
+  applyTextSize();
 }
 
 // Whether the calendar in view accepts new events. A subscribed feed never

@@ -101,6 +101,36 @@ Entra app registration (public, not secret):
 
 ## Progress log
 
+### 2026-07-23 — Calendar: colour-by-calendar + adjustable text size (v0.8.2)
+
+Two user-requested calendar customisations (frontend + CSS only — the calendar
+colour already reaches the UI via `list_calendars`, so no backend change):
+
+- **Events are coloured by their calendar.** WattMail shows one calendar at a
+  time, so every visible event takes the selected calendar's own colour — the
+  same colour iOS draws it in. `applyCalendarAccent()` normalises the calendar's
+  `calendar-color` (iCloud 8-digit `#rrggbbaa` → `#rrggbb`; a Microsoft Graph
+  preset *name* → falls back to the app primary) into a `--cal-accent` CSS
+  variable; pills/rows tint from it via `color-mix`, and a colour dot by the
+  picker shows the active colour. Text never sits on the accent, so contrast can
+  never fail.
+- **Adjustable text size.** An "Aa" toolbar button cycles small / medium / large
+  (persisted), applied as a `--cal-scale` multiplier the stylesheet scales
+  font-sizes and paddings from.
+
+Reviewed through two lenses (colour readability across arbitrary calendar colours
+and both themes; size regressions) with every finding independently verified —
+two confirmed and fixed: the "+N more" button had been using the raw accent as
+its *text* colour (a near-surface calendar colour would render it illegible — now
+it tints the background and keeps readable text), and a fixed-height month cell
+could clip the "+N more" affordance at large text (the cell now scrolls, and the
+day number scales with the pills). 129 tests, `verify.sh` green.
+
+**Note:** colour-by-calendar themes the whole (single) calendar rather than
+distinguishing individual events — the trade-off of the scheme that matches iOS.
+An "auto-colour per event title" alternative exists if per-event distinction is
+wanted later.
+
 ### 2026-07-23 — Calendar display fixes: multi-day span + readable description (v0.8.1)
 
 Two bugs found on the first live exercise of the iCloud write path (both

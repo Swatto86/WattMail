@@ -1579,7 +1579,10 @@ body,
   border-bottom: 1px solid oklch(var(--b3));
   min-width: 0;
   min-height: 0;
-  overflow: hidden;
+  /* A taller (large-text) or busy day scrolls inside its cell instead of
+     clipping the "+N more" affordance out of sight. */
+  overflow-y: auto;
+  overflow-x: hidden;
 }
 .cal-cell:nth-child(7n) {
   border-right: none;
@@ -1598,7 +1601,7 @@ body,
   align-self: flex-start;
   border: none;
   background: none;
-  font-size: 11px;
+  font-size: calc(11px * var(--cal-scale, 1));
   font-weight: 600;
   padding: 1px 6px;
   border-radius: 9999px;
@@ -1608,34 +1611,49 @@ body,
 .cal-cell-day:hover {
   background: oklch(var(--b3));
 }
+/* A dot showing the active calendar's colour (also the events' colour). */
+.cal-color-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  align-self: center;
+  box-shadow: inset 0 0 0 1px oklch(var(--bc) / 0.25);
+}
+.cal-size-btn {
+  font-weight: 600;
+  letter-spacing: -0.5px;
+}
+
 /* Pills share .cal-event (delegated clicks + selection); the double-class
    selector outranks the agenda row rules defined later in the file. */
 .cal-event.cal-pill {
   display: block;
-  font-size: 11px;
+  font-size: calc(11px * var(--cal-scale, 1));
   line-height: 1.3;
-  padding: 1px 5px;
+  padding: calc(1px * var(--cal-scale, 1)) 5px;
   border-bottom: none;
   border-radius: 4px;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-  background: oklch(var(--p) / 0.12);
-  border-left: 2px solid oklch(var(--p));
+  background: color-mix(in srgb, var(--cal-accent, oklch(var(--p))) 15%, transparent);
+  border-left: 3px solid var(--cal-accent, oklch(var(--p)));
   cursor: pointer;
 }
 .cal-pill-time {
   opacity: 0.7;
   font-variant-numeric: tabular-nums;
 }
+/* All-day pills read as a fuller bar (like iOS), still in the calendar colour. */
 .cal-event.cal-pill-allday {
-  background: oklch(var(--su, var(--p)) / 0.15);
-  border-left-color: oklch(var(--su, var(--p)));
+  background: color-mix(in srgb, var(--cal-accent, oklch(var(--p))) 26%, transparent);
+  border-left-color: var(--cal-accent, oklch(var(--p)));
 }
 .cal-event.cal-pill.selected {
-  background: oklch(var(--p) / 0.25);
+  background: color-mix(in srgb, var(--cal-accent, oklch(var(--p))) 32%, transparent);
   box-shadow: none;
-  outline: 1px solid oklch(var(--p));
+  outline: 1px solid var(--cal-accent, oklch(var(--p)));
 }
 .cal-event.cal-pill.cancelled {
   text-decoration: line-through;
@@ -1643,9 +1661,12 @@ body,
 }
 .cal-more {
   border: none;
-  background: none;
-  color: oklch(var(--p));
-  font-size: 10px;
+  /* The accent tints the background, never the text — an arbitrary calendar
+     colour close to the pane surface would otherwise make the label illegible. */
+  background: color-mix(in srgb, var(--cal-accent, oklch(var(--p))) 16%, transparent);
+  color: oklch(var(--bc) / 0.75);
+  border-radius: 3px;
+  font-size: calc(10px * var(--cal-scale, 1));
   text-align: left;
   padding: 0 5px;
   cursor: pointer;
@@ -1657,16 +1678,17 @@ body,
 .cal-event {
   display: flex;
   gap: 10px;
-  padding: 8px 12px;
+  padding: calc(8px * var(--cal-scale, 1)) 12px;
   border-bottom: 1px solid oklch(var(--bc) / 0.06);
+  border-left: 3px solid color-mix(in srgb, var(--cal-accent, oklch(var(--p))) 60%, transparent);
   cursor: pointer;
 }
 .cal-event:hover {
   background: oklch(var(--bc) / 0.06);
 }
 .cal-event.selected {
-  background: oklch(var(--p) / 0.16);
-  box-shadow: inset 3px 0 0 oklch(var(--p));
+  background: color-mix(in srgb, var(--cal-accent, oklch(var(--p))) 16%, transparent);
+  border-left-color: var(--cal-accent, oklch(var(--p)));
 }
 .cal-event.cancelled .cal-ev-subject {
   text-decoration: line-through;
@@ -1674,8 +1696,8 @@ body,
 }
 .cal-ev-time {
   flex-shrink: 0;
-  width: 56px;
-  font-size: 12px;
+  width: calc(56px * var(--cal-scale, 1));
+  font-size: calc(12px * var(--cal-scale, 1));
   font-variant-numeric: tabular-nums;
   color: oklch(var(--bc) / 0.7);
   padding-top: 1px;
@@ -1685,14 +1707,14 @@ body,
 }
 .cal-ev-subject {
   display: block;
-  font-size: 13px;
+  font-size: calc(13px * var(--cal-scale, 1));
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
 .cal-ev-loc {
   display: block;
-  font-size: 11px;
+  font-size: calc(11px * var(--cal-scale, 1));
   color: oklch(var(--bc) / 0.5);
   white-space: nowrap;
   overflow: hidden;
