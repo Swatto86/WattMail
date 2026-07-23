@@ -596,21 +596,69 @@ export async function loadCalendar(): Promise<void> {
 }
 
 // ---- Agenda rendering ----
+// The local day keys an event covers, clamped to [windowStartKey, windowEndKey].
+//
+// A multi-day event must appear on EVERY day it spans, not just its start — so a
+// three-day trip fills all three cells. All-day DTEND is the exclusive next
+// midnight, so the last day it touches is one before it; a timed event ending
+// exactly at midnight likewise doesn't reach into the next day.
+function coveredDayKeys(
+  ev: CalendarEvent,
+  windowStartKey: string,
+  windowEndKey: string,
+): string[] {
+  const start = parseLocal(ev.start, ev.startZone, ev.isAllDay);
+  if (isNaN(start.getTime())) return [];
+  let end = parseLocal(ev.end, ev.endZone, ev.isAllDay);
+  if (isNaN(end.getTime())) end = start;
+  let last = end;
+  if (ev.isAllDay) {
+    last = addDays(end, -1);
+  } else if (
+    end.getTime() > start.getTime() &&
+    end.getHours() === 0 &&
+    end.getMinutes() === 0 &&
+    end.getSeconds() === 0
+  ) {
+    last = addDays(end, -1);
+  }
+
+  const lastKey = dayKey(last);
+  const keys: string[] = [];
+  // Start the walk at the window, not the event's true start: a long event (a
+  // multi-year assignment) that began well before the window would otherwise
+  // spend the whole iteration budget crossing the pre-window gap and reach no
+  // visible day at all. The window is at most MONTH_GRID_DAYS wide, so the guard
+  // now only has to cover the window itself.
+  let day = startOfDay(start);
+  if (dayKey(day) < windowStartKey) {
+    const [y, m, d] = windowStartKey.split("-").map(Number);
+    day = new Date(y, m - 1, d);
+  }
+  for (let guard = 0; guard < 400; guard++) {
+    const key = dayKey(day);
+    if (key > windowEndKey) break;
+    if (key >= windowStartKey && key <= lastKey) keys.push(key);
+    if (key >= lastKey) break;
+    day = addDays(day, 1);
+  }
+  return keys;
+}
+
 function renderAgenda(start: Date): void {
-  // Bucket events by their start day (local). An event that started before the
-  // visible window (an ongoing multi-day vacation/conference) is clamped to the
-  // first window day so it still shows — otherwise its off-window start-day key
-  // matches no rendered day and the event silently disappears.
+  // Each event is bucketed onto every visible day it covers (see coveredDayKeys)
+  // — so an ongoing multi-day event shows on each of its days rather than only
+  // its start, and one that began before the window still appears on the days it
+  // reaches into.
   const windowStartKey = dayKey(start);
+  const windowEndKey = dayKey(addDays(start, RANGE_DAYS - 1));
   const byDay = new Map<string, CalendarEvent[]>();
   for (const ev of events) {
-    const d = parseLocal(ev.start, ev.startZone, ev.isAllDay);
-    if (isNaN(d.getTime())) continue;
-    let key = dayKey(d);
-    if (key < windowStartKey) key = windowStartKey;
-    const list = byDay.get(key) ?? [];
-    list.push(ev);
-    byDay.set(key, list);
+    for (const key of coveredDayKeys(ev, windowStartKey, windowEndKey)) {
+      const list = byDay.get(key) ?? [];
+      list.push(ev);
+      byDay.set(key, list);
+    }
   }
 
   let html = "";
@@ -667,18 +715,17 @@ function eventRowHtml(ev: CalendarEvent): string {
 // ---- Month grid rendering ----
 function renderMonth(gridStart: Date): void {
   const month = monthFirst(rangeStart).getMonth();
-  // Same clamp as the agenda: an event that started before the grid window
-  // (an ongoing multi-day stay) lands on the first cell instead of vanishing.
+  // Each event fills every grid cell it covers (see coveredDayKeys), so a
+  // multi-day event spans its days instead of showing only on the first.
   const gridStartKey = dayKey(gridStart);
+  const gridEndKey = dayKey(addDays(gridStart, MONTH_GRID_DAYS - 1));
   const byDay = new Map<string, CalendarEvent[]>();
   for (const ev of events) {
-    const d = parseLocal(ev.start, ev.startZone, ev.isAllDay);
-    if (isNaN(d.getTime())) continue;
-    let key = dayKey(d);
-    if (key < gridStartKey) key = gridStartKey;
-    const list = byDay.get(key) ?? [];
-    list.push(ev);
-    byDay.set(key, list);
+    for (const key of coveredDayKeys(ev, gridStartKey, gridEndKey)) {
+      const list = byDay.get(key) ?? [];
+      list.push(ev);
+      byDay.set(key, list);
+    }
   }
   const todayKey = dayKey(startOfToday());
 
@@ -747,11 +794,14 @@ function selectEvent(id: string): void {
   const ev = events.find((e) => e.id === id);
   if (!ev) return;
   selectedId = id;
-  // Update selection highlight without a full agenda re-render.
+  // Update selection highlight without a full agenda re-render. A multi-day
+  // event renders one node per covered day, so highlight ALL of them (a full
+  // render already does, via the per-node `selected` ternary) — not just the
+  // first, which would light up the wrong day.
   agendaEl.querySelectorAll(".cal-event.selected").forEach((el) => el.classList.remove("selected"));
   agendaEl
-    .querySelector<HTMLElement>(`.cal-event[data-id="${cssEscape(id)}"]`)
-    ?.classList.add("selected");
+    .querySelectorAll<HTMLElement>(`.cal-event[data-id="${cssEscape(id)}"]`)
+    .forEach((el) => el.classList.add("selected"));
   renderDetail(ev);
 }
 
@@ -919,18 +969,40 @@ function renderDetail(ev: CalendarEvent): void {
   });
 }
 
+// Resolve the detail pane's surface + text colours to concrete rgb, so the
+// body iframe (which has no DaisyUI tokens of its own) can match them. A
+// throwaway probe lets the browser evaluate the oklch(var(--…)) expressions.
+function paneColors(): { bg: string; fg: string; link: string } {
+  const probe = document.createElement("span");
+  probe.style.cssText =
+    "color:oklch(var(--bc));background:oklch(var(--b1));position:absolute;left:-9999px";
+  document.body.appendChild(probe);
+  const cs = getComputedStyle(probe);
+  const dark = document.documentElement.dataset.theme !== "corporate";
+  const colors = {
+    fg: cs.color || (dark ? "#d6d6d6" : "#1f2937"),
+    bg: cs.backgroundColor || (dark ? "#1d232a" : "#ffffff"),
+    link: dark ? "#7cb3ff" : "#1d4ed8",
+  };
+  probe.remove();
+  return colors;
+}
+
 function renderBodyIframe(container: HTMLElement, html: string): void {
   const iframe = document.createElement("iframe");
   iframe.className = "cal-body-frame";
   // allow-same-origin (so we can auto-size + intercept links) but NOT
   // allow-scripts, so no JS in the body can ever run.
   iframe.setAttribute("sandbox", "allow-same-origin");
-  const dark = document.documentElement.dataset.theme !== "corporate";
-  const color = dark ? "#d6d6d6" : "#1f2937";
-  const linkColor = dark ? "#7cb3ff" : "#1d4ed8";
+  // Set the background EXPLICITLY, not `transparent`: a sandboxed srcdoc iframe
+  // is painted on an opaque white layer by WebView2, so a transparent body left
+  // the light-on-dark description text unreadable (grey on white). The pane's
+  // own DaisyUI tokens (resolved to concrete rgb here — the iframe has no access
+  // to them) make it sit seamlessly on the detail surface in either theme.
+  const pane = paneColors();
   iframe.srcdoc = `<!doctype html><html><head><meta charset="utf-8"><base target="_blank"><style>
-    html,body{margin:0;padding:0;background:transparent;color:${color};font:13px/1.5 -apple-system,'Segoe UI',system-ui,sans-serif;word-wrap:break-word;overflow-wrap:anywhere}
-    a{color:${linkColor}} img{max-width:100%;height:auto} table{max-width:100%}
+    html,body{margin:0;padding:0;background:${pane.bg};color:${pane.fg};font:13px/1.5 -apple-system,'Segoe UI',system-ui,sans-serif;word-wrap:break-word;overflow-wrap:anywhere}
+    a{color:${pane.link}} img{max-width:100%;height:auto} table{max-width:100%}
   </style></head><body>${html}</body></html>`;
   iframe.addEventListener("load", () => {
     try {

@@ -101,6 +101,36 @@ Entra app registration (public, not secret):
 
 ## Progress log
 
+### 2026-07-23 — Calendar display fixes: multi-day span + readable description (v0.8.1)
+
+Two bugs found on the first live exercise of the iCloud write path (both
+pre-existing and provider-agnostic, surfaced by a real multi-day iCloud event):
+
+- **Multi-day events now span every day they cover.** `renderAgenda`/`renderMonth`
+  bucketed each event by its *start* day only, so a 1–3 Aug all-day trip appeared
+  only on the 1st. New `coveredDayKeys(ev, windowStart, windowEnd)` returns every
+  local day an event touches (all-day `DTEND` is the exclusive next midnight, so
+  the last day is one before it; a timed event ending exactly at local midnight
+  doesn't reach the next day), clamped to the visible window — the walk starts at
+  the window, not the event's true start, so a long-running event can't exhaust
+  the iteration guard before reaching a visible day. Replaces the old
+  clamp-onto-first-day hack. `selectEvent` now highlights every rendered instance
+  of a spanning event, not just the first.
+- **Event description is readable again.** The detail-pane body iframe used
+  `background:transparent`, which WebView2 paints as an opaque white layer, so the
+  theme-aware light text rendered grey-on-white. New `paneColors()` resolves the
+  DaisyUI `--b1`/`--bc` tokens to concrete rgb (as the mail reader does) and the
+  iframe now uses them explicitly, so the description sits on the pane surface in
+  both light and dark themes.
+
+Reviewed through three lenses (coverage edges, render regressions, theme/contrast)
+with every finding independently verified — two confirmed and fixed (the
+long-event guard exhaustion and the single-instance highlight), both pinned by a
+node check. 129 tests, `verify.sh` green. **A single connected multi-day *bar*
+(iOS-style) is deliberately not attempted** — the event now shows as a pill in
+each covered cell, which fixes the "doesn't appear on days 2–3" defect; a true
+spanning bar is a larger month-grid layout change left for later.
+
 ### 2026-07-23 — iCloud calendars: create / edit / delete / RSVP (Milestone 2) (v0.8.0)
 
 **The write path for iCloud CalDAV — iPhone-parity event authoring with emoji
