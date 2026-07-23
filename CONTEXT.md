@@ -1922,3 +1922,12 @@ The full design + implementation notes — crate choices, the credential seam, t
 `UIDVALIDITY`/sync model, the SMTP path, and the adversarial-review fixes — live in
 **that branch's `CONTEXT.md`**, not duplicated here. To resume generic-IMAP support:
 merge the branch, live-test, then release.
+
+## Operational notes (migrated from mem0, 2026-07-23)
+
+_Facts recovered from the decommissioned shared mem0 store. May overlap existing docs above; integrate/prune as you touch these areas._
+
+### wattmail-eml-export
+
+WattMail v0.2.5 supports saving messages as `.eml` using its MailProvider, Graph/OData, and RFC 5322/MIME paths. EML is compatible with clients such as Outlook, Thunderbird, and Apple Mail; MSG export is deferred/backlog. Why: prefer EML as the supported export path unless the user explicitly asks for MSG.
+
