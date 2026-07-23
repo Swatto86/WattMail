@@ -386,6 +386,24 @@ fn event_payload(event: &NewEvent, tz: &str) -> serde_json::Value {
         "isAllDay": event.is_all_day,
         "location": { "displayName": event.location },
     });
+    let object = payload
+        .as_object_mut()
+        .expect("json! built an object above");
+    // The reminder state is sent explicitly: the edit form always prefills the
+    // Alert control from the event's current value, so it reflects the whole
+    // intended state — `None` means the user chose no alert and must clear it
+    // (and stop Outlook applying its own default on a new event), not "leave
+    // whatever is there".
+    object.insert(
+        "isReminderOn".to_string(),
+        serde_json::Value::Bool(event.reminder_minutes_before_start.is_some()),
+    );
+    if let Some(minutes) = event.reminder_minutes_before_start {
+        object.insert(
+            "reminderMinutesBeforeStart".to_string(),
+            serde_json::Value::from(minutes),
+        );
+    }
     if let Some(list) = &event.attendees {
         let attendees: Vec<serde_json::Value> = list
             .iter()
@@ -398,10 +416,7 @@ fn event_payload(event: &NewEvent, tz: &str) -> serde_json::Value {
                 })
             })
             .collect();
-        payload
-            .as_object_mut()
-            .expect("json! built an object above")
-            .insert("attendees".to_string(), serde_json::Value::Array(attendees));
+        object.insert("attendees".to_string(), serde_json::Value::Array(attendees));
     }
     payload
 }
@@ -903,6 +918,7 @@ mod tests {
             location: "Room 2".into(),
             body_html: "<p>Notes</p>".into(),
             attendees: Some(vec!["a@x.io".into(), " ".into(), "b@y.io".into()]),
+            reminder_minutes_before_start: Some(15),
         };
         let json = event_payload(&event, "Europe/London");
         assert_eq!(json["subject"], "Standup");
@@ -924,6 +940,41 @@ mod tests {
         };
         let json = event_payload(&untouched, "Europe/London");
         assert!(json.get("attendees").is_none());
+    }
+
+    #[test]
+    fn reminder_state_is_sent_explicitly_so_it_can_be_cleared() {
+        let base = NewEvent {
+            subject: "X".into(),
+            start: EventDateTime {
+                date_time: "2026-07-13T09:00:00".into(),
+                time_zone: "Europe/London".into(),
+            },
+            end: EventDateTime {
+                date_time: "2026-07-13T10:00:00".into(),
+                time_zone: "Europe/London".into(),
+            },
+            is_all_day: false,
+            location: String::new(),
+            body_html: String::new(),
+            attendees: None,
+            reminder_minutes_before_start: Some(30),
+        };
+        let on = event_payload(&base, "Europe/London");
+        assert_eq!(on["isReminderOn"], true);
+        assert_eq!(on["reminderMinutesBeforeStart"], 30);
+
+        // None must send isReminderOn:false — otherwise an edit can't turn a
+        // reminder off, and a new event silently inherits Outlook's default.
+        let off = event_payload(
+            &NewEvent {
+                reminder_minutes_before_start: None,
+                ..base
+            },
+            "Europe/London",
+        );
+        assert_eq!(off["isReminderOn"], false);
+        assert!(off.get("reminderMinutesBeforeStart").is_none());
     }
 
     #[test]

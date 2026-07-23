@@ -7,5 +7,6 @@
 pub mod calendar;
 pub mod civil;
 pub mod dav;
+pub mod emit;
 pub mod ical;
 pub mod rrule;

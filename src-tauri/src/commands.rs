@@ -1736,6 +1736,10 @@ pub struct NewEventDto {
     /// `None`/`null` = don't touch the attendee list (update keeps the
     /// existing collection with its optional/required types intact).
     pub attendees: Option<Vec<String>>,
+    /// Minutes before start for the reminder, `None` for no reminder,
+    /// `Some(0)` = at the time of the event.
+    #[serde(default)]
+    pub reminder_minutes: Option<u32>,
 }
 
 fn new_event_from_dto(event: NewEventDto, time_zone: &str) -> NewEvent {
@@ -1753,6 +1757,7 @@ fn new_event_from_dto(event: NewEventDto, time_zone: &str) -> NewEvent {
         location: event.location,
         body_html: event.body_html,
         attendees: event.attendees,
+        reminder_minutes_before_start: event.reminder_minutes,
     }
 }
 

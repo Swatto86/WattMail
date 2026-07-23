@@ -5,7 +5,7 @@
 > new milestone state, a decision made/reversed, or an open question resolved.
 > Keep newest progress entries at the top of the log.
 >
-> **Last updated:** 2026-07-22
+> **Last updated:** 2026-07-23
 
 ---
 
@@ -22,7 +22,7 @@ but macOS/Linux are compile-gated in CI only — never built into a bundle or ru
 
 **Provider status (v0.7.0):** **iCloud** = calendar-only over CalDAV, always
 offered (the user supplies their own app-specific password, so there is nothing
-to pre-configure); read-only until milestone 2. Earlier status below.
+to pre-configure); read-only until milestone 2. **v0.8.0: milestone 2 shipped** — create/edit/delete/RSVP with emoji + reminders. Earlier status below.
 
 **Provider status (v0.1.20):** Office 365 = live/configured (real client+tenant ids in
 `accounts.rs`). Outlook.com + Gmail = code-complete but **gated off** by
@@ -100,6 +100,68 @@ Entra app registration (public, not secret):
 ---
 
 ## Progress log
+
+### 2026-07-23 — iCloud calendars: create / edit / delete / RSVP (Milestone 2) (v0.8.0)
+
+**The write path for iCloud CalDAV — iPhone-parity event authoring with emoji
+and reminders.** Milestone 1 (read-only, v0.7.0) is live-verified; this makes
+iCloud calendars fully editable, behind the same `CalendarProvider` contract.
+
+- **New `crates/infrastructure/src/icloud/emit.rs`** — an iCalendar *writer* (the
+  read side never needed one). RFC 5545 line folding by **octet**, breaking only
+  on a character boundary, so an emoji-filled title round-trips byte-identical;
+  TEXT escaping and RFC 6868 parameter encoding. `ical.rs` gained a
+  builder/mutator API on `Component`/`Property`.
+- **create / update / delete / respond** in `icloud/calendar.rs`, over
+  `PUT`/`DELETE` with `If-None-Match: *` (create) and `If-Match: <etag>`
+  (update). An **update round-trips the resource** — GET, parse, mutate only the
+  edited fields, re-emit the whole VCALENDAR — so `ORGANIZER`, `RRULE`,
+  `VTIMEZONE` and `X-*` extensions survive an edit untouched. Deleting one
+  occurrence of a series writes an `EXDATE` (and drops any override) rather than
+  removing the whole resource; RSVP sets the user's own `ATTENDEE` `PARTSTAT` and
+  relies on iCloud's RFC 6638 implicit scheduling to send the iTIP reply.
+- **No timezone database in Rust still holds.** Writes are the mirror of reads:
+  the **frontend** converts a timed event's local wall clock to a UTC instant
+  (its `Intl` data) before sending, so the emitter only ever writes `…Z` or a
+  date-only all-day value — never a bare `TZID` needing a `VTIMEZONE`. Verified
+  round-trip: a New York 2pm event → `18:00Z` on the wire → displays back as 2pm.
+- **Reminders** end to end: `NewEvent.reminder_minutes_before_start` → a `VALARM`
+  (iCloud) and `isReminderOn`/`reminderMinutesBeforeStart` (Graph, now sent
+  *explicitly* so an edit can turn a reminder off); an iPhone-style preset picker
+  in the modal that snaps an off-preset lead to the nearest option but never
+  rewrites an untouched one.
+- **Affordances** now reflect real capability: `is_organizer` from the actual
+  `ORGANIZER` (a personal event with none is yours to edit), `can_respond` for
+  genuine invitees, and calendar `can_edit` from `current-user-privilege-set`, so
+  a subscribed holiday feed offers no "new event".
+
+**Adversarial write-path sweep before release** — 5 lenses, every finding
+independently refuted or confirmed; 8 confirmed and fixed:
+- **A moved occurrence's event id embedded its new time, not its `RECURRENCE-ID`**
+  — so deleting/RSVPing to a rescheduled occurrence wrote an `EXDATE` the
+  server's `RRULE` never generates (a silent no-op that resurrected the event on
+  other devices). The id now carries the original slot, distinct from the display
+  start.
+- **Editing attendees reset everyone's `PARTSTAT`** (re-firing invitations) and
+  dropped display names — now the entry for any retained address is preserved.
+- A control character in an attendee address could inject an iCalendar line — now
+  filtered at the trust boundary.
+- `create`'s target calendar (from localStorage) bypassed the Apple-domain guard
+  that `update`/`delete`/`respond` use — a tampered selection could have sent the
+  app-specific password off-domain. Now guarded on every path.
+- Graph: a reminder could never be turned *off* (keys omitted when `None`); new
+  Graph events silently inherited Outlook's default alert.
+- Plus: multiple/structurally-different `VALARM`s preserved across an edit, a
+  friendlier message on a 409/412 write conflict, and the reminder-snap made
+  non-destructive.
+
+**Verification level: compile + unit tests only.** 129 tests, `verify.sh` green.
+The write path has **never touched a live iCloud server** — create/update/delete/
+RSVP, `If-Match` handling and implicit-scheduling replies are all unexercised.
+Live sanity list: create an event with an emoji title and a 15-minute alert;
+confirm it and its reminder appear on iPhone; edit its time and title; delete it;
+delete one occurrence of a recurring series (the rest must stay, on iPhone too);
+RSVP to an invitation; confirm a subscribed calendar offers no "new event".
 
 ### 2026-07-22 — iCloud calendars over CalDAV (read-only milestone) (v0.7.0)
 

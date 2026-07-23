@@ -36,7 +36,7 @@ pub const PROPFIND_CALENDAR_HOME: &str = r#"<?xml version="1.0" encoding="UTF-8"
 /// that does not know a requested property simply reports it as 404 inside its
 /// own `propstat` block, so asking costs nothing.
 pub const PROPFIND_CALENDARS: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
-<D:propfind xmlns:D="DAV:" xmlns:C="urn:ietf:params:xml:ns:caldav" xmlns:CS="http://calendarserver.org/ns/" xmlns:A="http://apple.com/ns/ical/"><D:prop><D:resourcetype/><D:displayname/><A:calendar-color/><C:supported-calendar-component-set/><CS:getctag/></D:prop></D:propfind>"#;
+<D:propfind xmlns:D="DAV:" xmlns:C="urn:ietf:params:xml:ns:caldav" xmlns:CS="http://calendarserver.org/ns/" xmlns:A="http://apple.com/ns/ical/"><D:prop><D:resourcetype/><D:displayname/><A:calendar-color/><C:supported-calendar-component-set/><CS:getctag/><D:current-user-privilege-set/></D:prop></D:propfind>"#;
 
 /// `REPORT calendar-query` body selecting every VEVENT overlapping a window.
 ///
@@ -77,6 +77,10 @@ pub struct DavResponse {
     pub principal_href: Option<String>,
     /// The href inside `<C:calendar-home-set>`.
     pub home_href: Option<String>,
+    /// Whether the server returned a `current-user-privilege-set` at all.
+    pub privileges_reported: bool,
+    /// Whether that set granted a write privilege.
+    pub can_write: bool,
 }
 
 impl DavResponse {
@@ -86,6 +90,14 @@ impl DavResponse {
         self.resource_types
             .iter()
             .any(|(ns, name)| ns == NS_CALDAV && name == "calendar")
+    }
+
+    /// Whether new events can be created here. A subscribed feed (a holiday
+    /// calendar) reports a privilege set without write; a calendar that omits
+    /// the property is assumed writable, so an owned calendar is never hidden
+    /// just because the server was terse.
+    pub fn writable(&self) -> bool {
+        !self.privileges_reported || self.can_write
     }
 
     /// True when the collection accepts `VEVENT`.
@@ -207,6 +219,19 @@ fn collect_marker(
                 current.components.push(value.into_owned());
             }
         }
+    }
+    // Writability, from `current-user-privilege-set`. Its presence alone marks
+    // the server as having reported privileges; a `write` (or blanket `all`)
+    // privilege inside it grants creation.
+    if namespace == NS_DAV && local == "current-user-privilege-set" {
+        current.privileges_reported = true;
+    }
+    let in_privilege = path.iter().any(|(ns, l)| ns == NS_DAV && l == "privilege");
+    if in_privilege
+        && namespace == NS_DAV
+        && matches!(local, "write" | "write-content" | "all" | "bind")
+    {
+        current.can_write = true;
     }
 }
 
@@ -384,6 +409,33 @@ mod tests {
         assert_eq!(home.color.as_deref(), Some("#34AADC"));
         assert_eq!(home.ctag.as_deref(), Some("HwoQEgwAAAh4"));
         assert_eq!(home.components, ["VEVENT"]);
+    }
+
+    #[test]
+    fn writability_comes_from_the_privilege_set() {
+        // An owned calendar: privilege set present, with write.
+        let owned = r#"<multistatus xmlns="DAV:">
+  <response><href>/c/own/</href><propstat><prop>
+    <current-user-privilege-set>
+      <privilege><read/></privilege>
+      <privilege><write/></privilege>
+    </current-user-privilege-set>
+  </prop></propstat></response></multistatus>"#;
+        assert!(parse_multistatus(owned).unwrap()[0].writable());
+
+        // A subscribed feed: privileges reported, but read-only.
+        let subscribed = r#"<multistatus xmlns="DAV:">
+  <response><href>/c/holidays/</href><propstat><prop>
+    <current-user-privilege-set>
+      <privilege><read/></privilege>
+    </current-user-privilege-set>
+  </prop></propstat></response></multistatus>"#;
+        assert!(!parse_multistatus(subscribed).unwrap()[0].writable());
+
+        // A server that omits the property is assumed writable.
+        let terse = r#"<multistatus xmlns="DAV:">
+  <response><href>/c/x/</href><propstat><prop><displayname>X</displayname></prop></propstat></response></multistatus>"#;
+        assert!(parse_multistatus(terse).unwrap()[0].writable());
     }
 
     #[test]

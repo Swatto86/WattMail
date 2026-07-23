@@ -825,6 +825,9 @@ pub struct NewEvent {
     /// the existing attendees (and their optional/required types and display
     /// names) exactly as they are; on create it means no attendees.
     pub attendees: Option<Vec<String>>,
+    /// Minutes before `start` at which a reminder should fire, or `None` for no
+    /// reminder. `Some(0)` means "at the time of the event".
+    pub reminder_minutes_before_start: Option<u32>,
 }
 
 /// The meeting invitation carried by a mail message, linking to the calendar

@@ -94,6 +94,9 @@ let selectedCalendarId: string | null = null;
 // button and the picker's own change handler know which account's selection
 // to persist without main.ts having to thread it through every call.
 let activeAccountId: string | null = null;
+// The active account's provider slug. iCloud (CalDAV) has no server-side zone
+// conversion, so its writes are converted to UTC here before they are sent.
+let activeProviderSlug = "";
 
 // Create-event modal refs (built once, appended to <body>).
 let eventOverlay: HTMLDivElement;
@@ -107,6 +110,7 @@ let evEndTime: HTMLInputElement;
 let evLocation: HTMLInputElement;
 let evAttendees: HTMLInputElement;
 let evBody: HTMLTextAreaElement;
+let evReminder: HTMLSelectElement;
 let evMsg: HTMLDivElement;
 let evSave: HTMLButtonElement;
 // The event being edited (null = the modal is creating a new event). While
@@ -120,6 +124,12 @@ let editingBodyHtml = "";
 // sends attendees=null so the server keeps the existing collection (with each
 // attendee's optional/required type and display name intact).
 let editingAttendeesBaseline = "";
+// The reminder as prefilled: the exact original minutes and the snapped select
+// value at open. If the user never touches Alert, the exact original is sent
+// back unchanged, so editing a title never silently rounds a 10-minute reminder
+// down to the nearest preset.
+let editingReminderMinutes: number | null = null;
+let editingReminderBaseline = "";
 // The two time <input>s only — hidden in all-day mode. NOT their .settings-row,
 // which also wraps the date pickers (those must stay visible for all-day events).
 let evTimeInputs: HTMLInputElement[] = [];
@@ -478,7 +488,8 @@ function selectedCalendarCanEdit(): boolean {
 // it. Called once per account activation (main.ts) and from the refresh
 // button below — NOT on prev/next/today, which would otherwise hit the
 // backend for a list that essentially never changes mid-session.
-export async function loadCalendars(accountId: string): Promise<void> {
+export async function loadCalendars(accountId: string, providerSlug = ""): Promise<void> {
+  activeProviderSlug = providerSlug;
   // The backend resolves `list_calendars` against whatever account is active
   // when it runs, so a slow reply for the account we just left would otherwise
   // overwrite the new one's list — and send its calendar id to the wrong
@@ -512,7 +523,7 @@ export async function loadCalendars(accountId: string): Promise<void> {
 }
 
 async function refreshCalendars(): Promise<void> {
-  if (activeAccountId) await loadCalendars(activeAccountId);
+  if (activeAccountId) await loadCalendars(activeAccountId, activeProviderSlug);
   await loadCalendar();
 }
 
@@ -974,11 +985,28 @@ async function respond(id: string, response: string): Promise<void> {
   }
 }
 
+// A CalDAV write conflict (the event changed on another device since it was
+// loaded) comes back as a 409/412 provider error — say something the user can
+// act on rather than dumping the raw status line.
+function conflictMessage(e: unknown, prefix: string): string {
+  const text = String(e);
+  if (/\((?:409|412)\)/.test(text)) {
+    return "This event changed on another device. Reload the calendar and try again.";
+  }
+  return `${prefix}: ${text}`;
+}
+
 async function deleteEvent(ev: CalendarEvent): Promise<void> {
-  const ok = await showConfirm(
-    `Delete "${ev.subject}"? This cancels the event for all attendees.`,
-    { title: "Delete event", okLabel: "Delete", danger: true },
-  );
+  // A recurring event's id addresses one occurrence, so deleting it removes
+  // just that occurrence (the backend writes an EXDATE) — say so plainly.
+  const prompt = ev.isRecurring
+    ? `Delete this occurrence of "${ev.subject}"? The rest of the series stays.`
+    : `Delete "${ev.subject}"? This cancels the event for all attendees.`;
+  const ok = await showConfirm(prompt, {
+    title: "Delete event",
+    okLabel: "Delete",
+    danger: true,
+  });
   if (!ok) return;
   const msg = detailEl.querySelector<HTMLDivElement>("#cal-detail-msg");
   if (msg) msg.textContent = "Deleting…";
@@ -988,7 +1016,7 @@ async function deleteEvent(ev: CalendarEvent): Promise<void> {
     selectedId = null;
     await loadCalendar();
   } catch (e) {
-    if (msg) msg.textContent = `Could not delete event: ${String(e)}`;
+    if (msg) msg.textContent = conflictMessage(e, "Could not delete event");
     setDetailActionsDisabled(false);
   }
 }
@@ -1007,6 +1035,18 @@ function buildEventModal(): void {
       <label class="settings-row"><span>End</span><span class="ev-when"><input type="date" id="ev-end-date" class="input input-bordered input-sm" /><input type="time" id="ev-end-time" class="input input-bordered input-sm ev-time" /></span></label>
       <input id="ev-location" class="input input-bordered input-sm compose-input" placeholder="Location" autocomplete="off" />
       <input id="ev-attendees" class="input input-bordered input-sm compose-input" placeholder="Attendees (comma-separated emails)" autocomplete="off" />
+      <label class="settings-row"><span>Alert</span><select id="ev-reminder" class="select select-bordered select-sm">
+        <option value="">None</option>
+        <option value="0">At time of event</option>
+        <option value="5">5 minutes before</option>
+        <option value="15">15 minutes before</option>
+        <option value="30">30 minutes before</option>
+        <option value="60">1 hour before</option>
+        <option value="120">2 hours before</option>
+        <option value="1440">1 day before</option>
+        <option value="2880">2 days before</option>
+        <option value="10080">1 week before</option>
+      </select></label>
       <textarea id="ev-body" class="textarea textarea-bordered ev-body" placeholder="Description"></textarea>
       <div id="ev-msg" class="settings-msg"></div>
       <div class="settings-actions" style="gap: 8px">
@@ -1026,6 +1066,7 @@ function buildEventModal(): void {
   evLocation = eventOverlay.querySelector<HTMLInputElement>("#ev-location")!;
   evAttendees = eventOverlay.querySelector<HTMLInputElement>("#ev-attendees")!;
   evBody = eventOverlay.querySelector<HTMLTextAreaElement>("#ev-body")!;
+  evReminder = eventOverlay.querySelector<HTMLSelectElement>("#ev-reminder")!;
   evMsg = eventOverlay.querySelector<HTMLDivElement>("#ev-msg")!;
   evSave = eventOverlay.querySelector<HTMLButtonElement>("#ev-save")!;
   evTimeInputs = [evStartTime, evEndTime];
@@ -1074,6 +1115,10 @@ function openEventModal(ev?: CalendarEvent): void {
   editingBodyHtml = ev?.bodyHtml ?? "";
   editingBodyText = ev ? htmlToPlainText(ev.bodyHtml) : "";
   evBody.value = editingBodyText;
+  // Reminders are one of the exact iPhone presets, or the closest below it.
+  editingReminderMinutes = ev?.reminderMinutes ?? null;
+  evReminder.value = ev && ev.reminderMinutes !== null ? nearestReminderPreset(ev.reminderMinutes) : "";
+  editingReminderBaseline = evReminder.value;
   evAllDay.checked = ev?.isAllDay ?? false;
   reflectAllDay();
 
@@ -1124,6 +1169,28 @@ function plainToHtml(text: string): string {
   const trimmed = text.trim();
   if (!trimmed) return "";
   return `<p>${esc(trimmed).replace(/\r?\n/g, "<br>")}</p>`;
+}
+
+// A local wall-clock string -> the same instant written as a UTC wall clock
+// ("YYYY-MM-DDTHH:MM:SS"), for a provider that stores times in UTC.
+function toUtcWallClock(localWall: string): string {
+  const d = zonedWallClockToInstant(localWall, IANA_ZONE);
+  return (
+    `${d.getUTCFullYear()}-${pad(d.getUTCMonth() + 1)}-${pad(d.getUTCDate())}` +
+    `T${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())}:${pad(d.getUTCSeconds())}`
+  );
+}
+
+// The reminder <select> only offers a fixed set of leads; an event authored
+// elsewhere may use any minute count, so snap it to the closest option at or
+// below it (never inventing an earlier alert than the user set).
+const REMINDER_PRESETS = [0, 5, 15, 30, 60, 120, 1440, 2880, 10080];
+function nearestReminderPreset(minutes: number): string {
+  let best = 0;
+  for (const p of REMINDER_PRESETS) {
+    if (p <= minutes) best = p;
+  }
+  return String(best);
 }
 
 async function saveEvent(): Promise<void> {
@@ -1191,6 +1258,24 @@ async function saveEvent(): Promise<void> {
   // attendee collection — optional/required types and display names included —
   // instead of a wholesale replace that would flatten everyone to "required".
   const attendeesTouched = !editingId || evAttendees.value !== editingAttendeesBaseline;
+  const reminderRaw = evReminder.value;
+  // Untouched on an edit → send the exact original (unsnapped) value.
+  const reminderMinutes =
+    editingId && reminderRaw === editingReminderBaseline
+      ? editingReminderMinutes
+      : reminderRaw === ""
+        ? null
+        : Number(reminderRaw);
+
+  // iCloud (CalDAV) has no server-side zone conversion and the Rust side has no
+  // timezone database, so timed events are converted to a UTC instant here — the
+  // browser's IANA data does it. All-day dates carry no zone and are left alone.
+  let sendZone = IANA_ZONE;
+  if (activeProviderSlug === "icloud" && !allDay) {
+    start = toUtcWallClock(start);
+    end = toUtcWallClock(end);
+    sendZone = "UTC";
+  }
   const payload = {
     event: {
       subject,
@@ -1200,8 +1285,9 @@ async function saveEvent(): Promise<void> {
       location: evLocation.value.trim(),
       bodyHtml,
       attendees: attendeesTouched ? attendees : null,
+      reminderMinutes,
     },
-    timeZone: IANA_ZONE,
+    timeZone: sendZone,
   };
 
   evSave.disabled = true;
@@ -1219,7 +1305,7 @@ async function saveEvent(): Promise<void> {
     selectedId = saved.id;
     await loadCalendar();
   } catch (e) {
-    evMsg.textContent = `Could not ${editingId ? "save" : "create"} event: ${String(e)}`;
+    evMsg.textContent = conflictMessage(e, `Could not ${editingId ? "save" : "create"} event`);
   } finally {
     evSave.disabled = false;
   }

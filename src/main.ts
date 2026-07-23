@@ -3141,9 +3141,11 @@ async function loadActiveAccount(): Promise<void> {
   // nav, and reconcile the persisted per-account choice before anything reads
   // selectedCalendarId (the reminder loop and the view load right below both do).
   if (calendarSupported) {
-    const activeId = accountList.find((a) => a.active)?.id ?? null;
+    const active = accountList.find((a) => a.active);
+    const activeId = active?.id ?? null;
     if (activeId) {
-      const listing = loadCalendars(activeId);
+      // The provider decides whether calendar writes convert to UTC first.
+      const listing = loadCalendars(activeId, active?.provider ?? "");
       // Only the calendar view needs the list before it renders. A mail-first
       // account must not sit through an extra round trip before its mailbox
       // starts loading; until the listing lands it simply reads the account's

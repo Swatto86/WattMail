@@ -26,6 +26,48 @@ pub struct Property {
 }
 
 impl Property {
+    /// A property carrying a plain text value, which is RFC 5545-escaped into the
+    /// wire form here. Use this for anything the user typed (SUMMARY, LOCATION, …)
+    /// — including emoji, which pass through untouched as UTF-8.
+    pub fn plain(name: &str, value: &str) -> Self {
+        Self {
+            name: name.to_ascii_uppercase(),
+            params: Vec::new(),
+            value: escape_text(value),
+        }
+    }
+
+    /// A property whose value is already in wire form (a compact date-time, a
+    /// URI, a `mailto:` address) and must not be re-escaped.
+    pub fn raw(name: &str, value: &str) -> Self {
+        Self {
+            name: name.to_ascii_uppercase(),
+            params: Vec::new(),
+            value: value.to_string(),
+        }
+    }
+
+    /// Add a parameter (builder style). The value is stored decoded; the emitter
+    /// re-quotes and RFC 6868-encodes it as needed.
+    pub fn with_param(mut self, key: &str, value: &str) -> Self {
+        self.params
+            .push((key.to_ascii_uppercase(), value.to_string()));
+        self
+    }
+
+    /// Replace (or add) a parameter in place — for editing a parsed property,
+    /// e.g. flipping an attendee's `PARTSTAT` on RSVP.
+    pub fn set_param(&mut self, key: &str, value: &str) {
+        let key = key.to_ascii_uppercase();
+        self.params.retain(|(k, _)| *k != key);
+        self.params.push((key, value.to_string()));
+    }
+
+    /// The parameters, for the emitter.
+    pub fn params(&self) -> &[(String, String)] {
+        &self.params
+    }
+
     /// The value of parameter `name` (case-insensitive), if present.
     pub fn param(&self, name: &str) -> Option<&str> {
         self.params
@@ -55,6 +97,53 @@ pub struct Component {
 }
 
 impl Component {
+    /// An empty component of the given kind (`VEVENT`, `VALARM`, …).
+    pub fn new(name: &str) -> Self {
+        Self {
+            name: name.to_ascii_uppercase(),
+            properties: Vec::new(),
+            children: Vec::new(),
+        }
+    }
+
+    /// Append a property, keeping any existing ones of the same name (for the
+    /// repeatable ones — `ATTENDEE`, `EXDATE`).
+    pub fn push(&mut self, property: Property) -> &mut Self {
+        self.properties.push(property);
+        self
+    }
+
+    /// Replace every property named `property.name` with this one — for the
+    /// single-valued fields an edit overwrites (`SUMMARY`, `DTSTART`, …).
+    pub fn set(&mut self, property: Property) -> &mut Self {
+        self.properties.retain(|p| p.name != property.name);
+        self.properties.push(property);
+        self
+    }
+
+    /// Remove every property named `name` (case-insensitive).
+    pub fn remove(&mut self, name: &str) {
+        let name = name.to_ascii_uppercase();
+        self.properties.retain(|p| p.name != name);
+    }
+
+    /// Remove every direct child component named `name`.
+    pub fn remove_children(&mut self, name: &str) {
+        let name = name.to_ascii_uppercase();
+        self.children.retain(|c| c.name != name);
+    }
+
+    /// Keep only the direct children for which `keep` returns true.
+    pub fn retain_children(&mut self, keep: impl FnMut(&Component) -> bool) {
+        self.children.retain(keep);
+    }
+
+    /// Append a child component.
+    pub fn push_child(&mut self, child: Component) -> &mut Self {
+        self.children.push(child);
+        self
+    }
+
     /// The first property named `name`.
     pub fn get(&self, name: &str) -> Option<&Property> {
         self.properties.iter().find(|p| p.name == name)
@@ -312,6 +401,26 @@ fn unquote_param(raw: &str) -> String {
                 out.push(other);
             }
             None => out.push('^'),
+        }
+    }
+    out
+}
+
+/// Apply RFC 5545 TEXT escapes (the inverse of [`unescape_text`]): backslash,
+/// semicolon, comma and newline. The colon is deliberately not escaped — it is
+/// legal in a value — and every other character, emoji included, is a UTF-8
+/// passthrough.
+pub fn escape_text(plain: &str) -> String {
+    let mut out = String::with_capacity(plain.len());
+    for c in plain.chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            ';' => out.push_str("\\;"),
+            ',' => out.push_str("\\,"),
+            '\n' => out.push_str("\\n"),
+            // A lone carriage return is dropped; the pair is normalised to \n.
+            '\r' => {}
+            other => out.push(other),
         }
     }
     out
