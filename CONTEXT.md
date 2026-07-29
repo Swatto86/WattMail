@@ -5,7 +5,7 @@
 > new milestone state, a decision made/reversed, or an open question resolved.
 > Keep newest progress entries at the top of the log.
 >
-> **Last updated:** 2026-07-23
+> **Last updated:** 2026-07-29
 
 ---
 
@@ -100,6 +100,20 @@ Entra app registration (public, not secret):
 ---
 
 ## Progress log
+
+### 2026-07-29 — Reply send survives stale Graph message ids (v0.8.3)
+
+Microsoft Graph's default message ids can change when a message moves. A reply
+composed from a cached old id therefore failed at `createReply` with
+`ErrorItemNotFound`, even though the composed message itself was valid.
+
+The shared Graph `send_reply` boundary now falls back to normal `sendMail` when
+`createReply` explicitly returns 404. This loses conversation threading for that
+one reply but sends the user's complete message. The fallback happens only before
+a reply draft exists; throttling, authentication and ambiguous network/send
+failures still stop without retrying, preserving the existing duplicate-send
+protection. Regression test added; all four `verify.sh` commands green (130
+tests), and the unsigned Windows portable/NSIS package was produced locally.
 
 ### 2026-07-23 — Calendar: colour-by-calendar + adjustable text size (v0.8.2)
 
@@ -1930,4 +1944,3 @@ _Facts recovered from the decommissioned shared mem0 store. May overlap existing
 ### wattmail-eml-export
 
 WattMail v0.2.5 supports saving messages as `.eml` using its MailProvider, Graph/OData, and RFC 5322/MIME paths. EML is compatible with clients such as Outlook, Thunderbird, and Apple Mail; MSG export is deferred/backlog. Why: prefer EML as the supported export path unless the user explicitly asks for MSG.
-

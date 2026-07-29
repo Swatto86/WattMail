@@ -1027,8 +1027,15 @@ impl MailProvider for GraphClient {
             .send()
             .await
             .map_err(|e| MailError::Network(e.to_string()))?;
-        let draft: GraphCreatedDraft = check_status(response)
-            .await?
+        let response = match check_status(response).await {
+            Ok(response) => response,
+            // Graph's default message ids change when a message moves. If the
+            // cached reply target has gone stale, no reply draft was created,
+            // so a normal send is the safe, non-duplicating fallback.
+            Err(error) if reply_target_missing(&error) => return self.send_message(message).await,
+            Err(error) => return Err(error),
+        };
+        let draft: GraphCreatedDraft = response
             .json()
             .await
             .map_err(|e| MailError::Decode(e.to_string()))?;
@@ -1491,6 +1498,10 @@ pub(super) async fn check_status(
         return Err(MailError::Api { status, message });
     }
     Ok(response)
+}
+
+fn reply_target_missing(error: &MailError) -> bool {
+    matches!(error, MailError::Api { status: 404, .. })
 }
 
 /// Build the `/me/messages/{id}` endpoint with the opaque id safely encoded as a
@@ -2159,6 +2170,21 @@ mod tests {
                 .and_then(|v| v.to_str().ok()),
             Some("0")
         );
+    }
+
+    #[test]
+    fn missing_reply_target_is_safe_to_send_unthreaded() {
+        let missing = MailError::Api {
+            status: 404,
+            message: r#"{"error":{"code":"ErrorItemNotFound"}}"#.into(),
+        };
+        let throttled = MailError::Api {
+            status: 429,
+            message: "try later".into(),
+        };
+
+        assert!(reply_target_missing(&missing));
+        assert!(!reply_target_missing(&throttled));
     }
 
     #[test]
