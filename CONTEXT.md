@@ -101,6 +101,16 @@ Entra app registration (public, not secret):
 
 ## Progress log
 
+### 2026-07-29 — Recurring iCloud and Office 365 events (v0.9.0)
+
+The New event form now creates ongoing daily, weekly, every-two-weeks, monthly,
+or yearly series. Office 365 receives a native Graph patterned recurrence;
+iCloud receives an RFC 5545 RRULE. Recurring iCloud events retain their IANA
+wall-clock zone so their local time does not move across daylight-saving
+changes; one-off writes remain UTC. Editing a series pattern and choosing an
+end date remain intentionally out of scope. Provider payload regression tests
+cover every offered pattern. Release assets now include SHA256SUMS.txt.
+
 ### 2026-07-29 — Reply send survives stale Graph message ids (v0.8.3)
 
 Microsoft Graph's default message ids can change when a message moves. A reply

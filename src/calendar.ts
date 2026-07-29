@@ -104,8 +104,9 @@ let selectedCalendarId: string | null = null;
 // button and the picker's own change handler know which account's selection
 // to persist without main.ts having to thread it through every call.
 let activeAccountId: string | null = null;
-// The active account's provider slug. iCloud (CalDAV) has no server-side zone
-// conversion, so its writes are converted to UTC here before they are sent.
+// The active account's provider slug. One-off iCloud writes are converted to
+// UTC here; recurring ones retain their wall-clock zone so DST does not move
+// their local time.
 let activeProviderSlug = "";
 
 // Create-event modal refs (built once, appended to <body>).
@@ -121,6 +122,8 @@ let evLocation: HTMLInputElement;
 let evAttendees: HTMLInputElement;
 let evBody: HTMLTextAreaElement;
 let evReminder: HTMLSelectElement;
+let evRepeat: HTMLSelectElement;
+let evRepeatRow: HTMLLabelElement;
 let evMsg: HTMLDivElement;
 let evSave: HTMLButtonElement;
 // The event being edited (null = the modal is creating a new event). While
@@ -1174,6 +1177,14 @@ function buildEventModal(): void {
       <label class="settings-row"><span>End</span><span class="ev-when"><input type="date" id="ev-end-date" class="input input-bordered input-sm" /><input type="time" id="ev-end-time" class="input input-bordered input-sm ev-time" /></span></label>
       <input id="ev-location" class="input input-bordered input-sm compose-input" placeholder="Location" autocomplete="off" />
       <input id="ev-attendees" class="input input-bordered input-sm compose-input" placeholder="Attendees (comma-separated emails)" autocomplete="off" />
+      <label id="ev-repeat-row" class="settings-row"><span>Repeat</span><select id="ev-repeat" class="select select-bordered select-sm">
+        <option value="">Never</option>
+        <option value="daily">Daily</option>
+        <option value="weekly">Weekly</option>
+        <option value="biweekly">Every 2 weeks</option>
+        <option value="monthly">Monthly</option>
+        <option value="yearly">Yearly</option>
+      </select></label>
       <label class="settings-row"><span>Alert</span><select id="ev-reminder" class="select select-bordered select-sm">
         <option value="">None</option>
         <option value="0">At time of event</option>
@@ -1206,6 +1217,8 @@ function buildEventModal(): void {
   evAttendees = eventOverlay.querySelector<HTMLInputElement>("#ev-attendees")!;
   evBody = eventOverlay.querySelector<HTMLTextAreaElement>("#ev-body")!;
   evReminder = eventOverlay.querySelector<HTMLSelectElement>("#ev-reminder")!;
+  evRepeat = eventOverlay.querySelector<HTMLSelectElement>("#ev-repeat")!;
+  evRepeatRow = eventOverlay.querySelector<HTMLLabelElement>("#ev-repeat-row")!;
   evMsg = eventOverlay.querySelector<HTMLDivElement>("#ev-msg")!;
   evSave = eventOverlay.querySelector<HTMLButtonElement>("#ev-save")!;
   evTimeInputs = [evStartTime, evEndTime];
@@ -1258,6 +1271,8 @@ function openEventModal(ev?: CalendarEvent): void {
   editingReminderMinutes = ev?.reminderMinutes ?? null;
   evReminder.value = ev && ev.reminderMinutes !== null ? nearestReminderPreset(ev.reminderMinutes) : "";
   editingReminderBaseline = evReminder.value;
+  evRepeat.value = "";
+  evRepeatRow.classList.toggle("hidden", Boolean(ev));
   evAllDay.checked = ev?.isAllDay ?? false;
   reflectAllDay();
 
@@ -1405,12 +1420,12 @@ async function saveEvent(): Promise<void> {
       : reminderRaw === ""
         ? null
         : Number(reminderRaw);
+  const recurrence = evRepeat.value || null;
 
-  // iCloud (CalDAV) has no server-side zone conversion and the Rust side has no
-  // timezone database, so timed events are converted to a UTC instant here — the
-  // browser's IANA data does it. All-day dates carry no zone and are left alone.
+  // One-off iCloud events use UTC. A recurring event must retain its named wall
+  // clock zone or 09:00 will shift when daylight saving changes.
   let sendZone = IANA_ZONE;
-  if (activeProviderSlug === "icloud" && !allDay) {
+  if (activeProviderSlug === "icloud" && !allDay && !recurrence) {
     start = toUtcWallClock(start);
     end = toUtcWallClock(end);
     sendZone = "UTC";
@@ -1425,6 +1440,7 @@ async function saveEvent(): Promise<void> {
       bodyHtml,
       attendees: attendeesTouched ? attendees : null,
       reminderMinutes,
+      recurrence,
     },
     timeZone: sendZone,
   };

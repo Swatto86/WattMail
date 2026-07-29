@@ -810,6 +810,29 @@ pub struct CalendarEvent {
     pub reminder_minutes_before_start: Option<u32>,
 }
 
+/// A simple ongoing recurrence pattern shared by every calendar provider.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EventRecurrence {
+    Daily,
+    Weekly,
+    Biweekly,
+    Monthly,
+    Yearly,
+}
+
+impl EventRecurrence {
+    pub fn parse(raw: &str) -> Option<Self> {
+        Some(match raw {
+            "daily" => Self::Daily,
+            "weekly" => Self::Weekly,
+            "biweekly" | "bi-weekly" => Self::Biweekly,
+            "monthly" => Self::Monthly,
+            "yearly" => Self::Yearly,
+            _ => return None,
+        })
+    }
+}
+
 /// A new event to create on the user's default calendar.
 #[derive(Debug, Clone)]
 pub struct NewEvent {
@@ -828,6 +851,9 @@ pub struct NewEvent {
     /// Minutes before `start` at which a reminder should fire, or `None` for no
     /// reminder. `Some(0)` means "at the time of the event".
     pub reminder_minutes_before_start: Option<u32>,
+    /// An ongoing recurrence to create. `None` means one event; on update it
+    /// leaves any existing provider recurrence untouched.
+    pub recurrence: Option<EventRecurrence>,
 }
 
 /// The meeting invitation carried by a mail message, linking to the calendar

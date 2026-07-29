@@ -50,3 +50,10 @@ jobs:
           Copy-Item $exe.FullName $dest -Force
           Write-Host "Uploading $dest ($([math]::Round($exe.Length/1MB,1)) MB)"
           gh release upload $env:GITHUB_REF_NAME $dest --clobber --repo $env:GITHUB_REPOSITORY
+
+          New-Item -ItemType Directory -Path release-assets | Out-Null
+          gh release download $env:GITHUB_REF_NAME --dir release-assets --repo $env:GITHUB_REPOSITORY
+          Get-ChildItem release-assets -File | Sort-Object Name | ForEach-Object {
+            "$((Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant())  $($_.Name)"
+          } | Set-Content SHA256SUMS.txt -Encoding ascii
+          gh release upload $env:GITHUB_REF_NAME SHA256SUMS.txt --clobber --repo $env:GITHUB_REPOSITORY

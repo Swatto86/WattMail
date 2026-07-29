@@ -29,8 +29,8 @@ use wattmail_application::{
     set_read as app_set_read, sync_folder as app_sync_folder, update_event as app_update_event,
 };
 use wattmail_domain::{
-    CalendarProvider, EventDateTime, Folder, Importance, InviteResponse, MailProvider, MessageRule,
-    MessageSummary, NewEvent, OutgoingAttachment, OutgoingMessage,
+    CalendarProvider, EventDateTime, EventRecurrence, Folder, Importance, InviteResponse,
+    MailProvider, MessageRule, MessageSummary, NewEvent, OutgoingAttachment, OutgoingMessage,
 };
 use wattmail_infrastructure::{build_calendar_provider, build_mail_provider, ProviderKind};
 
@@ -1740,10 +1740,20 @@ pub struct NewEventDto {
     /// `Some(0)` = at the time of the event.
     #[serde(default)]
     pub reminder_minutes: Option<u32>,
+    /// daily | weekly | biweekly | monthly | yearly; null = one event.
+    #[serde(default)]
+    pub recurrence: Option<String>,
 }
 
-fn new_event_from_dto(event: NewEventDto, time_zone: &str) -> NewEvent {
-    NewEvent {
+fn new_event_from_dto(event: NewEventDto, time_zone: &str) -> Result<NewEvent, String> {
+    let recurrence = match event.recurrence.as_deref() {
+        None | Some("") => None,
+        Some(raw) => Some(
+            EventRecurrence::parse(raw)
+                .ok_or_else(|| format!("unknown recurrence pattern: {raw}"))?,
+        ),
+    };
+    Ok(NewEvent {
         subject: event.subject,
         start: EventDateTime {
             date_time: event.start,
@@ -1758,7 +1768,8 @@ fn new_event_from_dto(event: NewEventDto, time_zone: &str) -> NewEvent {
         body_html: event.body_html,
         attendees: event.attendees,
         reminder_minutes_before_start: event.reminder_minutes,
-    }
+        recurrence,
+    })
 }
 
 /// Create an event on the default calendar; returns the created event.
@@ -1770,7 +1781,7 @@ pub async fn create_event(
     calendar_id: Option<String>,
 ) -> Result<CalendarEventDto, String> {
     let (_account, provider) = active_calendar_provider(&accounts, calendar_id).await?;
-    let new_event = new_event_from_dto(event, &time_zone);
+    let new_event = new_event_from_dto(event, &time_zone)?;
     let created = app_create_event(&*provider, &new_event, &time_zone)
         .await
         .map_err(|e| e.to_string())?;
@@ -1787,7 +1798,7 @@ pub async fn update_event(
     time_zone: String,
 ) -> Result<CalendarEventDto, String> {
     let (_account, provider) = active_calendar_provider(&accounts, None).await?;
-    let updated_event = new_event_from_dto(event, &time_zone);
+    let updated_event = new_event_from_dto(event, &time_zone)?;
     let updated = app_update_event(&*provider, &id, &updated_event, &time_zone)
         .await
         .map_err(|e| e.to_string())?;

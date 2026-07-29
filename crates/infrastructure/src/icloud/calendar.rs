@@ -13,9 +13,9 @@
 //!
 //! **Time zones:** on the read side nothing is converted — each event keeps the
 //! wall clock and zone iCalendar stated, and the frontend resolves it against
-//! the browser's IANA database. On the write side the frontend does the reverse,
-//! sending times already normalised to UTC, so [`emit`] never needs the tz
-//! database the Rust tree does not carry. See [`super::civil`].
+//! the browser's IANA database. One-off writes are normalised to UTC; recurring
+//! writes keep an IANA `TZID` so their local time survives daylight-saving
+//! changes. See [`super::civil`].
 //!
 //! **Writes** (create / update / delete / RSVP) build or round-trip an
 //! iCalendar resource and `PUT`/`DELETE` it. An update re-emits the parsed
@@ -30,8 +30,8 @@ use async_trait::async_trait;
 use reqwest::Method;
 use url::Url;
 use wattmail_domain::{
-    Attendee, CalendarEvent, CalendarInfo, CalendarProvider, EventDateTime, InviteResponse,
-    MailError, NewEvent, ResponseStatus,
+    Attendee, CalendarEvent, CalendarInfo, CalendarProvider, EventDateTime, EventRecurrence,
+    InviteResponse, MailError, NewEvent, ResponseStatus,
 };
 
 use super::{civil, dav, emit, ical, rrule};
@@ -609,6 +609,9 @@ fn apply_edits(vevent: &mut ical::Component, event: &NewEvent, stamp: &str) {
     vevent.set(ical::Property::plain("SUMMARY", &event.subject));
     vevent.set(format_dt("DTSTART", &event.start, event.is_all_day));
     vevent.set(format_dt("DTEND", &event.end, event.is_all_day));
+    if let Some(recurrence) = event.recurrence {
+        vevent.set(ical::Property::raw("RRULE", recurrence_rule(recurrence)));
+    }
 
     if event.location.trim().is_empty() {
         vevent.remove("LOCATION");
@@ -709,8 +712,7 @@ fn touch(vevent: &mut ical::Component, stamp: &str) {
 /// Format an [`EventDateTime`] as a DTSTART/DTEND-style property.
 ///
 /// All-day values are date-only (`VALUE=DATE`); timed values are UTC instants
-/// (`…Z`) because the frontend converts to UTC before sending — the Rust side
-/// has no tz database and never emits a bare `TZID` without a `VTIMEZONE`.
+/// (`…Z`) or IANA-zone wall clocks for recurring events.
 fn format_dt(name: &str, dt: &EventDateTime, all_day: bool) -> ical::Property {
     let digits = compact(&dt.date_time);
     if all_day {
@@ -718,10 +720,30 @@ fn format_dt(name: &str, dt: &EventDateTime, all_day: bool) -> ical::Property {
         ical::Property::raw(name, date).with_param("VALUE", "DATE")
     } else if dt.time_zone.eq_ignore_ascii_case("UTC") {
         ical::Property::raw(name, &format!("{digits}Z"))
+    } else if safe_tzid(&dt.time_zone) {
+        // ponytail: iCloud understands IANA TZIDs; embed VTIMEZONE only if a
+        // CalDAV server that does not is added.
+        ical::Property::raw(name, &digits).with_param("TZID", &dt.time_zone)
     } else {
-        // Floating fallback (should not occur for iCloud writes): emit the wall
-        // clock with no zone rather than an unbacked TZID.
         ical::Property::raw(name, &digits)
+    }
+}
+
+fn safe_tzid(zone: &str) -> bool {
+    !zone.is_empty()
+        && zone.len() <= 64
+        && zone
+            .bytes()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, b'/' | b'_' | b'-' | b'+'))
+}
+
+fn recurrence_rule(recurrence: EventRecurrence) -> &'static str {
+    match recurrence {
+        EventRecurrence::Daily => "FREQ=DAILY",
+        EventRecurrence::Weekly => "FREQ=WEEKLY",
+        EventRecurrence::Biweekly => "FREQ=WEEKLY;INTERVAL=2",
+        EventRecurrence::Monthly => "FREQ=MONTHLY",
+        EventRecurrence::Yearly => "FREQ=YEARLY",
     }
 }
 
@@ -879,7 +901,7 @@ fn echo_event(event: &NewEvent, resource: &Url, recurrence: &str) -> CalendarEve
         attendees: Vec::new(),
         body_html: crate::html::sanitize_email(&html_to_plain(&event.body_html), false, false).html,
         is_cancelled: false,
-        is_recurring: !recurrence.is_empty(),
+        is_recurring: event.recurrence.is_some() || !recurrence.is_empty(),
         online_meeting_url: None,
         response_status: ResponseStatus::Organizer,
         web_link: None,
@@ -1718,6 +1740,7 @@ END:VCALENDAR\r\n";
             body_html: "<p>Bring cake</p>".into(),
             attendees: None,
             reminder_minutes_before_start: Some(15),
+            recurrence: None,
         }
     }
 
@@ -1745,6 +1768,37 @@ END:VCALENDAR\r\n";
         // A 15-minute reminder becomes a relative VALARM.
         let alarm = vevent.children_named("VALARM").next().unwrap();
         assert_eq!(alarm.get("TRIGGER").unwrap().value, "-PT15M");
+    }
+
+    #[test]
+    fn a_recurring_event_keeps_its_wall_clock_zone_and_writes_an_rrule() {
+        let mut event = new_event(
+            "Fortnightly review",
+            "2026-07-29T09:00:00",
+            "2026-07-29T10:00:00",
+        );
+        event.start.time_zone = "Europe/London".into();
+        event.end.time_zone = "Europe/London".into();
+        event.recurrence = Some(wattmail_domain::EventRecurrence::Biweekly);
+
+        let calendar = build_vcalendar(build_vevent(&event, "uid-2@wattmail", "20260729T080000Z"));
+        let parsed = ical::parse(&emit::serialize(&calendar));
+        let vevent = parsed[0].children_named("VEVENT").next().unwrap();
+
+        assert_eq!(vevent.get("RRULE").unwrap().value, "FREQ=WEEKLY;INTERVAL=2");
+        assert_eq!(
+            vevent.get("DTSTART").unwrap().param("TZID"),
+            Some("Europe/London")
+        );
+        assert_eq!(vevent.get("DTSTART").unwrap().value, "20260729T090000");
+        for (recurrence, expected) in [
+            (EventRecurrence::Daily, "FREQ=DAILY"),
+            (EventRecurrence::Weekly, "FREQ=WEEKLY"),
+            (EventRecurrence::Monthly, "FREQ=MONTHLY"),
+            (EventRecurrence::Yearly, "FREQ=YEARLY"),
+        ] {
+            assert_eq!(recurrence_rule(recurrence), expected);
+        }
     }
 
     #[test]

@@ -16,8 +16,8 @@ use serde::Deserialize;
 
 use super::{check_status, GraphClient, GraphEmailAddress, GraphRecipient, GRAPH_BASE};
 use wattmail_domain::{
-    Attendee, CalendarEvent, CalendarInfo, CalendarProvider, EventDateTime, InviteResponse,
-    MailError, MeetingInvite, NewEvent, ResponseStatus,
+    Attendee, CalendarEvent, CalendarInfo, CalendarProvider, EventDateTime, EventRecurrence,
+    InviteResponse, MailError, MeetingInvite, NewEvent, ResponseStatus,
 };
 
 /// The `/me/…` prefix that scopes a calendar request. With no calendar selected
@@ -177,7 +177,7 @@ impl CalendarProvider for GraphClient {
             .post(format!("{}/events", calendar_scope(self)))
             .bearer_auth(self.token())
             .header("Prefer", &prefer)
-            .json(&event_payload(event, &tz))
+            .json(&event_payload(event, &tz)?)
             .send()
             .await
             .map_err(|e| MailError::Network(e.to_string()))?;
@@ -202,7 +202,7 @@ impl CalendarProvider for GraphClient {
         // PATCH /me/events/{id} replaces the supplied fields in place (the
         // attendee list is replaced wholesale); Graph returns the updated
         // event and, for a meeting, sends attendees an update.
-        let mut payload = event_payload(event, &tz);
+        let mut payload = event_payload(event, &tz)?;
         if let Some(list) = &event.attendees {
             // The edited list carries bare addresses only. Rebuilding entries
             // from scratch would mark everyone "required" with no `status`,
@@ -377,7 +377,7 @@ struct GraphTypedObject {
 /// the existing attendee collection untouched, preserving each attendee's
 /// optional/required type and display name (Graph replaces the collection
 /// wholesale whenever the key is present).
-fn event_payload(event: &NewEvent, tz: &str) -> serde_json::Value {
+fn event_payload(event: &NewEvent, tz: &str) -> Result<serde_json::Value, MailError> {
     let mut payload = serde_json::json!({
         "subject": event.subject,
         "body": { "contentType": "HTML", "content": event.body_html },
@@ -418,7 +418,95 @@ fn event_payload(event: &NewEvent, tz: &str) -> serde_json::Value {
             .collect();
         object.insert("attendees".to_string(), serde_json::Value::Array(attendees));
     }
-    payload
+    if let Some(recurrence) = event.recurrence {
+        object.insert(
+            "recurrence".to_string(),
+            recurrence_json(recurrence, &event.start.date_time, tz)?,
+        );
+    }
+    Ok(payload)
+}
+
+fn recurrence_json(
+    recurrence: EventRecurrence,
+    start: &str,
+    tz: &str,
+) -> Result<serde_json::Value, MailError> {
+    let (date, year, month, day) = recurrence_start_date(start)?;
+    let pattern = match recurrence {
+        EventRecurrence::Daily => serde_json::json!({
+            "type": "daily",
+            "interval": 1,
+        }),
+        EventRecurrence::Weekly | EventRecurrence::Biweekly => serde_json::json!({
+            "type": "weekly",
+            "interval": if recurrence == EventRecurrence::Biweekly { 2 } else { 1 },
+            "daysOfWeek": [weekday_name(year, month, day)],
+            "firstDayOfWeek": "monday",
+        }),
+        EventRecurrence::Monthly => serde_json::json!({
+            "type": "absoluteMonthly",
+            "interval": 1,
+            "dayOfMonth": day,
+        }),
+        EventRecurrence::Yearly => serde_json::json!({
+            "type": "absoluteYearly",
+            "interval": 1,
+            "dayOfMonth": day,
+            "month": month,
+        }),
+    };
+    Ok(serde_json::json!({
+        "pattern": pattern,
+        "range": {
+            "type": "noEnd",
+            "startDate": date,
+            "recurrenceTimeZone": tz,
+        },
+    }))
+}
+
+fn recurrence_start_date(start: &str) -> Result<(&str, i32, u32, u32), MailError> {
+    let date = start
+        .get(..10)
+        .filter(|d| d.as_bytes().get(4) == Some(&b'-') && d.as_bytes().get(7) == Some(&b'-'))
+        .ok_or_else(|| MailError::Decode("recurring event has an invalid start date".into()))?;
+    let year: i32 = date
+        .get(..4)
+        .and_then(|v| v.parse().ok())
+        .filter(|y| *y > 0)
+        .ok_or_else(|| MailError::Decode("recurring event has an invalid start year".into()))?;
+    let month: u32 = date
+        .get(5..7)
+        .and_then(|v| v.parse().ok())
+        .filter(|m| (1..=12).contains(m))
+        .ok_or_else(|| MailError::Decode("recurring event has an invalid start month".into()))?;
+    let day: u32 = date
+        .get(8..10)
+        .and_then(|v| v.parse().ok())
+        .filter(|d| (1..=days_in_month(year, month)).contains(d))
+        .ok_or_else(|| MailError::Decode("recurring event has an invalid start day".into()))?;
+    Ok((date, year, month, day))
+}
+
+fn weekday_name(mut year: i32, month: u32, day: u32) -> &'static str {
+    const OFFSETS: [i32; 12] = [0, 3, 2, 5, 0, 3, 5, 1, 4, 6, 2, 4];
+    const NAMES: [&str; 7] = [
+        "sunday",
+        "monday",
+        "tuesday",
+        "wednesday",
+        "thursday",
+        "friday",
+        "saturday",
+    ];
+    if month < 3 {
+        year -= 1;
+    }
+    let index =
+        (year + year / 4 - year / 100 + year / 400 + OFFSETS[month as usize - 1] + day as i32)
+            .rem_euclid(7);
+    NAMES[index as usize]
 }
 
 /// Merge an edited attendee address list with the event's current server-side
@@ -600,11 +688,11 @@ fn to_domain_event(event: GraphEvent, tz: &str) -> CalendarEvent {
         })
         .collect();
 
-    // calendarView yields singleInstance / occurrence / exception (never a
-    // seriesMaster); the latter two are slices of a recurring series.
+    // calendarView yields occurrences/exceptions; create-event returns the
+    // seriesMaster itself.
     let is_recurring = matches!(
         event.event_type.as_deref(),
-        Some("occurrence") | Some("exception")
+        Some("occurrence") | Some("exception") | Some("seriesMaster")
     );
 
     let online_meeting_url = http_url(
@@ -919,8 +1007,9 @@ mod tests {
             body_html: "<p>Notes</p>".into(),
             attendees: Some(vec!["a@x.io".into(), " ".into(), "b@y.io".into()]),
             reminder_minutes_before_start: Some(15),
+            recurrence: None,
         };
-        let json = event_payload(&event, "Europe/London");
+        let json = event_payload(&event, "Europe/London").unwrap();
         assert_eq!(json["subject"], "Standup");
         assert_eq!(json["start"]["dateTime"], "2026-07-13T09:00:00");
         assert_eq!(json["start"]["timeZone"], "Europe/London");
@@ -938,7 +1027,7 @@ mod tests {
             attendees: None,
             ..event
         };
-        let json = event_payload(&untouched, "Europe/London");
+        let json = event_payload(&untouched, "Europe/London").unwrap();
         assert!(json.get("attendees").is_none());
     }
 
@@ -959,8 +1048,9 @@ mod tests {
             body_html: String::new(),
             attendees: None,
             reminder_minutes_before_start: Some(30),
+            recurrence: None,
         };
-        let on = event_payload(&base, "Europe/London");
+        let on = event_payload(&base, "Europe/London").unwrap();
         assert_eq!(on["isReminderOn"], true);
         assert_eq!(on["reminderMinutesBeforeStart"], 30);
 
@@ -972,9 +1062,57 @@ mod tests {
                 ..base
             },
             "Europe/London",
-        );
+        )
+        .unwrap();
         assert_eq!(off["isReminderOn"], false);
         assert!(off.get("reminderMinutesBeforeStart").is_none());
+    }
+
+    #[test]
+    fn biweekly_recurrence_uses_the_events_start_day_and_zone() {
+        let event = NewEvent {
+            subject: "Fortnightly review".into(),
+            start: EventDateTime {
+                date_time: "2026-07-29T09:00:00".into(),
+                time_zone: "Europe/London".into(),
+            },
+            end: EventDateTime {
+                date_time: "2026-07-29T10:00:00".into(),
+                time_zone: "Europe/London".into(),
+            },
+            is_all_day: false,
+            location: String::new(),
+            body_html: String::new(),
+            attendees: None,
+            reminder_minutes_before_start: None,
+            recurrence: Some(wattmail_domain::EventRecurrence::Biweekly),
+        };
+
+        let json = event_payload(&event, "Europe/London").unwrap();
+        assert_eq!(json["recurrence"]["pattern"]["type"], "weekly");
+        assert_eq!(json["recurrence"]["pattern"]["interval"], 2);
+        assert_eq!(
+            json["recurrence"]["pattern"]["daysOfWeek"],
+            serde_json::json!(["wednesday"])
+        );
+        assert_eq!(json["recurrence"]["range"]["type"], "noEnd");
+        assert_eq!(json["recurrence"]["range"]["startDate"], "2026-07-29");
+        assert_eq!(
+            json["recurrence"]["range"]["recurrenceTimeZone"],
+            "Europe/London"
+        );
+        for (recurrence, expected) in [
+            (EventRecurrence::Daily, "daily"),
+            (EventRecurrence::Weekly, "weekly"),
+            (EventRecurrence::Monthly, "absoluteMonthly"),
+            (EventRecurrence::Yearly, "absoluteYearly"),
+        ] {
+            assert_eq!(
+                recurrence_json(recurrence, &event.start.date_time, "Europe/London").unwrap()
+                    ["pattern"]["type"],
+                expected
+            );
+        }
     }
 
     #[test]
