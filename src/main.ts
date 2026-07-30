@@ -4389,21 +4389,25 @@ async function requestCloseCompose(): Promise<void> {
   // they cancelled it. It closes on send success, or restores the editor on
   // failure.
   if (composeSaveBusy()) return;
+  // Only nag about discarding when the buffer differs from the open baseline.
   if (composeIsDirty()) {
     const ok = await showConfirm("Discard this message?", {
       danger: true,
       okLabel: "Discard",
     });
     if (!ok) return;
-    // If autosave created a draft this session (and it wasn't a pre-existing
-    // resumed draft), remove it so a discarded message doesn't linger in Drafts.
-    if (currentDraftId && !currentDraftIsResumed) {
-      const id = currentDraftId;
-      currentDraftId = null;
-      void invoke("delete_message", { id, permanent: false })
-        .then(() => syncDraftsFolder())
-        .catch(() => {});
-    }
+  }
+  // Remove an auto-created (non-resumed) draft whenever one exists — even if the
+  // buffer was reverted to match the baseline, so composeIsDirty() is now false.
+  // The autosave already persisted it server-side, so a plain close would
+  // otherwise orphan it in Drafts. A resumed draft, or one kept via "Save draft"
+  // (currentDraftIsResumed = true), is never deleted here.
+  if (currentDraftId && !currentDraftIsResumed) {
+    const id = currentDraftId;
+    currentDraftId = null;
+    void invoke("delete_message", { id, permanent: false })
+      .then(() => syncDraftsFolder())
+      .catch(() => {});
   }
   closeCompose();
 }
@@ -4487,12 +4491,19 @@ function composeNew(): void {
 async function replyTo(replyAll: boolean, id?: string): Promise<void> {
   const targetId = id ?? lastMessage?.id;
   if (!targetId) return;
+  // Guard against overlapping opens: during this prefill the overlay is still
+  // hidden (so shortcuts/clicks aren't yet blocked), and a second reply/forward/
+  // new/resume could open a compose the user starts typing in. If that happened,
+  // this now-stale prefill must not clobber it. Mirrors the composeSessionStale
+  // pattern used for saves and the resumed-draft attachment listing.
+  const session = composeSession;
   try {
     const p = await invoke<ComposeData>("prepare_reply", {
       id: targetId,
       replyAll,
       selfEmail: accountEmail,
     });
+    if (composeSessionStale(session)) return;
     openCompose({
       title: replyAll ? "Reply all" : "Reply",
       to: p.to,
@@ -4510,6 +4521,9 @@ async function replyTo(replyAll: boolean, id?: string): Promise<void> {
 async function forwardMsg(id?: string): Promise<void> {
   const targetId = id ?? lastMessage?.id;
   if (!targetId) return;
+  // See replyTo: don't let this prefill clobber a compose another open-action
+  // raced ahead and opened during these round-trips.
+  const session = composeSession;
   try {
     const p = await invoke<ComposeData>("prepare_forward", { id: targetId });
     // Pre-fetch the original's non-inline file attachments so they're
@@ -4541,6 +4555,7 @@ async function forwardMsg(id?: string): Promise<void> {
     } catch {
       /* ignore — the notice is a nicety */
     }
+    if (composeSessionStale(session)) return;
     openCompose({
       title: "Forward",
       to: p.to,
@@ -4574,8 +4589,12 @@ const MAX_SEND_ATTACHMENT_BYTES = 2_500_000;
 // Resume editing a saved draft: load its RAW body (never the display-sanitized
 // reader HTML) and open compose in edit mode, tracking the draft id.
 async function resumeDraft(id: string): Promise<void> {
+  // See replyTo: opening two drafts in quick succession must not let the slower
+  // load_draft response clobber the compose the faster one already opened.
+  const session = composeSession;
   try {
     const d = await invoke<DraftPrefill>("load_draft", { id });
+    if (composeSessionStale(session)) return;
     openCompose({
       title: "Edit draft",
       to: d.to,

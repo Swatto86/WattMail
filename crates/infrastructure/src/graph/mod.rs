@@ -364,24 +364,23 @@ fn rewrite_cid_images(html: &str, cid_map: &HashMap<String, String>) -> String {
     if cid_map.is_empty() {
         return html.to_string();
     }
-    let refs: HashSet<String> = IMG_SRC_RE
-        .captures_iter(html)
-        .filter_map(|c| c.get(1).map(|m| m.as_str().to_string()))
-        .filter(|u| u.len() > 4 && u[..4].eq_ignore_ascii_case("cid:"))
-        .collect();
-
-    let mut result = html.to_string();
-    for reference in refs {
-        let key = normalize_cid(&reference[4..]);
-        if let Some(data_url) = cid_map.get(&key) {
-            result = result.replace(
-                &format!("src=\"{reference}\""),
-                &format!("src=\"{data_url}\""),
-            );
-            result = result.replace(&format!("src='{reference}'"), &format!("src='{data_url}'"));
-        }
-    }
-    result
+    // Rewrite the whole matched `src=…` span in place so case (`SRC=`), spacing,
+    // and quote style are all handled. Reconstructing a lowercase `src="…"` string
+    // to `.replace()` would miss whatever form the sender's raw HTML actually used
+    // (this runs on the *pre-sanitize* body, before ammonia lowercases attribute
+    // names), leaving a bare `cid:` src for ammonia to strip — a permanently broken
+    // inline image. Unmatched refs and non-`cid:` sources pass through untouched.
+    IMG_SRC_RE
+        .replace_all(html, |caps: &regex::Captures| {
+            let reference = &caps[1];
+            if reference.len() > 4 && reference[..4].eq_ignore_ascii_case("cid:") {
+                if let Some(data_url) = cid_map.get(&normalize_cid(&reference[4..])) {
+                    return format!("src=\"{data_url}\"");
+                }
+            }
+            caps[0].to_string()
+        })
+        .into_owned()
 }
 
 /// Build the `folder id -> role` map from a `$batch` response. Each successful
@@ -522,31 +521,51 @@ impl MailProvider for GraphClient {
         // `le` (not `lt`) so siblings sharing the oldest cached second aren't
         // skipped; the overlap rows re-upsert harmlessly by id, and the caller
         // treats an overlap-only page (no growth in `total`) as end-of-folder.
+        //
+        // A single fixed `$top` wedges the backfill when MORE messages share the
+        // boundary second than fit in one page: every fetch returns the same
+        // saturated top page (all == `before`), the cache's oldest row never
+        // advances, and the caller reads the no-growth page as end-of-folder —
+        // hiding every message older than that second. So grow `$top` until the
+        // page reaches a row strictly older than `before` (in descending order
+        // that means the whole tied cluster is now included) or comes back short
+        // (a genuine end of folder). Bounded so a folder whose entire tail shares
+        // one timestamp can't spin.
+        const MAX_TOP: u32 = 1000;
         let filter = format!("receivedDateTime le {before}");
-        let top = limit.to_string();
-        let response = self
-            .http
-            .get(folder_messages_url(folder_id))
-            .bearer_auth(&self.access_token)
-            .query(&[
-                ("$filter", filter.as_str()),
-                ("$orderby", "receivedDateTime desc"),
-                ("$top", top.as_str()),
-                (
-                    "$select",
-                    "id,subject,from,toRecipients,receivedDateTime,bodyPreview,isRead,flag,hasAttachments,importance",
-                ),
-            ])
-            .send()
-            .await
-            .map_err(|e| MailError::Network(e.to_string()))?;
+        let mut top = limit.max(1);
+        loop {
+            let top_str = top.to_string();
+            let response = self
+                .http
+                .get(folder_messages_url(folder_id))
+                .bearer_auth(&self.access_token)
+                .query(&[
+                    ("$filter", filter.as_str()),
+                    ("$orderby", "receivedDateTime desc"),
+                    ("$top", top_str.as_str()),
+                    (
+                        "$select",
+                        "id,subject,from,toRecipients,receivedDateTime,bodyPreview,isRead,flag,hasAttachments,importance",
+                    ),
+                ])
+                .send()
+                .await
+                .map_err(|e| MailError::Network(e.to_string()))?;
 
-        let body: GraphMessages = check_status(response)
-            .await?
-            .json()
-            .await
-            .map_err(|e| MailError::Decode(e.to_string()))?;
-        Ok(body.value.into_iter().map(MessageSummary::from).collect())
+            let body: GraphMessages = check_status(response)
+                .await?
+                .json()
+                .await
+                .map_err(|e| MailError::Decode(e.to_string()))?;
+            let messages: Vec<MessageSummary> =
+                body.value.into_iter().map(MessageSummary::from).collect();
+            if top < MAX_TOP && boundary_saturated(&messages, before, top) {
+                top = top.saturating_mul(2).min(MAX_TOP);
+                continue;
+            }
+            return Ok(messages);
+        }
     }
 
     async fn message(&self, id: &str, allow_images: bool) -> Result<MessageBody, MailError> {
@@ -1372,6 +1391,17 @@ struct GraphFlag {
     flag_status: Option<String>,
 }
 
+/// True when a backfill page is FULL and every row ties on the boundary timestamp
+/// `before` — i.e. more messages share that second than fit in the page, so it made
+/// no downward progress and a larger `$top` is needed to sweep past the cluster.
+/// (The query is `receivedDateTime le before` in descending order, so every row is
+/// already `<= before`; "all `>= before`" therefore means "all `== before`".)
+fn boundary_saturated(messages: &[MessageSummary], before: &str, requested: u32) -> bool {
+    !messages.is_empty()
+        && messages.len() as u32 >= requested
+        && messages.iter().all(|m| m.received.as_str() >= before)
+}
+
 /// True only when the message currently carries an active follow-up flag
 /// (`flagged`); `notFlagged`, `complete`, and an absent flag are all false.
 fn flag_is_flagged(flag: Option<&GraphFlag>) -> bool {
@@ -1903,8 +1933,10 @@ fn recipients_summary(recipients: Option<Vec<GraphRecipient>>) -> String {
     }
 }
 
+// Case-insensitive so `SRC=`/`Src=` variants in raw sender HTML are matched too —
+// `rewrite_cid_images` runs before ammonia normalizes attribute-name case.
 static IMG_SRC_RE: LazyLock<regex::Regex> =
-    LazyLock::new(|| regex::Regex::new(r#"src\s*=\s*["']([^"']+)["']"#).expect("valid regex"));
+    LazyLock::new(|| regex::Regex::new(r#"(?i)src\s*=\s*["']([^"']+)["']"#).expect("valid regex"));
 
 /// Fetch remote `<img>` sources server-side (clean headers — no cookies, referer,
 /// or browser fingerprint) and inline them as `data:` URLs, so the webview makes
@@ -1926,30 +1958,42 @@ async fn inline_remote_images(html: &str) -> String {
         return html.to_string();
     }
 
-    // Images are fetched sequentially, so keep the per-image budget tight: a
-    // page of dead tracker hosts must not stall message loading for minutes.
+    // Images are fetched sequentially with a tight per-image timeout, plus an
+    // overall wall-clock budget: with N dead/slow tracker hosts the per-image
+    // timeout alone is O(N) and could stall rendering for minutes. Past the
+    // budget the remaining images are BLANKED (never left as a remote `src`), so
+    // the webview still makes no remote request.
     let client = reqwest::Client::builder()
         .connect_timeout(std::time::Duration::from_secs(5))
         .timeout(std::time::Duration::from_secs(10))
         .build()
         .expect("reqwest client");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
     let mut result = html.to_string();
     for url in urls {
-        // The src in the cleaned HTML is HTML-escaped; the fetch URL is not.
-        let fetch_url = url.replace("&amp;", "&");
-        let replacement = fetch_image_data_url(&client, &fetch_url)
-            .await
-            .unwrap_or_default();
+        let replacement = if std::time::Instant::now() >= deadline {
+            String::new() // budget spent — blank the rest so nothing loads remotely
+        } else {
+            // The src in the cleaned HTML is HTML-escaped; the fetch URL is not.
+            let fetch_url = url.replace("&amp;", "&");
+            fetch_image_data_url(&client, &fetch_url)
+                .await
+                .unwrap_or_default()
+        };
         result = result.replace(&format!("src=\"{url}\""), &format!("src=\"{replacement}\""));
         result = result.replace(&format!("src='{url}'"), &format!("src='{replacement}'"));
     }
     result
 }
 
+/// Hard cap on a single remote image inlined into a rendered message. Bounds both
+/// the `data:` URL size in the DOM and the memory buffered while fetching.
+const MAX_INLINE_IMAGE_BYTES: u64 = 5_000_000;
+
 /// Fetch a remote image and return it as a `data:` URL, or `None` if it fails,
 /// isn't an image, or is too large.
 async fn fetch_image_data_url(client: &reqwest::Client, url: &str) -> Option<String> {
-    let response = client.get(url).send().await.ok()?;
+    let mut response = client.get(url).send().await.ok()?;
     if !response.status().is_success() {
         return None;
     }
@@ -1966,9 +2010,21 @@ async fn fetch_image_data_url(client: &reqwest::Client, url: &str) -> Option<Str
     if !content_type.starts_with("image/") {
         return None;
     }
-    let bytes = response.bytes().await.ok()?;
-    if bytes.len() > 5_000_000 {
-        return None; // skip very large images
+    // Reject up front when the server declares an oversized body…
+    if response
+        .content_length()
+        .is_some_and(|len| len > MAX_INLINE_IMAGE_BYTES)
+    {
+        return None;
+    }
+    // …and cap the actual read, so a server that omits or lies about
+    // `Content-Length` can't stream an unbounded body into memory.
+    let mut bytes = Vec::new();
+    while let Some(chunk) = response.chunk().await.ok()? {
+        bytes.extend_from_slice(&chunk);
+        if bytes.len() as u64 > MAX_INLINE_IMAGE_BYTES {
+            return None; // over the cap — skip this image
+        }
     }
     let encoded = base64::engine::general_purpose::STANDARD.encode(&bytes);
     Some(format!("data:{content_type};base64,{encoded}"))
@@ -2546,6 +2602,53 @@ mod tests {
         let out = rewrite_cid_images(html, &map);
         assert!(out.contains(r#"src="data:image/png;base64,AAAA""#));
         assert!(out.contains("cid:missing@x")); // unmatched ref untouched
+    }
+
+    #[test]
+    fn rewrite_cid_images_matches_case_and_spacing_variants() {
+        // Raw sender HTML (this runs pre-sanitize, before ammonia lowercases attr
+        // names) may use uppercase `SRC=` or spacing around `=`. Both must resolve,
+        // or ammonia later strips the unresolved `cid:` src and the inline image
+        // renders permanently broken.
+        let mut map = HashMap::new();
+        map.insert(
+            "logo@01d".to_string(),
+            "data:image/png;base64,AAAA".to_string(),
+        );
+        let html = r#"<img SRC="cid:LOGO@01D"><IMG src = 'cid:logo@01d'>"#;
+        let out = rewrite_cid_images(html, &map);
+        assert_eq!(out.matches("data:image/png;base64,AAAA").count(), 2);
+        assert!(!out.to_ascii_lowercase().contains("cid:"));
+    }
+
+    fn msg_received(ts: &str) -> MessageSummary {
+        MessageSummary {
+            id: "x".into(),
+            subject: "s".into(),
+            from: "f".into(),
+            to: "t".into(),
+            received: ts.into(),
+            preview: "p".into(),
+            is_read: false,
+            is_flagged: false,
+            has_attachments: false,
+            importance: Importance::Normal,
+        }
+    }
+
+    #[test]
+    fn boundary_saturated_only_when_a_full_page_ties_on_one_second() {
+        let t = "2026-07-01T00:00:05Z";
+        // Full page, every row at the boundary second -> need a larger page.
+        let tied = vec![msg_received(t), msg_received(t)];
+        assert!(boundary_saturated(&tied, t, 2));
+        // A strictly-older row surfaced -> the tied cluster is fully swept.
+        let mixed = vec![msg_received(t), msg_received("2026-07-01T00:00:04Z")];
+        assert!(!boundary_saturated(&mixed, t, 2));
+        // Short page (fewer than requested) -> genuine end of folder.
+        assert!(!boundary_saturated(&tied, t, 50));
+        // Empty page -> not saturated.
+        assert!(!boundary_saturated(&[], t, 50));
     }
 
     #[test]

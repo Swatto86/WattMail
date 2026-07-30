@@ -101,6 +101,58 @@ Entra app registration (public, not secret):
 
 ## Progress log
 
+### 2026-07-30 — Email-side bug sweep: 6 fixes (v0.9.4)
+
+Adversarial multi-agent review of the email side (send / receive / attachments /
+sanitization / compose) — 6 finder dimensions + per-finding refutation. 8 raw
+findings, 7 confirmed, 1 refuted (a `data:image/svg+xml` reaching the reader is
+inert: an SVG loaded via `<img>` runs in the browser's *secure static mode* — no
+scripts, no external resource loads, so it can't track or execute). Two of the
+frontend findings were the same root cause. Fixes:
+
+**Frontend (main.ts)**
+- **Autosaved draft orphaned on discard.** The auto-created-draft cleanup lived
+  inside the `composeIsDirty()` branch of `requestCloseCompose`. Type → autosave
+  creates a draft → revert the edit back to the open baseline → close:
+  `composeIsDirty()` is now false, the whole block (delete included) is skipped,
+  and the draft lingers in Drafts with no UI trace. Cleanup moved out of the dirty
+  gate — a non-resumed draft is removed on close whenever one exists; the discard
+  *confirm* still only fires when dirty.
+- **Overlapping compose-open clobber.** `replyTo`/`forwardMsg`/`resumeDraft` call
+  `openCompose` after an unguarded async prefill; during that round-trip the
+  overlay is still hidden, so a second open-action isn't blocked and whichever
+  resolved last silently overwrote the other's compose (and any typed text). Added
+  the same `composeSessionStale` snapshot guard the save paths already use, before
+  each `openCompose`.
+
+**Backend (graph/mod.rs)**
+- **`cid:` inline images broken for `SRC=`/spaced variants.** `rewrite_cid_images`
+  ran a case-sensitive `src=` regex on the raw pre-sanitize body, then rebuilt a
+  lowercase `src="…"` to string-replace — so `SRC="cid:…"` or `src = '…'` never
+  resolved and ammonia stripped the bare `cid:` (permanently broken image). Regex
+  is now `(?i)` and rewrites the whole matched span in place (case/spacing/quote
+  agnostic). Failing test first.
+- **Backfill wedged by a saturated timestamp second.** `fetch_older` used a fixed
+  `$top` with `receivedDateTime le before`; when more messages share the boundary
+  second than fit one page, every fetch returns the same tied page, the cache's
+  oldest row never advances, and the UI reads it as end-of-folder — hiding all
+  older mail. Now grows `$top` (bounded 1000) until a strictly-older row surfaces
+  or the page comes back short. Pure `boundary_saturated` helper, unit-tested.
+- **Unbounded memory inlining a remote image.** `fetch_image_data_url` read the
+  whole body before its size check, so a sender-controlled host serving an
+  oversized `image/*` body could balloon RAM (the timeout bounds time, not bytes).
+  Now rejects on declared `Content-Length` and streams with a hard cap.
+- **Remote-image inlining could stall rendering for minutes.** Sequential fetches
+  with only a per-image timeout are O(N) over dead tracker hosts — contradicting
+  the code's own "must not stall for minutes" comment. Added a 20s overall
+  wall-clock budget; images past it are blanked (never left as a remote `src`, so
+  the no-remote-load invariant holds).
+
++2 unit tests; infrastructure suite 143 → 145. verify.sh green (tsc + vite + fmt +
+clippy + workspace tests). Backend logic fixes are test-covered; the frontend
+compose-state and the remote-image network fixes have no unit harness and are
+**not live-run** this cycle.
+
 ### 2026-07-30 — RSVP-synthesise guard + DTEND zone form (v0.9.3)
 
 Multi-agent review of v0.9.2's per-occurrence RSVP path surfaced two real defects
