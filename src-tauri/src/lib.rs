@@ -100,6 +100,13 @@ pub fn run() {
                     USER_HID_WINDOW.store(true, Ordering::SeqCst);
                     let _ = window.hide();
                     api.prevent_close();
+                } else {
+                    // The X quits the app. Route through the same flush path as the
+                    // tray Quit item so a mid-compose draft whose debounced autosave
+                    // hasn't fired yet is saved before exit, instead of letting the
+                    // default close drop it. The watchdog covers a hung frontend.
+                    api.prevent_close();
+                    quit_with_flush(window.app_handle());
                 }
             }
         })

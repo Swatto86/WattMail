@@ -238,7 +238,15 @@ fn has_remote_content(html: &str) -> bool {
 /// link `href`s don't load in the sandboxed frame), so this reads as "a remote
 /// image would have loaded". `cid:`/`data:` sources are inline and excluded.
 fn has_remote_img_src(lower: &str) -> bool {
-    lower.contains("src=\"http") || lower.contains("src='http") || lower.contains("src=http")
+    lower.contains("src=\"http")
+        || lower.contains("src='http")
+        || lower.contains("src=http")
+        // Scheme-relative sources (`//host/x`) load remotely too and are stripped
+        // by the attribute filter just like `http(s)`, so the banner must fire for
+        // them or the image goes silently missing with no way to load it.
+        || lower.contains("src=\"//")
+        || lower.contains("src='//")
+        || lower.contains("src=//")
 }
 
 /// Conservative, theme-independent test: does the source declare its own
@@ -446,6 +454,15 @@ mod tests {
         let s = sanitize_email(r#"<img src = "http://tracker.example/x.png">"#, true, false);
         assert!(s.remote_content_blocked);
         assert!(!s.html.contains("http://tracker.example"));
+    }
+
+    #[test]
+    fn scheme_relative_remote_image_is_stripped_and_flagged() {
+        // `//host/x` is a remote load; it must trip the banner AND be stripped,
+        // exactly like an http(s) source.
+        let s = sanitize_email(r#"<img src="//cdn.example/logo.png">"#, true, false);
+        assert!(s.remote_content_blocked);
+        assert!(!s.html.contains("//cdn.example"));
     }
 
     #[test]

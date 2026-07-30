@@ -410,6 +410,40 @@ impl AccountManager {
         Ok(self.summary_for(&id))
     }
 
+    /// Re-authenticate the active OAuth account after its session expired.
+    ///
+    /// Runs an interactive browser sign-in, then — mirroring [`add_account`] —
+    /// confirms via `current_user()` that the browser signed in as the SAME
+    /// mailbox BEFORE persisting the tokens. Without this check a different
+    /// account chosen in the browser (a shared PC's cached account list, the
+    /// wrong tile) would silently take over this account's slot, so every later
+    /// sync/send would talk to the wrong mailbox under the old label.
+    pub async fn reauthenticate_active(&self) -> Result<(), String> {
+        let account = self.active()?;
+        let Credentials::OAuth(auth) = &account.auth else {
+            // A stored app-specific password never expires; nothing to re-run.
+            return Ok(());
+        };
+        // Interactive login on the account's own service (no store writes yet).
+        let tokens = auth.interactive_login().await.map_err(|e| e.to_string())?;
+        // Confirm identity before persisting.
+        let provider = account.record.provider;
+        let backend = build_mail_provider(
+            provider,
+            ProviderCredentials::Bearer(tokens.access_token.clone()),
+        )
+        .ok_or_else(|| format!("{} has no mailbox backend", provider.label()))?;
+        let profile = backend.current_user().await.map_err(|e| e.to_string())?;
+        let signed_in_id = account_id_for(&profile.id, &profile.email.to_string());
+        if signed_in_id != account.record.id {
+            return Err(format!(
+                "Signed in as a different account ({}). Choose {} in the browser and try again.",
+                profile.email, account.record.email
+            ));
+        }
+        auth.persist_reauth(&tokens).map_err(|e| e.to_string())
+    }
+
     /// Register an iCloud account from an Apple ID and an app-specific password.
     ///
     /// Unlike the OAuth providers there is no browser flow: the credentials are

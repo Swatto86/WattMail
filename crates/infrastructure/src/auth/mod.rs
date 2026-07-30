@@ -210,14 +210,13 @@ impl AuthService {
         }
     }
 
-    /// Re-run interactive sign-in for this (already-registered) account and
-    /// persist the fresh tokens. Called explicitly from the re-authenticate UI
-    /// after [`access_token`](Self::access_token) reported [`AuthError::ReauthRequired`].
-    pub async fn reauthenticate(&self) -> Result<(), AuthError> {
-        let tokens = self.interactive_login().await?;
-        // An explicit sign-in always un-bars persistence.
+    /// Persist tokens from a verified re-authentication and un-bar persistence.
+    /// The caller runs [`interactive_login`](Self::interactive_login) and MUST
+    /// confirm the returned identity matches this account before calling this —
+    /// otherwise a different mailbox's tokens would land in this account's slot.
+    pub fn persist_reauth(&self, tokens: &TokenSet) -> Result<(), AuthError> {
         self.signed_out.store(false, Ordering::SeqCst);
-        self.remember(&tokens)
+        self.remember(tokens)
     }
 
     /// The cached access token, if still valid for this process.

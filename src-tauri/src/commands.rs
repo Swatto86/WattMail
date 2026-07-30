@@ -423,15 +423,9 @@ pub async fn delete_message(
 /// interactive browser sign-in (the only place, besides add-account, that does).
 #[tauri::command]
 pub async fn reauthenticate_account(accounts: State<'_, AccountManager>) -> Result<(), String> {
-    let account = accounts.active()?;
-    match &account.auth {
-        crate::accounts::Credentials::OAuth(auth) => {
-            auth.reauthenticate().await.map_err(|e| e.to_string())
-        }
-        // A stored app-specific password never expires; there is no interactive
-        // flow to re-run, so this is a no-op rather than an error.
-        crate::accounts::Credentials::Basic(_) => Ok(()),
-    }
+    // Verifies the browser signed in as the SAME mailbox before persisting; a
+    // Basic (iCloud app-password) account has no interactive flow and no-ops.
+    accounts.reauthenticate_active().await
 }
 
 /// Whether a message carries attachments WattMail can't forward (embedded

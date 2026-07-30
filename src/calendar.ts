@@ -95,6 +95,16 @@ let prevBtn: HTMLButtonElement;
 let nextBtn: HTMLButtonElement;
 let events: CalendarEvent[] = [];
 let selectedId: string | null = null;
+
+// The mail UI's reauth handler, injected by main.ts. A revoked Office 365 token
+// surfaces as an "auth-required:" error from calendar_view too, and the mail-side
+// 60s auto-sync (the usual reauth trigger) is gated to the mail tab — so without
+// this a user sitting on Calendar would see a dead raw-error agenda with no way
+// to sign back in. Returns true when it handled the error.
+let onAuthError: ((e: unknown) => Promise<boolean>) | null = null;
+export function setCalendarAuthHandler(fn: (e: unknown) => Promise<boolean>): void {
+  onAuthError = fn;
+}
 let loadSeq = 0; // guards against out-of-order responses on rapid nav
 let calendarsSeq = 0; // ditto for the calendar list across account switches
 let calPicker: HTMLSelectElement;
@@ -600,12 +610,15 @@ async function refreshCalendars(): Promise<void> {
 // True when `ev` really overlaps [windowStart, windowEnd) — an overlap test,
 // not "does it start inside the window": a genuinely-ongoing multi-day event
 // (started before the window, still running) must survive this, since the
-// render-side clamp exists precisely to show those on day one. All-day dates
-// are exempt; they have no zone to run through instant maths in the first place.
+// render-side clamp exists precisely to show those on day one. All-day events
+// go through the same test (parseLocal resolves their date to local midnight,
+// as coveredDayKeys already relies on) so that "kept in `events`" matches "shows
+// in a rendered cell" — otherwise an over-fetched adjacent-window all-day event
+// stays selectable and paints a ghost detail pane for nothing on screen.
 function overlapsWindow(ev: CalendarEvent, windowStart: Date, windowEnd: Date): boolean {
-  if (ev.isAllDay) return true;
   const s = parseLocal(ev.start, ev.startZone, ev.isAllDay).getTime();
   const e = parseLocal(ev.end, ev.endZone, ev.isAllDay).getTime();
+  if (isNaN(s) || isNaN(e)) return true; // un-parseable: don't silently drop it
   return s < windowEnd.getTime() && e > windowStart.getTime();
 }
 
@@ -659,6 +672,10 @@ export async function loadCalendar(): Promise<void> {
     }
   } catch (e) {
     if (seq !== loadSeq) return;
+    // A revoked/expired token routes to the shared one-tap re-sign-in prompt
+    // instead of a dead-end error string; the caller re-enters the calendar
+    // after signing in.
+    if (onAuthError && (await onAuthError(e))) return;
     agendaEl.innerHTML = `<div class="cal-empty cal-error">Could not load calendar: ${esc(
       String(e),
     )}</div>`;
@@ -873,6 +890,14 @@ function selectEvent(id: string): void {
     .querySelectorAll<HTMLElement>(`.cal-event[data-id="${cssEscape(id)}"]`)
     .forEach((el) => el.classList.add("selected"));
   renderDetail(ev);
+}
+
+// Re-paint the open event's detail pane. Its body iframe bakes the current
+// theme's colours into its srcdoc (it has no DaisyUI tokens of its own), so on a
+// light/dark switch the surrounding chrome re-themes via CSS but the pane keeps
+// its old tone until this re-bakes it. No-op when nothing is selected.
+export function reRenderSelectedEvent(): void {
+  if (selectedId) selectEvent(selectedId);
 }
 
 function cssEscape(s: string): string {

@@ -101,6 +101,85 @@ Entra app registration (public, not secret):
 
 ## Progress log
 
+### 2026-07-30 — User-facing bug sweep: 13 fixes (v0.9.1)
+
+A fresh full-app user-facing bug sweep (11 parallel finders by flow →
+dedup/triage → independent adversarial verify of each candidate against the
+code). 17 raw findings → 16 candidates → **13 confirmed and fixed**, 3
+deliberately deferred (below).
+
+- **Auth (was the worst): re-authenticate never checked identity.** After a
+  session expired, `reauthenticate_account` ran an interactive sign-in and
+  persisted whatever tokens came back into the *same* account slot — with no
+  `current_user()` match (unlike `add_account`). On a shared/family PC a
+  different Microsoft account chosen in the browser would silently take over the
+  slot, so every later sync/send used the wrong mailbox under the old label.
+  Orchestration moved to `AccountManager::reauthenticate_active`, which now
+  confirms the returned id matches before persisting (rejects with a clear
+  "signed in as a different account" message otherwise). `AuthService`'s old
+  `reauthenticate()` (persist-without-check footgun) is gone, replaced by
+  `persist_reauth()`.
+- **Undo-send could still send after a "discard".** Once the countdown elapsed
+  (or "Send now"), the editor buttons were un-hidden while the send was still in
+  flight; a Cancel/Esc then ran the normal discard path and closed the modal —
+  but the send completed anyway. The in-flight save/send flag is now
+  **session-scoped** (`composeSaveSession`): a dismiss is blocked while THIS
+  compose has a send in flight, and — same fix — a save left running by a
+  *discarded* compose can no longer block (or clobber) a later compose's
+  Send/Save (the old global bool did both).
+- **Move-to-folder let a real message land in Drafts**, where opening it resumed
+  it as an editable draft and the next edit/autosave PATCH-overwrote the
+  original's subject/body/recipients. The move picker now excludes the outgoing
+  system folders (reusing `isOutgoingFolder`).
+- **Native window-X (with "close to tray" off) skipped the autosave flush** —
+  in-progress compose text within the debounce window was lost. The X now routes
+  through the same `quit_with_flush` as the tray Quit item.
+- **Calendar had no re-auth recovery** — a revoked Office 365 token on the
+  Calendar tab showed a dead raw-error agenda; `calendar.ts` now routes
+  `auth-required:` through the shared one-tap re-sign-in (injected handler).
+- **All-day "ghost" detail pane**: an over-fetched adjacent-window all-day iCloud
+  event stayed selectable (blanket `if (ev.isAllDay) return true`) and painted a
+  full detail pane — with live Delete — for an event visible nowhere. `overlaps
+  Window` now runs all-day events through the same date test as timed ones.
+- Plus: dark-mode text relit to invisibility on legacy `bgcolor=white` cells
+  (`localBg` now reads the `bgcolor` attribute); a held `#`/`e` key double-firing
+  delete/move and reporting a false "failed" after success (per-id in-flight
+  guard); a bulk context menu acting on fewer messages than its baked "N
+  messages" label after a background sync pruned the selection (menu now
+  dismissed on prune); a draft-attachment upload from a discarded compose
+  rendering a phantom chip on the next compose (post-upload staleness re-check);
+  the calendar event description pane keeping stale theme colours after a
+  light/dark switch (re-render hook); and scheme-relative (`//host`) remote
+  images stripped but not tripping the "load images" banner (silently missing) —
+  banner heuristic now matches them (unit-tested).
+
+**Deferred (real, but not blind-fixed):**
+- **iCloud RSVP to a single occurrence of a recurring series edits the master →
+  changes the whole series' status** (and sends that PARTSTAT to the organizer).
+  The correct fix synthesises a per-occurrence override VEVENT — substantial new
+  code in the iCloud **write path that has never touched a live server**; shipping
+  it unverified risks corrupting real events. Needs live iCloud to fix safely.
+- **`day_key` (first-10-chars, no zone conversion) can mismatch an EXDATE/
+  RECURRENCE-ID authored by another client in a different zone form** when the
+  offset crosses local midnight → a deleted occurrence resurrects / an RSVP
+  misroutes. Narrow (cross-client, near-midnight recurring); a naive ±1-day
+  tolerance would over-delete daily series, so it needs care + live iCloud.
+- **CSS `background:url()` still trips the "load images" banner though clicking
+  can never restore it** (the sanitizer always strips CSS `url()`; only `<img>`
+  is proxied). Left as-is: a unit test pins the current "inform the user remote
+  content was blocked" behaviour as intentional, and the honest alternatives
+  (silently drop, or add full CSS-background loading) are a design change/feature,
+  not a clear bug.
+
+**Verification: compile + `verify.sh` green (npm build + fmt + clippy
+`-D warnings` + `cargo test --workspace`, 133 tests). NOT live-run** — per the
+release-then-test policy. Live sanity worth doing: trigger a re-auth and confirm
+a mismatched browser account is rejected; let an undo-send countdown elapse then
+immediately hit Cancel (message must still send, modal must not silently
+discard); move a message to a non-outgoing folder (Drafts must be absent from the
+picker); close the window with "close to tray" off mid-compose (draft must
+survive); open a bgcolor-white receipt in dark mode.
+
 ### 2026-07-29 — Recurring iCloud and Office 365 events (v0.9.0)
 
 The New event form now creates ongoing daily, weekly, every-two-weeks, monthly,

@@ -18,7 +18,9 @@ import {
   loadCalendar,
   loadCalendars,
   notificationSettingChanged,
+  reRenderSelectedEvent,
   resetCalendar,
+  setCalendarAuthHandler,
   startEventReminders,
 } from "./calendar";
 import { showConfirm, showPrompt, isDialogOpen } from "./dialog";
@@ -180,6 +182,7 @@ matchMedia("(prefers-color-scheme: dark)").addEventListener("change", () => {
   if (loadThemePref() === "system") {
     applyThemePref("system");
     reRenderOpenMessage();
+    reRenderSelectedEvent();
   }
 });
 
@@ -855,6 +858,9 @@ let calendarInited = false;
 function ensureCalendarInit(): void {
   if (calendarInited) return;
   initCalendar(calendarHost);
+  // Let the calendar route an expired-session error through the same one-tap
+  // re-sign-in prompt the mail UI uses.
+  setCalendarAuthHandler(handlePossibleAuthError);
   calendarInited = true;
 }
 
@@ -1097,10 +1103,15 @@ function clearChecked(): void {
 // cover rows the user can see.
 function pruneChecked(): void {
   if (checkedIds.size === 0) return;
+  const before = checkedIds.size;
   const rendered = new Set(rowEls().map((el) => el.dataset.id));
   for (const id of [...checkedIds]) {
     if (!rendered.has(id)) checkedIds.delete(id);
   }
+  // If a background re-render (auto-sync) shrank the selection while a context
+  // menu is open, its baked-in "N messages" count and target set are now stale —
+  // dismiss it so a click can't silently act on fewer messages than the label said.
+  if (checkedIds.size !== before) hideCtxMenu();
   reflectChecked();
 }
 function announceChecked(): void {
@@ -1243,7 +1254,14 @@ async function setFlag(id: string, flagged: boolean): Promise<void> {
 // (recoverable). From Deleted Items itself it's a permanent delete, so confirm
 // first. Updates the list optimistically. Returns whether the delete proceeded
 // (so the autosave-discard path can key off it if needed).
+// Message ids with a delete/move round-trip in flight. A held '#'/'e' key (OS
+// auto-repeat) re-reads the same cursor id before the first call resolves, so
+// without this the second call hits the now-stale id, 404s, and reports a false
+// "failed" for an action that already succeeded (and revert restores a ghost row).
+const actionInFlight = new Set<string>();
+
 async function deleteMessage(id: string): Promise<void> {
+  if (actionInFlight.has(id)) return;
   // Key "permanent" off the CURRENT folder's role, but only outside search
   // (search spans folders, so we can't tell where the row lives — default to the
   // safe recoverable move).
@@ -1256,6 +1274,7 @@ async function deleteMessage(id: string): Promise<void> {
     );
     if (!ok) return;
   }
+  actionInFlight.add(id);
   rowFor(id)?.remove();
   if (selectedId === id) resetReader();
   try {
@@ -1264,11 +1283,15 @@ async function deleteMessage(id: string): Promise<void> {
   } catch (e) {
     statusEl.textContent = `Delete failed: ${e}`;
     await revertOptimisticAction(); // restore the removed row
+  } finally {
+    actionInFlight.delete(id);
   }
 }
 
 // Move a message to another folder (it leaves the current folder's list).
 async function moveMessage(id: string, destinationFolderId: string): Promise<void> {
+  if (actionInFlight.has(id)) return;
+  actionInFlight.add(id);
   rowFor(id)?.remove();
   if (selectedId === id) resetReader();
   try {
@@ -1277,6 +1300,8 @@ async function moveMessage(id: string, destinationFolderId: string): Promise<voi
   } catch (e) {
     statusEl.textContent = `Move failed: ${e}`;
     await revertOptimisticAction(); // restore the removed row
+  } finally {
+    actionInFlight.delete(id);
   }
 }
 
@@ -2112,7 +2137,14 @@ function adaptPlainEmail(frame: HTMLIFrameElement, theme: { bg: RGB; fg: RGB }):
     let n: Element | null = el;
     while (n && n !== doc.body) {
       const h = n as HTMLElement;
-      const c = parseColor(h.style?.backgroundColor) ?? parseColor(h.style?.background ?? "");
+      // Also honour the legacy `bgcolor` attribute: the browser paints the cell
+      // from it, but it never lands in `style.backgroundColor`, so without this a
+      // white bgcolor cell reads as the dark theme surface and its dark text gets
+      // relit to light — invisible on the cell's real white background.
+      const c =
+        parseColor(h.style?.backgroundColor) ??
+        parseColor(h.style?.background ?? "") ??
+        parseColor(h.getAttribute?.("bgcolor") ?? "");
       if (c) return c;
       n = n.parentElement;
     }
@@ -3978,10 +4010,23 @@ let currentDraftIsResumed = false;
 // The message the open compose replies to (null = not a reply). The send path
 // hands it to the backend so the reply carries threading headers.
 let currentReplyToId: string | null = null;
-// A save (manual, send, or autosave) is in flight — serialize the three so a
-// Send during an in-flight save can't create a duplicate, and an autosave never
-// races a send.
-let composeSaveInFlight = false;
+// The compose session that currently has a save (manual, send, or autosave) in
+// flight, or null. Scoped to the session — not a bare bool — so a save left
+// running by a just-discarded compose can neither block a later, unrelated
+// compose's Send/Save nor have its completion clobber that new session's flag.
+let composeSaveSession: number | null = null;
+// A save/send is in flight for the CURRENT compose session.
+function composeSaveBusy(): boolean {
+  return composeSaveSession === composeSession;
+}
+function beginComposeSave(session: number): void {
+  composeSaveSession = session;
+}
+// Only the session that started the save may clear the flag, so a stale save's
+// completion can't wipe a flag a newer session's save legitimately set.
+function endComposeSave(session: number): void {
+  if (composeSaveSession === session) composeSaveSession = null;
+}
 let correspondentsLoadedFor = "";
 let correspondentAddresses: string[] = [];
 
@@ -4078,7 +4123,7 @@ function renderComposeAttachments(): void {
         const att = composeServerAtts[i];
         // Skip while a save/send is running — a concurrent DELETE could race
         // the send and drop an attachment the sent copy was meant to carry.
-        if (!att || !currentDraftId || composeSaveInFlight) return;
+        if (!att || !currentDraftId || composeSaveBusy()) return;
         b.disabled = true;
         invoke("delete_draft_attachment", {
           draftId: currentDraftId,
@@ -4338,6 +4383,12 @@ async function requestCloseCompose(): Promise<void> {
     undoSendCancel();
     return;
   }
+  // A send/save is in flight for THIS compose (e.g. the undo window elapsed and
+  // the message is now actually leaving) — a dismiss must not silently discard
+  // the UI while that completes, or the message goes out after the user thinks
+  // they cancelled it. It closes on send success, or restores the editor on
+  // failure.
+  if (composeSaveBusy()) return;
   if (composeIsDirty()) {
     const ok = await showConfirm("Discard this message?", {
       danger: true,
@@ -4390,13 +4441,13 @@ async function runAutosave(): Promise<void> {
   autosaveArmedAt = 0;
   // Don't fire while the modal is closed, mid other-save, or with nothing typed.
   if (composeOverlay.classList.contains("hidden")) return;
-  if (composeSaveInFlight) {
+  if (composeSaveBusy()) {
     scheduleAutosave(); // retry shortly after the in-flight save finishes
     return;
   }
   if (!composeIsDirty()) return;
   const session = composeSession;
-  composeSaveInFlight = true;
+  beginComposeSave(session);
   try {
     const id = await invoke<string>("save_draft", {
       id: currentDraftId,
@@ -4425,7 +4476,7 @@ async function runAutosave(): Promise<void> {
   } catch {
     // Offline etc. — don't interrupt typing; the next edit re-arms a retry.
   } finally {
-    composeSaveInFlight = false;
+    endComposeSave(session);
   }
 }
 
@@ -4619,9 +4670,9 @@ async function syncDraftsFolder(): Promise<void> {
 // survive resume. Inline data: images stay in the body (they round-trip
 // through the draft body and are converted to cid: attachments at send).
 async function saveDraft(): Promise<void> {
-  if (composeSaveInFlight) return; // a save/send is already running (#30)
+  if (composeSaveBusy()) return; // a save/send is already running (#30)
   const session = composeSession;
-  composeSaveInFlight = true;
+  beginComposeSave(session);
   cancelAutosave();
   composeSaveDraftBtn.disabled = true;
   composeMsg.textContent = "Saving draft…";
@@ -4649,6 +4700,10 @@ async function saveDraft(): Promise<void> {
         inlineImages: [],
         forwardedAttachments: forwardedAttachmentDtos(),
       });
+      // Compose closed/replaced while the upload was in flight: the files are on
+      // the (persisted) draft, but pushing them into the now-fresh session's
+      // composeServerAtts would render a phantom chip on that unrelated compose.
+      if (composeSessionStale(session)) return;
       // The files now live on the draft — turn their chips into server chips
       // so a later save/send can't upload them again.
       composeServerAtts.push(...uploaded);
@@ -4679,7 +4734,7 @@ async function saveDraft(): Promise<void> {
       composeMsg.textContent = `Could not save draft: ${e}`;
     }
   } finally {
-    composeSaveInFlight = false;
+    endComposeSave(session);
     composeSaveDraftBtn.disabled = false;
   }
 }
@@ -4707,21 +4762,22 @@ async function sendCompose(): Promise<void> {
   // clearly rather than surfacing as a raw Graph 400 — and before the undo
   // window opens, so the wait can't end in an avoidable validation error.
   if (readSendRecipients() === null) return;
-  if (composeSaveInFlight) return; // a draft save is in flight (#30) — don't double-send
+  if (composeSaveBusy()) return; // a draft save is in flight (#30) — don't double-send
+  const session = composeSession;
   // Hold the save/send lock through the undo window so a debounced autosave
   // can't interleave with the send (runAutosave sees the flag and requeues);
   // release it when the user undoes.
-  composeSaveInFlight = true;
+  beginComposeSave(session);
   cancelAutosave();
   if (!(await undoSendCountdown())) {
-    composeSaveInFlight = false;
+    endComposeSave(session);
     return;
   }
   // The compose stays editable during the countdown, so read every field —
   // recipients included — after it, never before: what you see is what sends.
   const recipients = readSendRecipients();
   if (recipients === null) {
-    composeSaveInFlight = false;
+    endComposeSave(session);
     return;
   }
   composeSendBtn.disabled = true;
@@ -4791,7 +4847,7 @@ async function sendCompose(): Promise<void> {
       if (sizeProblem) {
         composeMsg.textContent = sizeProblem;
         composeSendBtn.disabled = false;
-        composeSaveInFlight = false;
+        endComposeSave(session);
         return;
       }
       await invoke("send_message", {
@@ -4837,7 +4893,7 @@ async function sendCompose(): Promise<void> {
       composeMsg.textContent = `Send failed: ${e}`;
     }
   } finally {
-    composeSaveInFlight = false;
+    endComposeSave(session);
     composeSendBtn.disabled = false;
   }
 }
@@ -4959,9 +5015,12 @@ function renderMainMenu(unread: boolean, flagged: boolean): void {
     .join("");
 }
 
-// Second "page" of the menu: pick a destination folder (current folder excluded).
+// Second "page" of the menu: pick a destination folder. Excludes the current
+// folder and the outgoing system folders (Drafts/Sent Items/Outbox): moving an
+// ordinary message into Drafts makes the reader resume it as an editable draft,
+// so the next edit/autosave would PATCH-overwrite the original message.
 function renderFolderMenu(): void {
-  const others = folders.filter((f) => f.id !== currentFolderId);
+  const others = folders.filter((f) => f.id !== currentFolderId && !isOutgoingFolder(f));
   const list = others.length
     ? others
         .map(
@@ -5803,6 +5862,7 @@ headersOverlay.addEventListener("click", (e) => {
 setTheme.addEventListener("change", () => {
   setThemePref(setTheme.value as ThemePref);
   reRenderOpenMessage();
+  reRenderSelectedEvent();
 });
 setTray.addEventListener("change", () => {
   invoke("set_close_to_tray", { value: setTray.checked }).catch(
@@ -6147,8 +6207,8 @@ void listen("open-settings", () => openSettings());
 void listen("app-quit-flush", async () => {
   try {
     cancelAutosave();
-    // Wait out a save already in flight so the flush can't double-save.
-    while (composeSaveInFlight) await new Promise((r) => setTimeout(r, 100));
+    // Wait out any save already in flight (any session) so the flush can't double-save.
+    while (composeSaveSession !== null) await new Promise((r) => setTimeout(r, 100));
     await runAutosave(); // no-ops when compose is closed or clean
   } finally {
     void invoke("quit_app");
