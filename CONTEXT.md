@@ -5,7 +5,7 @@
 > new milestone state, a decision made/reversed, or an open question resolved.
 > Keep newest progress entries at the top of the log.
 >
-> **Last updated:** 2026-07-29
+> **Last updated:** 2026-07-30
 
 ---
 
@@ -100,6 +100,38 @@ Entra app registration (public, not secret):
 ---
 
 ## Progress log
+
+### 2026-07-30 — RSVP-synthesise guard + DTEND zone form (v0.9.3)
+
+Multi-agent review of v0.9.2's per-occurrence RSVP path surfaced two real defects
+(both reproduced as failing tests first, then fixed):
+
+- **RSVP could resurrect a deleted occurrence.** `respond_to_event` synthesised
+  and PUT a per-occurrence override without reading the master's freshly-fetched
+  `EXDATE`. A stale client RSVPing an occurrence another client had already deleted
+  wrote a resource that *both* excludes and defines the slot. The RSVP decision is
+  now a pure, unit-testable `apply_response(&mut [Component], apple_id, recurrence,
+  partstat, stamp) -> Result<usize>` (the GET/PUT are the only I/O left in
+  `respond_to_event`). It **refuses** via the new `master_excludes` when the
+  master's own EXDATE already hides the slot — a *tolerant* match on purpose:
+  over-refusing an RSVP is recoverable, resurrecting a cancelled occurrence is not.
+  New `exdate_walls` helper shared with `expand_group`.
+- **DTEND emitted in the wrong zone frame.** `build_occurrence_override` computed
+  the occurrence end in DTSTART's frame (naive add to a DTSTART-form wall clock)
+  but emitted it mirroring DTEND's *own* zone form. A foreign master with mismatched
+  DTSTART/DTEND forms (TZID DTSTART + UTC-Z or all-day DTEND) got a mislabelled or
+  structurally-invalid DTEND. Now emitted with DTSTART as the `datetime_like`
+  template — the frame it is actually in.
+
+Not changed: the contested "duplicate override under one UID when an existing
+override is in a foreign zone form" — the `find_override` doc-comment's already-
+accepted "duplicate at worst" tradeoff and a net improvement over pre-v0.9.2
+whole-series corruption. The phantom dual-render behind it is a pre-existing
+`expand_group` display bug (`by_key` keyed by raw RECURRENCE-ID wall), not touched.
+
++5 unit tests; infrastructure suite 138 → 143. verify.sh green. **Not live-run** —
+the write path was not exercised against a live account this cycle (release-then-
+test policy; the v0.9.2 live run covered the surrounding synthesis path).
 
 ### 2026-07-30 — iCloud recurrence fixes, live-verified (v0.9.2)
 
