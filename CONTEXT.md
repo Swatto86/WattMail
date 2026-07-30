@@ -101,6 +101,41 @@ Entra app registration (public, not secret):
 
 ## Progress log
 
+### 2026-07-30 — Inline cid: images fixed, live-verified (v0.9.5)
+
+Live send/receive testing against a real Office 365 mailbox (a self-addressed
+message with a pasted inline screenshot + a file attachment) surfaced a
+**pre-existing** bug the automated gate couldn't reach: **inline `cid:` images
+never rendered in received mail** (signature logos, pasted screenshots).
+
+Diagnosed from the exported `.eml` (send side was flawless — a proper
+`Content-Disposition: inline` part with `Content-ID`, body `src="cid:…"`) plus
+temporary file-logging in `message()`/`inline_cid_data_urls`. Root cause: the
+attachment fetch used `$select=id,contentType,contentId,contentBytes,isInline`,
+but `contentId`/`contentBytes` are properties of the **derived** `fileAttachment`
+type, not the base `attachment` type the `/attachments` collection returns — so
+Graph 400s ("Could not find a property named 'contentId' on type
+'microsoft.graph.attachment'"). The whole fetch failed, the cid→data-url map came
+back empty, and ammonia stripped the unresolved `cid:` src. (My first pass —
+dropping a bogus `$filter=isInline eq true` — didn't help, because the invalid
+`$select` was the real cause; the runtime log proved it.)
+
+Fix: list only base-type metadata (`$select=id,isInline`), then GET each **inline**
+part in full (a single-attachment GET returns the `fileAttachment` with its
+`contentId` + base64 `contentBytes`) via a new `get_attachment` helper — which also
+avoids downloading a large non-inline attachment just to render a small logo.
+`GraphInlineAttachment` gains `id`/`is_inline`; the cid resolution filters inline
+in Rust. **Live-verified**: the runtime log showed the cid resolving to the
+inline PNG (`map has 1 entries`, body rewritten `cid:`→`data:image`) and the
+image rendered in the reader.
+
++1 decode unit test. verify.sh green. (Not unit-testable — the defect is a live
+Graph `$select` quirk; verified by observed effect against a real mailbox.)
+
+Also confirmed by the same live session: v0.9.4's **orphaned-draft fix (F0)** works
+(autosave → revert → close leaves Drafts clean). Double-click "opens at the side"
+is by design (two-pane reader, no pop-out window feature).
+
 ### 2026-07-30 — Email-side bug sweep: 6 fixes (v0.9.4)
 
 Adversarial multi-agent review of the email side (send / receive / attachments /

@@ -320,9 +320,15 @@ impl GraphClient {
             let mut segments = url.path_segments_mut().expect("base URL is a proper path");
             segments.push("attachments");
         }
-        url.set_query(Some(
-            "$filter=isInline eq true&$select=id,contentType,contentId,contentBytes,isInline&$top=50",
-        ));
+        // List BASE-type metadata only. `contentId`/`contentBytes` are properties
+        // of the derived `fileAttachment` type, not the base `attachment` type the
+        // collection returns, so `$select`ing them 400s ("Could not find a property
+        // named 'contentId' on type 'microsoft.graph.attachment'") — which fails
+        // the whole fetch and leaves every `cid:` image unresolved (ammonia then
+        // strips the bare `cid:` src, e.g. a signature logo or pasted screenshot).
+        // Get id + isInline here, then fetch each INLINE part in full below — so a
+        // large non-inline attachment isn't downloaded just to render a small logo.
+        url.set_query(Some("$select=id,isInline&$top=50"));
 
         let Ok(items) = self
             .get_all_pages::<GraphInlineAttachment>(url.as_str())
@@ -333,10 +339,20 @@ impl GraphClient {
 
         let mut map = HashMap::new();
         for att in items {
-            let (Some(content_id), Some(bytes)) = (att.content_id, att.content_bytes) else {
+            if !att.is_inline.unwrap_or(false) {
+                continue;
+            }
+            // A single-attachment GET returns the full `fileAttachment`, with the
+            // `contentId` that keys the `cid:` ref and the `contentBytes` image
+            // data. Best-effort per image: a failure leaves just this one `cid:`
+            // ref unresolved, never the whole body.
+            let Ok(full) = self.get_attachment(message_id, &att.id).await else {
                 continue;
             };
-            let content_type = att
+            let (Some(content_id), Some(bytes)) = (full.content_id, full.content_bytes) else {
+                continue;
+            };
+            let content_type = full
                 .content_type
                 .unwrap_or_else(|| "application/octet-stream".to_string());
             map.insert(
@@ -345,6 +361,27 @@ impl GraphClient {
             );
         }
         map
+    }
+
+    /// GET one attachment in full — the derived `fileAttachment` shape, carrying
+    /// `contentId` and (base64) `contentBytes`, which can't be `$select`ed on the
+    /// base attachments collection.
+    async fn get_attachment(
+        &self,
+        message_id: &str,
+        attachment_id: &str,
+    ) -> Result<GraphInlineAttachment, MailError> {
+        let mut url = message_endpoint(message_id);
+        {
+            let mut segments = url.path_segments_mut().expect("base URL is a proper path");
+            segments.push("attachments");
+            segments.push(attachment_id);
+        }
+        self.get(url.as_str())
+            .await?
+            .json()
+            .await
+            .map_err(|e| MailError::Decode(e.to_string()))
     }
 }
 
@@ -1880,10 +1917,15 @@ struct GraphPage<T> {
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct GraphInlineAttachment {
+    id: String,
     content_type: Option<String>,
     content_id: Option<String>,
-    /// base64 (standard) content, as Graph returns for a `fileAttachment`.
+    /// base64 (standard) content, present on a full single-attachment GET but not
+    /// on the base-type collection listing.
     content_bytes: Option<String>,
+    /// Whether Graph flags this part inline. Filtered in Rust (`isInline` can't be
+    /// `$filter`ed server-side). Absent → treated as not inline.
+    is_inline: Option<bool>,
 }
 
 #[derive(serde::Deserialize)]
@@ -2649,6 +2691,24 @@ mod tests {
         assert!(!boundary_saturated(&tied, t, 50));
         // Empty page -> not saturated.
         assert!(!boundary_saturated(&[], t, 50));
+    }
+
+    #[test]
+    fn inline_attachment_decodes_id_and_inline_flag() {
+        // The cid-resolution path selects id/contentId/isInline and filters inline
+        // in Rust (Graph rejects a `$filter=isInline eq true`). Lock the field
+        // renames so a typo can't silently empty the inline map (broken images).
+        let att: GraphInlineAttachment = serde_json::from_str(
+            r#"{"id":"A1","contentType":"image/png","contentId":"<logo@01d>","isInline":true}"#,
+        )
+        .expect("parses");
+        assert_eq!(att.id, "A1");
+        assert_eq!(att.is_inline, Some(true));
+        assert_eq!(att.content_id.as_deref(), Some("<logo@01d>"));
+        // A non-inline part decodes with isInline present-and-false.
+        let file: GraphInlineAttachment =
+            serde_json::from_str(r#"{"id":"A2","isInline":false}"#).expect("parses");
+        assert_eq!(file.is_inline, Some(false));
     }
 
     #[test]
