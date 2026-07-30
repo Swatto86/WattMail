@@ -101,6 +101,47 @@ Entra app registration (public, not secret):
 
 ## Progress log
 
+### 2026-07-30 — iCloud recurrence fixes, live-verified (v0.9.2)
+
+The two iCloud bugs deferred from v0.9.1 (below), now fixed and — a first for the
+CalDAV **write** path — **exercised against a live iCloud account**.
+
+- **C5: RSVP to one occurrence of a recurring series no longer edits the master.**
+  `respond_to_event` previously fell back to `find_master` when an occurrence had
+  no override VEVENT, so setting one occurrence's PARTSTAT changed the whole
+  series (and RFC 6638 implicit scheduling relayed a whole-series reply). It now
+  **synthesises a per-occurrence override** (`build_occurrence_override`: clone the
+  master, drop RRULE/RDATE/EXDATE, set RECURRENCE-ID + this occurrence's
+  DTSTART/DTEND in the master's own zone form via the new `datetime_like`, keep
+  ATTENDEE/ORGANIZER/VALARM), sets PARTSTAT on the clone, and appends it. Routing:
+  `resolve_response_target` → `ResponseTarget::{Existing,Synthesize}`.
+- **C11: cross-zone-form occurrence matching for the display exclusion filter.**
+  `excludes_occurrence` (was `day_key`-only) now also matches a cross-midnight pair
+  within one max zone offset (14h), so an EXDATE a foreign client wrote in UTC
+  while DTSTART carries a TZID still hides its occurrence instead of resurrecting
+  it. **Applied ONLY to the display-side EXDATE filter.**
+- **Adversarial review caught a real bug and it was fixed:** applying that same
+  tolerance to *write-routing* (`find_override`/`remove_override`) could, in a
+  ≥10h-offset zone (Brisbane/NZ), collide two adjacent occurrences via a day-key
+  coincidence and misroute an RSVP or delete the wrong override — a wrong server
+  write. Those two paths now match **exactly**; the tolerance is confined to the
+  read/display filter where over-matching only hides a cell. A regression test
+  (`a_foreign_form_override_never_hijacks_a_write_for_an_adjacent_occurrence`)
+  pins it.
+- **`update_event` still edits the master** for a recurring occurrence, but the UI
+  hides Edit on recurring occurrences, so it is unreachable — left as-is.
+
+**Verification: LIVE against real iCloud** (a throwaway `#[ignore]` harness, since
+removed, read the app-password from the keychain and drove the real
+`IcloudClient`): created a weekly series, read back the 4 occurrences, RSVP-declined
+one, **raw-GET confirmed the wire shape — a new override VEVENT with
+`PARTSTAT=DECLINED` and the master's own PARTSTAT untouched, RRULE intact** —
+deleted one occurrence (only it disappeared), and cleaned up. Plus `verify.sh`
+green (138 tests, incl. 5 new iCloud unit tests). Not live-exercised: C11's
+*cross-form* branch specifically (needs a foreign client's mismatched EXDATE;
+unit-tested, display-only) and the iTIP reply relay to an external organiser (no
+external organiser in the self-owned test event).
+
 ### 2026-07-30 — User-facing bug sweep: 13 fixes (v0.9.1)
 
 A fresh full-app user-facing bug sweep (11 parallel finders by flow →

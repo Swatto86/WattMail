@@ -468,15 +468,37 @@ impl CalendarProvider for IcloudClient {
         let url = self.resource_url(&resource)?;
         let (body, etag) = self.get_resource(url.clone()).await?;
         let mut calendars = ical::parse(&body);
-        let (ci, vi) = find_response_target(&calendars, &recurrence)
-            .ok_or_else(|| MailError::Decode("event not found in its resource".into()))?;
         let partstat = match response {
             InviteResponse::Accept => "ACCEPTED",
             InviteResponse::TentativelyAccept => "TENTATIVE",
             InviteResponse::Decline => "DECLINED",
         };
-        set_partstat(&mut calendars[ci].children[vi], &self.apple_id, partstat)?;
-        touch(&mut calendars[ci].children[vi], &now_utc_stamp());
+        let stamp = now_utc_stamp();
+        // Which VCALENDAR carries the touched VEVENT — the one we PUT back.
+        let ci = match resolve_response_target(&calendars, &recurrence)
+            .ok_or_else(|| MailError::Decode("event not found in its resource".into()))?
+        {
+            ResponseTarget::Existing(ci, vi) => {
+                set_partstat(&mut calendars[ci].children[vi], &self.apple_id, partstat)?;
+                touch(&mut calendars[ci].children[vi], &stamp);
+                ci
+            }
+            // A single occurrence of a series with no override yet: set the
+            // PARTSTAT on a freshly synthesised override so only this instance
+            // responds, not the whole series.
+            ResponseTarget::Synthesize(ci, master_vi) => {
+                let mut over =
+                    build_occurrence_override(&calendars[ci].children[master_vi], &recurrence)
+                        .ok_or_else(|| {
+                            MailError::Decode("cannot build occurrence override".into())
+                        })?;
+                // Fail before the PUT if the user is not an attendee (no reply to give).
+                set_partstat(&mut over, &self.apple_id, partstat)?;
+                touch(&mut over, &stamp);
+                calendars[ci].children.push(over);
+                ci
+            }
+        };
         self.put_resource(url, emit::serialize(&calendars[ci]), etag.as_deref(), false)
             .await
     }
@@ -524,6 +546,30 @@ fn override_start(component: &ical::Component, recurrence_id: &str) -> String {
 /// The date part of a wall clock, used to match exclusions across zone forms.
 fn day_key(wall: &str) -> String {
     wall.get(..10).unwrap_or(wall).to_string()
+}
+
+/// The largest real UTC offset (Kiribati, UTC+14), the most a zone can move a
+/// wall clock away from the instant it represents.
+const MAX_ZONE_OFFSET_SECONDS: i64 = 14 * 3_600;
+
+/// Whether an `EXDATE` wall clock hides the occurrence at wall clock `occurrence`,
+/// tolerant of the zone-form mismatch a foreign CalDAV client can introduce —
+/// writing an `EXDATE` in UTC while `DTSTART` carries a `TZID`. The same calendar
+/// day matches (the common case, same-form values, and all-day dates); otherwise
+/// a cross-midnight pair whose naive wall clocks lie within one zone offset of
+/// each other matches too, since that offset is exactly what a form change shifts.
+///
+/// **Display-filter only.** This deliberately over-matches, so it must never route
+/// a *write*: for a DAILY (or adjacent-`BYDAY`) series in a >10h-offset zone a
+/// cross-form exclusion can also fall within this window of a genuinely adjacent
+/// occurrence — the two are indistinguishable without a tz database. Hiding the
+/// wrong occurrence from the agenda is recoverable; deleting or RSVP-ing the wrong
+/// one is not, so `find_override`/`remove_override` match exactly instead.
+/// Same-form data (the overwhelming majority, and everything WattMail writes)
+/// matches by the day-key branch and is untouched by the tolerance.
+fn excludes_occurrence(exdate: &str, occurrence: &str) -> bool {
+    day_key(exdate) == day_key(occurrence)
+        || matches!(civil::diff_seconds(exdate, occurrence), Some(d) if d.abs() <= MAX_ZONE_OFFSET_SECONDS)
 }
 
 // ---- Write path (create / update / delete / RSVP) ----
@@ -807,63 +853,139 @@ fn find_master(calendars: &[ical::Component]) -> Option<(usize, usize)> {
     None
 }
 
-/// The VEVENT to respond on: the override for `recurrence` when it is a series
-/// occurrence, otherwise the master.
-fn find_response_target(calendars: &[ical::Component], recurrence: &str) -> Option<(usize, usize)> {
-    if !recurrence.is_empty() {
-        let key = day_key(recurrence);
-        for (ci, calendar) in calendars.iter().enumerate() {
-            for (vi, child) in calendar.children.iter().enumerate() {
-                let matches = child.name == "VEVENT"
-                    && child
-                        .get("RECURRENCE-ID")
-                        .and_then(|p| p.date_time())
-                        .map(|dt| day_key(&dt.wall))
-                        == Some(key.clone());
-                if matches {
-                    return Some((ci, vi));
-                }
+/// Where an RSVP's PARTSTAT should be written.
+#[derive(Debug)]
+enum ResponseTarget {
+    /// An existing VEVENT `(calendar index, vevent index)` — a one-off event, a
+    /// whole-series response, or an occurrence that already has an override.
+    Existing(usize, usize),
+    /// A series occurrence with no override yet: synthesise one from the master
+    /// at `(calendar index, master vevent index)` so only that instance changes.
+    Synthesize(usize, usize),
+}
+
+/// Resolve the target for an RSVP. A one-off id (empty recurrence) responds on
+/// the master/only VEVENT; a series occurrence prefers its existing override, and
+/// otherwise asks for a synthesised one rather than editing the master — editing
+/// the master's own PARTSTAT would move the WHOLE series' status and relay that
+/// to the organiser.
+fn resolve_response_target(
+    calendars: &[ical::Component],
+    recurrence: &str,
+) -> Option<ResponseTarget> {
+    if recurrence.is_empty() {
+        return find_master(calendars).map(|(c, v)| ResponseTarget::Existing(c, v));
+    }
+    if let Some((c, v)) = find_override(calendars, recurrence) {
+        return Some(ResponseTarget::Existing(c, v));
+    }
+    find_master(calendars).map(|(c, v)| ResponseTarget::Synthesize(c, v))
+}
+
+/// The override VEVENT whose `RECURRENCE-ID` is exactly `recurrence`, if one
+/// exists. Matched by exact wall clock, deliberately NOT the tolerant
+/// [`excludes_occurrence`]: a write must never bind to a *different* occurrence,
+/// and the tolerant match can collide two adjacent occurrences of a high-offset
+/// series across a zone-form boundary. A foreign-form override this misses simply
+/// routes the RSVP to a synthesised override instead — a duplicate at worst, never
+/// a wrong-occurrence write. `recurrence` and a well-formed `RECURRENCE-ID` are
+/// both the occurrence's original slot in the master's own form, so they match.
+fn find_override(calendars: &[ical::Component], recurrence: &str) -> Option<(usize, usize)> {
+    for (ci, calendar) in calendars.iter().enumerate() {
+        for (vi, child) in calendar.children.iter().enumerate() {
+            let matches = child.name == "VEVENT"
+                && child
+                    .get("RECURRENCE-ID")
+                    .and_then(|p| p.date_time())
+                    .is_some_and(|dt| dt.wall == recurrence);
+            if matches {
+                return Some((ci, vi));
             }
         }
     }
-    find_master(calendars)
+    None
+}
+
+/// Synthesise a per-occurrence override VEVENT from the series master, so a
+/// single-occurrence RSVP changes only that instance. The override is the master
+/// pinned to one slot: `RRULE`/`RDATE`/`EXDATE` dropped, `RECURRENCE-ID` plus this
+/// occurrence's `DTSTART`/`DTEND` set in the master's own zone form, and
+/// everything else (`ATTENDEE`, `ORGANIZER`, `VALARM`, `SUMMARY`, …) inherited so
+/// the reply the server relays matches the series.
+fn build_occurrence_override(
+    master: &ical::Component,
+    recurrence: &str,
+) -> Option<ical::Component> {
+    let start = master.get("DTSTART").and_then(|p| p.date_time())?;
+    let duration = duration_seconds(master, &start);
+    let mut over = master.clone();
+    over.remove("RRULE");
+    over.remove("RDATE");
+    over.remove("EXDATE");
+    over.set(datetime_like(
+        "RECURRENCE-ID",
+        master.get("DTSTART"),
+        recurrence,
+    ));
+    over.set(datetime_like("DTSTART", master.get("DTSTART"), recurrence));
+    // Recompute the end only when the master pins one with DTEND; a DURATION-based
+    // length is occurrence-independent and rides along on the clone untouched.
+    if master.get("DTEND").is_some() {
+        let end = if start.is_date {
+            civil::add_days(recurrence, duration / 86_400)
+        } else {
+            civil::add_seconds(recurrence, duration)
+        }
+        .unwrap_or_else(|| recurrence.to_string());
+        over.set(datetime_like("DTEND", master.get("DTEND"), &end));
+    }
+    Some(over)
+}
+
+/// Build a date-time property named `name` carrying `wall`, mirroring the zone
+/// form — `VALUE=DATE` / trailing `Z` / `TZID` / floating — of `template` (the
+/// master's `DTSTART` or `DTEND`). A synthesised `RECURRENCE-ID`/`DTSTART`/`DTEND`
+/// or an `EXDATE` must match the form the server's `RRULE` generates, which is
+/// what makes the server recognise it as the same occurrence.
+fn datetime_like(name: &str, template: Option<&ical::Property>, wall: &str) -> ical::Property {
+    let digits = compact(wall);
+    let is_date = template
+        .and_then(|p| p.param("VALUE"))
+        .is_some_and(|v| v.eq_ignore_ascii_case("DATE"));
+    let is_utc = template.is_some_and(|p| p.value.trim_end().ends_with(['Z', 'z']));
+    let tzid = template.and_then(|p| p.param("TZID"));
+
+    if is_date {
+        ical::Property::raw(name, digits.get(..8).unwrap_or(&digits)).with_param("VALUE", "DATE")
+    } else if is_utc {
+        ical::Property::raw(name, &format!("{digits}Z"))
+    } else if let Some(zone) = tzid {
+        ical::Property::raw(name, &digits).with_param("TZID", zone)
+    } else {
+        ical::Property::raw(name, &digits)
+    }
 }
 
 /// Add an `EXDATE` for `recurrence` to the master, mirroring its `DTSTART`'s
 /// zone form so the server matches it against the generated occurrence.
 fn add_exdate(master: &mut ical::Component, recurrence: &str) {
-    let digits = compact(recurrence);
-    let start = master.get("DTSTART");
-    let is_date = start
-        .and_then(|p| p.param("VALUE"))
-        .is_some_and(|v| v.eq_ignore_ascii_case("DATE"));
-    let is_utc = start.is_some_and(|p| p.value.trim_end().ends_with(['Z', 'z']));
-    let tzid = start.and_then(|p| p.param("TZID"));
-
-    let exdate = if is_date {
-        ical::Property::raw("EXDATE", digits.get(..8).unwrap_or(&digits))
-            .with_param("VALUE", "DATE")
-    } else if is_utc {
-        ical::Property::raw("EXDATE", &format!("{digits}Z"))
-    } else if let Some(zone) = tzid {
-        ical::Property::raw("EXDATE", &digits).with_param("TZID", zone)
-    } else {
-        ical::Property::raw("EXDATE", &digits)
-    };
+    let exdate = datetime_like("EXDATE", master.get("DTSTART"), recurrence);
     master.push(exdate);
 }
 
 /// Drop any override VEVENT for `recurrence`, so a deleted occurrence does not
 /// linger as a modified one.
 fn remove_override(calendar: &mut ical::Component, recurrence: &str) {
-    let key = day_key(recurrence);
+    // Exact match, like `find_override` and for the same reason: dropping the
+    // wrong occurrence's override is destructive. The master's own EXDATE (written
+    // by `add_exdate`) is what actually hides the deleted occurrence; a foreign-form
+    // override this leaves behind is caught by the display-side exclusion filter.
     calendar.children.retain(|child| {
         !(child.name == "VEVENT"
             && child
                 .get("RECURRENCE-ID")
                 .and_then(|p| p.date_time())
-                .map(|dt| day_key(&dt.wall))
-                == Some(key.clone()))
+                .is_some_and(|dt| dt.wall == recurrence))
     });
 }
 
@@ -1016,23 +1138,22 @@ fn expand_group(
     };
     let duration = duration_seconds(master, &start);
 
-    // Deleted occurrences. EXDATE is repeatable *and* comma-separated.
-    // Keyed by day rather than by exact wall clock: a server may write EXDATE in
-    // UTC while DTSTART carries a TZID, and comparing those two wall clocks
-    // directly would silently resurrect a deleted occurrence.
-    // ponytail: day granularity cannot separate two occurrences of one series on
-    // the same day, which sub-daily frequencies would need - and those are
-    // unsupported anyway. Exact once something here can convert between zones.
-    let excluded: BTreeSet<String> = master
+    // Deleted occurrences. EXDATE is repeatable *and* comma-separated. Kept as
+    // full wall clocks and matched with `same_occurrence`, so an EXDATE a foreign
+    // client wrote in UTC while DTSTART carries a TZID still excludes its
+    // occurrence even when the zone offset pushes it onto an adjacent day —
+    // otherwise a deleted occurrence silently resurrects.
+    let excluded: Vec<String> = master
         .all("EXDATE")
         .flat_map(|p| {
             p.value
                 .split(',')
                 .filter_map(|v| ical::IcalDateTime::parse(v, p.param("TZID")))
-                .map(|dt| day_key(&dt.wall))
+                .map(|dt| dt.wall)
                 .collect::<Vec<_>>()
         })
         .collect();
+    let is_excluded = |wall: &str| excluded.iter().any(|ex| excludes_occurrence(ex, wall));
 
     let rule = master
         .get("RRULE")
@@ -1051,7 +1172,7 @@ fn expand_group(
 
     let mut seen = BTreeSet::new();
     for occurrence in occurrences {
-        if excluded.contains(&day_key(&occurrence)) || !seen.insert(occurrence.clone()) {
+        if is_excluded(&occurrence) || !seen.insert(occurrence.clone()) {
             continue;
         }
         // A moved occurrence carries its own times; a generated one inherits the
@@ -1085,7 +1206,7 @@ fn expand_group(
     // An override moved outside the generated set (its rule no longer produces
     // that slot) is still a real event the user scheduled.
     for (key, component) in &by_key {
-        if excluded.contains(&day_key(key)) || seen.contains(key) {
+        if is_excluded(key) || seen.contains(key) {
             continue;
         }
         let start = override_start(component, key);
@@ -1880,10 +2001,19 @@ END:VCALENDAR\r\n";
         assert!(!starts.iter().any(|s| s.starts_with("2026-07-29")));
     }
 
+    /// The `(calendar, vevent)` indices of an RSVP target that must already
+    /// exist (a one-off, a whole-series response, or an existing override).
+    fn existing_target(calendars: &[ical::Component], recurrence: &str) -> (usize, usize) {
+        match resolve_response_target(calendars, recurrence) {
+            Some(ResponseTarget::Existing(ci, vi)) => (ci, vi),
+            other => panic!("expected an existing target, got {other:?}"),
+        }
+    }
+
     #[test]
     fn rsvp_sets_the_users_own_partstat_and_leaves_others_alone() {
         let mut calendars = ical::parse(SERIES);
-        let (ci, vi) = find_response_target(&calendars, "").unwrap();
+        let (ci, vi) = existing_target(&calendars, "");
         set_partstat(&mut calendars[ci].children[vi], "me@icloud.com", "ACCEPTED").unwrap();
 
         let out = emit::serialize(&calendars[ci]);
@@ -1906,8 +2036,179 @@ END:VCALENDAR\r\n";
 
         // Responding as someone who is not an attendee is an error, not a no-op.
         let mut fresh = ical::parse(SERIES);
-        let (ci, vi) = find_response_target(&fresh, "").unwrap();
+        let (ci, vi) = existing_target(&fresh, "");
         assert!(set_partstat(&mut fresh[ci].children[vi], "stranger@x.io", "DECLINED").is_err());
+    }
+
+    #[test]
+    fn rsvp_to_a_bare_occurrence_synthesises_an_override_and_leaves_the_series() {
+        // Decline the 12 Aug occurrence, which has no override of its own. It must
+        // NOT touch the master (that would change the whole series' status and
+        // relay a whole-series reply to the organiser).
+        let mut calendars = ical::parse(SERIES);
+        let recurrence = "2026-08-12T09:00:00";
+        let (ci, master_vi) = match resolve_response_target(&calendars, recurrence) {
+            Some(ResponseTarget::Synthesize(ci, vi)) => (ci, vi),
+            other => panic!("expected Synthesize, got {other:?}"),
+        };
+        let mut over =
+            build_occurrence_override(&calendars[ci].children[master_vi], recurrence).unwrap();
+        set_partstat(&mut over, "me@icloud.com", "DECLINED").unwrap();
+        calendars[ci].children.push(over);
+
+        let parsed = ical::parse(&emit::serialize(&calendars[ci]))[0].clone();
+        // Master + the pre-existing 29 Jul override + the new 12 Aug override.
+        assert_eq!(parsed.children_named("VEVENT").count(), 3);
+
+        // The MASTER's own PARTSTAT is untouched, and its rule is intact.
+        let master = parsed
+            .children_named("VEVENT")
+            .find(|v| v.get("RECURRENCE-ID").is_none())
+            .unwrap();
+        let master_me = master
+            .all("ATTENDEE")
+            .find(|a| strip_mailto(&a.value) == "me@icloud.com")
+            .unwrap();
+        assert_eq!(master_me.param("PARTSTAT"), Some("NEEDS-ACTION"));
+        assert!(master.get("RRULE").is_some(), "series rule preserved");
+
+        // The new override carries the decline for just this instance, pinned to
+        // the slot in DTSTART's zone form, with no recurrence rule of its own.
+        let over = parsed
+            .children_named("VEVENT")
+            .find(|v| {
+                v.get("RECURRENCE-ID")
+                    .is_some_and(|p| p.value.starts_with("20260812"))
+            })
+            .expect("an override for 12 Aug");
+        assert!(over.get("RRULE").is_none());
+        assert_eq!(
+            over.get("RECURRENCE-ID").unwrap().param("TZID"),
+            Some("Europe/London")
+        );
+        assert_eq!(over.get("DTSTART").unwrap().value, "20260812T090000");
+        assert_eq!(over.get("DTEND").unwrap().value, "20260812T091500");
+        let over_me = over
+            .all("ATTENDEE")
+            .find(|a| strip_mailto(&a.value) == "me@icloud.com")
+            .unwrap();
+        assert_eq!(over_me.param("PARTSTAT"), Some("DECLINED"));
+        // Sam's status rides along on the clone untouched.
+        let over_sam = over
+            .all("ATTENDEE")
+            .find(|a| strip_mailto(&a.value) == "sam@example.com")
+            .unwrap();
+        assert_eq!(over_sam.param("PARTSTAT"), Some("ACCEPTED"));
+    }
+
+    #[test]
+    fn rsvp_to_an_occurrence_that_already_has_an_override_edits_it_in_place() {
+        // The 29 Jul occurrence is the moved override (children[1]); an RSVP for it
+        // must land there, not synthesise a duplicate.
+        let calendars = ical::parse(SERIES);
+        let (ci, vi) = existing_target(&calendars, "2026-07-29T09:00:00");
+        assert_eq!(ci, 0);
+        assert!(calendars[ci].children[vi].get("RECURRENCE-ID").is_some());
+    }
+
+    #[test]
+    fn excludes_occurrence_matches_a_cross_form_pair_across_midnight_but_not_adjacent_days() {
+        // The same instant either side of local midnight (a 00:20 TZID occurrence
+        // vs its UTC form on the previous day) — must match.
+        assert!(excludes_occurrence(
+            "2026-07-12T23:20:00",
+            "2026-07-13T00:20:00"
+        ));
+        // The same calendar day always matches.
+        assert!(excludes_occurrence(
+            "2026-07-13T00:20:00",
+            "2026-07-13T09:00:00"
+        ));
+        // Two genuinely different days of a daily series (24h apart) must NOT
+        // collapse into one, or a single exclusion would over-hide.
+        assert!(!excludes_occurrence(
+            "2026-07-13T09:00:00",
+            "2026-07-14T09:00:00"
+        ));
+        // All-day dates on different days never match.
+        assert!(!excludes_occurrence("2026-07-13", "2026-07-14"));
+    }
+
+    #[test]
+    fn a_foreign_form_override_never_hijacks_a_write_for_an_adjacent_occurrence() {
+        // Brisbane is UTC+10 (no DST). A daily series; a foreign client moved the
+        // 11 Jul occurrence, writing its RECURRENCE-ID in UTC form
+        // (20260710T230000Z = 11 Jul 09:00 Brisbane). Its wall lands on 10 Jul — the
+        // SAME day_key as the 10 Jul occurrence, so a tolerant match would collide
+        // the two. A write must not.
+        let data = "BEGIN:VCALENDAR\r\n\
+BEGIN:VEVENT\r\n\
+UID:series-bne\r\n\
+SUMMARY:Daily\r\n\
+DTSTART;TZID=Australia/Brisbane:20260710T090000\r\n\
+DTEND;TZID=Australia/Brisbane:20260710T093000\r\n\
+RRULE:FREQ=DAILY;COUNT=5\r\n\
+ATTENDEE;PARTSTAT=NEEDS-ACTION:mailto:me@icloud.com\r\n\
+END:VEVENT\r\n\
+BEGIN:VEVENT\r\n\
+UID:series-bne\r\n\
+RECURRENCE-ID:20260710T230000Z\r\n\
+SUMMARY:Daily (moved)\r\n\
+DTSTART;TZID=Australia/Brisbane:20260711T110000\r\n\
+DTEND;TZID=Australia/Brisbane:20260711T113000\r\n\
+ATTENDEE;PARTSTAT=NEEDS-ACTION:mailto:me@icloud.com\r\n\
+END:VEVENT\r\n\
+END:VCALENDAR\r\n";
+        let calendars = ical::parse(data);
+
+        // RSVP to the plain 10 Jul occurrence must SYNTHESISE — never bind the
+        // 11 Jul override just because their day_keys coincide.
+        match resolve_response_target(&calendars, "2026-07-10T09:00:00") {
+            Some(ResponseTarget::Synthesize(..)) => {}
+            other => panic!("10 Jul must synthesise, not hijack the 11 Jul override: {other:?}"),
+        }
+
+        // Deleting the 10 Jul occurrence must not drop the 11 Jul override.
+        let mut cal = calendars[0].clone();
+        remove_override(&mut cal, "2026-07-10T09:00:00");
+        assert_eq!(
+            cal.children_named("VEVENT")
+                .filter(|v| v.get("RECURRENCE-ID").is_some())
+                .count(),
+            1,
+            "the 11 Jul override must survive a 10 Jul delete"
+        );
+
+        // The override's own (foreign-form) id still binds to it exactly.
+        match resolve_response_target(&calendars, "2026-07-10T23:00:00") {
+            Some(ResponseTarget::Existing(_, vi)) => {
+                assert!(calendars[0].children[vi].get("RECURRENCE-ID").is_some());
+            }
+            other => panic!("the override's own id must bind to it: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn an_exdate_crossing_local_midnight_still_deletes_its_occurrence() {
+        // The series starts at 00:20 London (BST = UTC+1), so 13 Jul 00:20 local is
+        // 12 Jul 23:20 UTC — a day earlier. A foreign client's UTC EXDATE lands on
+        // the 12th; day-only matching would miss it and resurrect the occurrence.
+        let data = "BEGIN:VCALENDAR\r\n\
+BEGIN:VEVENT\r\n\
+UID:series-late\r\n\
+SUMMARY:Late standup\r\n\
+DTSTART;TZID=Europe/London:20260706T002000\r\n\
+DTEND;TZID=Europe/London:20260706T003000\r\n\
+RRULE:FREQ=WEEKLY;COUNT=3\r\n\
+EXDATE:20260712T232000Z\r\n\
+END:VEVENT\r\n\
+END:VCALENDAR\r\n";
+        let starts: Vec<_> = view(data, "2026-07-01T00:00:00", "2026-08-01T00:00:00")
+            .into_iter()
+            .map(|e| e.start.date_time)
+            .collect();
+        // Occurrences 6/13/20 Jul at 00:20; the 13th is the excluded one.
+        assert_eq!(starts, ["2026-07-06T00:20:00", "2026-07-20T00:20:00"]);
     }
 
     #[test]
