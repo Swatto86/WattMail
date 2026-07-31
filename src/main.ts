@@ -1663,6 +1663,7 @@ async function probeMeetingInvite(id: string): Promise<void> {
 function renderInviteBar(bar: HTMLDivElement, messageId: string, invite: MeetingInviteInfo): void {
   const when = fmtInviteWhen(invite);
   const status = INVITE_STATUS_LABEL[invite.responseStatus] ?? "";
+  bar.title = "This message contains a meeting invitation.";
   bar.innerHTML = `
     <span class="reader-invite-label">&#128197; Meeting invitation${when ? ` · ${esc(when)}` : ""}</span>
     ${status ? `<span class="reader-invite-status">${esc(status)}</span>` : ""}

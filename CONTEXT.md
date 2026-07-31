@@ -101,6 +101,32 @@ Entra app registration (public, not secret):
 
 ## Progress log
 
+### 2026-07-31 — Pop-out layout fix + meeting-invite tooltip (v0.10.1)
+
+User feedback on v0.10.0: the pop-out message window's vertical scrollbar was
+clipping off the right edge, and the blue meeting-invite bar was not self-
+explanatory.
+
+- **Scrollbar clipping:** the pop-out iframe used `width: 100%` plus horizontal
+  margins (`margin: 0 6px 6px` / `margin: 8px` for the paper-card variant),
+  so the frame overflowed its flex container and the scrollbar sat partly
+  outside the OS window. Fixed by setting the iframe width to
+  `calc(100% - 12px)` for the default inset and `calc(100% - 16px)` for the
+  paper-card inset, with a dedicated override for pop-out paper-cards. The
+  pre-existing `message.html` change adding `overflow-hidden` and `min-w-0` to
+  `#app` is included in this commit.
+- **Blue bar:** this is the meeting-invitation bar (primary-accent border +
+  background, 📅 "Meeting invitation …" label, Accept/Tentative/Decline
+  buttons). Added a `title` tooltip to the bar in both `message.ts` and
+  `main.ts` so hovering explains what it is.
+- Bumped version to **v0.10.1**.
+
+**Verification:** `npm run build` (tsc + vite) green; full Rust gate green
+(`cargo fmt --check`, `clippy --all-targets -D warnings`, 146 workspace tests).
+**Not live-run** — the pop-out scrollbar positioning and the tooltip are
+frontend-only and were verified by static build; a real-window sanity check is
+still worth doing.
+
 ### 2026-07-31 — Pop-out message windows (double-click / Enter)
 
 Outlook-style "open in its own window": **double-clicking** a message row or

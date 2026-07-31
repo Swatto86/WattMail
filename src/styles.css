@@ -791,11 +791,20 @@ body,
 }
 .reader-frame {
   flex: 1;
+  min-height: 0; /* allow the flex item to shrink so the email scrolls inside it */
   width: 100%;
   border: 0;
   /* Theme base; the iframe's own <body> paints the real surface (a white paper
      card for designed/light mail, the theme surface for adapted plain mail). */
   background: oklch(var(--b1));
+}
+/* Pop-out message window: the reading pane is inset by the folder/list panes, but
+   a standalone window has none, so inset the frame from the OS window edge so its
+   scrollbar clears the border instead of clipping off the window. Width must account
+   for the horizontal margin or the frame overflows and the scrollbar stays clipped. */
+.reader-frame--win {
+  width: calc(100% - 12px);
+  margin: 0 6px 6px;
 }
 /* Designed / light-mode emails keep their white surface. In the dark theme,
    frame that white as a "paper card" so it reads as an intentional sheet rather
@@ -803,9 +812,13 @@ body,
    so no framing is needed (this rule is scoped to the dark theme). */
 [data-theme="business"] .reader-frame.is-paper-card {
   background: #ffffff;
-  margin: 8px;
   border-radius: 8px;
   box-shadow: 0 1px 4px oklch(var(--bc) / 0.25);
+}
+/* Pop-out paper-card has a larger, even inset; width must account for that margin. */
+[data-theme="business"] .reader-frame.reader-frame--win.is-paper-card {
+  width: calc(100% - 16px);
+  margin: 8px;
 }
 
 /* Folder sidebar */

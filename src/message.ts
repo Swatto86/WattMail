@@ -198,7 +198,7 @@ function renderMessage(msg: MessageView): void {
     <div id="reader-invite" class="reader-invite hidden"></div>
     <div id="reader-attachments" class="reader-attachments"></div>
     ${banner}
-    <iframe class="reader-frame" sandbox="allow-same-origin allow-modals" referrerpolicy="no-referrer"></iframe>
+    <iframe class="reader-frame reader-frame--win" sandbox="allow-same-origin allow-modals" referrerpolicy="no-referrer"></iframe>
   `;
   appEl.querySelector<HTMLButtonElement>("#load-images")?.addEventListener("click", () => {
     void loadAndRender(true);
@@ -365,6 +365,7 @@ function fmtInviteWhen(invite: MeetingInviteInfo): string {
 function renderInviteBar(bar: HTMLDivElement, invite: MeetingInviteInfo): void {
   const when = fmtInviteWhen(invite);
   const status = INVITE_STATUS_LABEL[invite.responseStatus] ?? "";
+  bar.title = "This message contains a meeting invitation.";
   bar.innerHTML = `
     <span class="reader-invite-label">&#128197; Meeting invitation${when ? ` · ${esc(when)}` : ""}</span>
     ${status ? `<span class="reader-invite-status">${esc(status)}</span>` : ""}
