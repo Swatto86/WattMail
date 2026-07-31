@@ -1330,6 +1330,67 @@ pub fn play_new_mail_sound() {
     crate::play_notify_sound();
 }
 
+/// Open a message in its own OS window (double-click / Enter / context menu).
+/// Re-opening the same message focuses its existing window rather than spawning
+/// a duplicate. The message id is handed to the new window via a label-keyed
+/// state map (`message_window_target`) so the opaque Graph id need not survive
+/// URL encoding.
+#[tauri::command]
+pub async fn open_message_window(
+    app: tauri::AppHandle,
+    windows: State<'_, crate::MessageWindows>,
+    message_id: String,
+    subject: String,
+) -> Result<(), String> {
+    use tauri::{Manager, WebviewUrl, WebviewWindowBuilder};
+    // Dedup by deriving a stable label from the message id (label charset is
+    // [a-zA-Z0-9_-]); a second open of the same message focuses the first window.
+    let safe: String = message_id
+        .chars()
+        .map(|c| if c.is_alphanumeric() { c } else { '_' })
+        .collect();
+    let label = format!("msgwin-{safe}");
+    if let Some(existing) = app.get_webview_window(&label) {
+        let _ = existing.show();
+        let _ = existing.set_focus();
+        return Ok(());
+    }
+    windows.0.write().map_err(|e| e.to_string())?.insert(
+        label.clone(),
+        crate::MessageTarget {
+            message_id,
+            subject: subject.clone(),
+        },
+    );
+    let title = if subject.is_empty() {
+        "Message".to_string()
+    } else {
+        subject
+    };
+    WebviewWindowBuilder::new(&app, &label, WebviewUrl::App("message.html".into()))
+        .title(title)
+        .inner_size(760.0, 640.0)
+        .min_inner_size(420.0, 320.0)
+        .build()
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// Resolve the message a pop-out window was opened for, by its own label.
+#[tauri::command]
+pub fn message_window_target(
+    window: tauri::Window,
+    windows: State<'_, crate::MessageWindows>,
+) -> Result<crate::MessageTarget, String> {
+    windows
+        .0
+        .read()
+        .map_err(|e| e.to_string())?
+        .get(window.label())
+        .cloned()
+        .ok_or_else(|| "No message target for this window".to_string())
+}
+
 /// Whether desktop notifications for new mail are enabled.
 #[tauri::command]
 pub fn get_notification_setting(state: State<'_, SettingsState>) -> bool {

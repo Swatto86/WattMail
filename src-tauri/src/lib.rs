@@ -44,6 +44,21 @@ pub(crate) struct NotificationState {
     last_notified_at: RwLock<HashMap<String, String>>,
 }
 
+/// The message a pop-out window was opened for, keyed by the window's label so
+/// the new window can look up its target by its own label (the opaque Graph
+/// message id need not survive URL encoding).
+#[derive(Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MessageTarget {
+    pub message_id: String,
+    pub subject: String,
+}
+
+/// Tracks every open pop-out message window (label → target). A closed window
+/// is removed from this map in the `Destroyed` window event.
+#[derive(Default)]
+pub(crate) struct MessageWindows(pub RwLock<HashMap<String, MessageTarget>>);
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let accounts = AccountManager::load();
@@ -71,6 +86,7 @@ pub fn run() {
         .manage(SettingsState(RwLock::new(loaded)))
         .manage(StartHidden(start_hidden))
         .manage(NotificationState::default())
+        .manage(MessageWindows::default())
         .setup(move |app| {
             build_tray(app.handle())?;
             // Safety net: if the frontend never reveals the window (e.g. a script
@@ -87,8 +103,13 @@ pub fn run() {
             }
             Ok(())
         })
-        .on_window_event(|window, event| {
-            if let WindowEvent::CloseRequested { api, .. } = event {
+        .on_window_event(|window, event| match event {
+            WindowEvent::CloseRequested { api, .. } => {
+                // Only the main window hides-to-tray or flush-quits on close.
+                // Pop-out message windows (label "msgwin-*") close normally.
+                if window.label() != "main" {
+                    return;
+                }
                 let close_to_tray = window
                     .app_handle()
                     .state::<SettingsState>()
@@ -109,6 +130,13 @@ pub fn run() {
                     quit_with_flush(window.app_handle());
                 }
             }
+            WindowEvent::Destroyed if window.label().starts_with("msgwin-") => {
+                // Drop the target mapping for a closed pop-out message window.
+                if let Some(wins) = window.app_handle().try_state::<MessageWindows>() {
+                    let _ = wins.0.write().map(|mut m| m.remove(window.label()));
+                }
+            }
+            _ => {}
         })
         .invoke_handler(tauri::generate_handler![
             commands::is_signed_in,
@@ -126,6 +154,8 @@ pub fn run() {
             commands::sync_folder,
             commands::search_messages,
             commands::load_message,
+            commands::open_message_window,
+            commands::message_window_target,
             commands::message_headers,
             commands::prepare_reply,
             commands::prepare_forward,

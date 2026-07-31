@@ -5,7 +5,7 @@
 > new milestone state, a decision made/reversed, or an open question resolved.
 > Keep newest progress entries at the top of the log.
 >
-> **Last updated:** 2026-07-30
+> **Last updated:** 2026-07-31
 
 ---
 
@@ -59,8 +59,8 @@ Stack and patterns deliberately mirror Swatto's **AllTheThings**
 WattMail/
 ├─ Cargo.toml                 # workspace + release profile (LTO/strip)
 ├─ rust-toolchain.toml        # pinned 1.96.0 (repo root, per Tauri rules)
-├─ package.json, index.html, vite/tailwind/postcss/tsconfig   # frontend (root)
-├─ src/                       # frontend TypeScript (main.ts, styles.css)
+├─ package.json, index.html, message.html, vite/tailwind/postcss/tsconfig   # frontend (root)
+├─ src/                       # frontend TypeScript (main.ts, message.ts, email-render.ts, styles.css)
 ├─ src-tauri/                 # Tauri crate = presentation layer + composition root
 │  ├─ src/{main,lib,commands,settings}.rs
 │  ├─ tauri.conf.json, build.rs, capabilities/, icons/, appicon.png
@@ -100,6 +100,56 @@ Entra app registration (public, not secret):
 ---
 
 ## Progress log
+
+### 2026-07-31 — Pop-out message windows (double-click / Enter)
+
+Outlook-style "open in its own window": **double-clicking** a message row or
+pressing **Enter** on the cursor opens it in a standalone OS window (single-click
+still previews in the reading pane, exactly like Outlook). The right-click menu's
+"Open" became "Open in new window". Drafts keep their resume-in-compose behaviour
+(no pop-out compose window).
+
+- **Architecture — same shell, separate entry point.** A new `message.html` +
+  `src/message.ts` is a focused Vite multi-page entry (`vite.config.ts`
+  `rollupOptions.input`). The Rust `open_message_window` command builds a
+  `WebviewWindow` (label `msgwin-<sanitized-id>`, deduped — re-opening the same
+  message focuses its window) that loads `message.html`. The opaque Graph message
+  id is handed to the new window via a label-keyed state map
+  (`MessageWindows`, `message_window_target`) so it never survives URL encoding.
+- **Shared rendering, one source of truth.** The dark-mode email-rendering block
+  (colour utils, `readThemeColors`, `adaptPlainEmail`, `wrapEmailHtml`) was
+  extracted from the main.ts monolith into `src/email-render.ts`, imported by both
+  `main.ts` and `message.ts` — so the pop-out renders a message identically to the
+  reading pane (sanitized body iframe, designed/plain adaptation, load-images,
+  attachments with preview/open/save, meeting-invite RSVP). No copy of the
+  security-relevant contrast logic.
+- **Action delegation.** The pop-out owns no compose modal / headers overlay, so
+  Reply / Reply all / Forward / Delete / Headers emit a `message-window-action`
+  event; the main window performs the action and focuses itself. Print and
+  Save-as-EML run locally in the pop-out.
+- **Lifecycle.** Only the `main` window hides-to-tray / flush-quits on close;
+  pop-outs close normally (close handler now scoped to `label == "main"`). A
+  pop-out marks its message read on open (`message-read-changed` → main updates
+  the row) and **closes itself** when the main window deletes/moves that message
+  (`message-removed`, emitted from the single + bulk delete/move paths). Theme
+  stays in sync via the cross-window `storage` event (same localStorage key).
+- **Capability.** New `src-tauri/capabilities/message-window.json` scoped to
+  `msgwin-*` grants `core:default` + `core:window:allow-close` + dialog/opener
+  (custom commands aren't ACL-gated; the close permission is the one core op the
+  pop-out needs beyond events).
+
+**Verification: compile + tests only** (npm build incl. tsc/vite, `cargo fmt`,
+clippy `-D warnings`, 146 workspace tests). **Not live-run** — the window
+creation, the `msgwin-*` capability glob match, the dev-mode `message.html`
+resolution, and the pop-out→main event round-trips are all unexercised against a
+real window this session. Live sanity list: double-click a message (window opens,
+faithful body + attachments); Enter on a selected message; re-open the same
+message (focuses, not duplicated); Reply/Forward from the pop-out (opens compose
+in main + focuses it); Delete from the pop-out (window closes, main list
+updates); delete/move the open message from the main list (pop-out closes);
+toggle the theme in main (pop-out follows). Known limitation: the pop-out loads
+via the *active* account, so switching accounts while a pop-out is open can make
+its "load images" re-fetch target the wrong mailbox (the initial view is correct).
 
 ### 2026-07-30 — Inline cid: images fixed, live-verified (v0.9.5)
 
