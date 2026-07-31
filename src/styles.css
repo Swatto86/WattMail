@@ -444,6 +444,9 @@ body,
   gap: 6px;
   margin-left: auto;
 }
+.reader-invite.hidden {
+  display: none;
+}
 .signature-input {
   width: 15rem;
   flex-shrink: 0;
@@ -1093,6 +1096,9 @@ body,
   gap: 6px;
   padding: 8px 16px 0;
   flex-shrink: 0;
+}
+.reader-attachments:empty {
+  display: none;
 }
 .attach-chip {
   display: inline-flex;
