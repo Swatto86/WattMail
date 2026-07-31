@@ -101,6 +101,31 @@ Entra app registration (public, not secret):
 
 ## Progress log
 
+### 2026-07-31 — Empty meeting-invite bar no longer leaks in non-invite messages (v0.10.2)
+
+User feedback on v0.10.1: the thin blue bar between the action buttons and the
+"Images blocked" banner in the screenshot was not the meeting-invite bar — it
+was the empty meeting-invite container showing through because `.hidden` did not
+actually hide it.
+
+- **Root cause:** the reader renders an empty `#reader-invite` div with
+  `class="reader-invite hidden"` for every message. The project's `.hidden`
+  overrides are element-specific (`.update-banner.hidden`, `.overlay.hidden`,
+  …), but `.reader-invite.hidden` was missing, so the empty bar kept its
+  `display: flex` and rendered as a thin primary-accent line above the banner.
+  The empty `.reader-attachments` div also added unnecessary top padding.
+- **Fix:** added `.reader-invite.hidden { display: none; }` and
+  `.reader-attachments:empty { display: none; }` to `styles.css`. This removes
+  the leaked bar and tightens the gap for messages with no attachments.
+- The v0.10.1 tooltip on the *real* meeting-invite bar remains in place.
+
+**Verification:** `npm run build` (tsc + vite) green; full Rust gate green
+(`cargo fmt --check`, `clippy --all-targets -D warnings`, 146 workspace tests).
+GitHub CI and release workflows passed on commit `82cc377`; v0.10.2 installer
+and portable exe published. **Not live-run** — the defect is purely CSS in the
+same reader path already built; a real non-meeting message pop-out will confirm
+the bar is gone.
+
 ### 2026-07-31 — Pop-out layout fix + meeting-invite tooltip (v0.10.1)
 
 User feedback on v0.10.0: the pop-out message window's vertical scrollbar was
@@ -115,10 +140,11 @@ explanatory.
   paper-card inset, with a dedicated override for pop-out paper-cards. The
   pre-existing `message.html` change adding `overflow-hidden` and `min-w-0` to
   `#app` is included in this commit.
-- **Blue bar:** this is the meeting-invitation bar (primary-accent border +
-  background, 📅 "Meeting invitation …" label, Accept/Tentative/Decline
-  buttons). Added a `title` tooltip to the bar in both `message.ts` and
-  `main.ts` so hovering explains what it is.
+- **Meeting-invite tooltip:** added a `title` tooltip to the real
+  meeting-invitation bar (primary-accent border + background, 📅 "Meeting invitation …"
+  label, Accept/Tentative/Decline buttons) in both `message.ts` and `main.ts` so
+  hovering explains what it is. (This was not the blue bar the user later reported;
+  that was the empty invite container leaking — fixed in v0.10.2.)
 - Bumped version to **v0.10.1**.
 
 **Verification:** `npm run build` (tsc + vite) green; full Rust gate green
