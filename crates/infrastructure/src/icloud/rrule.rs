@@ -206,6 +206,10 @@ pub fn expand(dtstart: &str, rule: &RRule, window_start: &str, window_end: &str)
         };
         candidates.sort_unstable();
         candidates.dedup();
+        // BY* parts that are *limits* for this FREQ (RFC 5545 §3.3.10) filter
+        // the generated set — without this, e.g. FREQ=DAILY;BYDAY=MO,TU,WE,TH,FR
+        // produced weekend occurrences.
+        candidates.retain(|&day| passes_limit_parts(day, rule));
 
         // A period whose every candidate already sits past the window ends the
         // walk — but only once COUNT can no longer be the binding limit, and
@@ -256,6 +260,48 @@ fn finish(mut out: Vec<String>) -> Vec<String> {
     out.sort();
     out.dedup();
     out
+}
+
+/// Apply the BY* parts that act as *limits* (filters) for this frequency, per
+/// the table in RFC 5545 §3.3.10. Expansion-role parts are already applied
+/// when the candidates are generated.
+fn passes_limit_parts(day: i64, rule: &RRule) -> bool {
+    let (y, m, d) = civil::civil_from_days(day);
+    match rule.freq {
+        Freq::Daily => {
+            month_allowed(m, rule)
+                && weekday_allowed(day, rule)
+                && month_day_allowed(y, m, d, rule)
+        }
+        Freq::Weekly | Freq::Monthly => month_allowed(m, rule),
+        // Under YEARLY every supported BY* part expands; nothing to filter.
+        Freq::Yearly => true,
+    }
+}
+
+fn month_allowed(m: u32, rule: &RRule) -> bool {
+    rule.by_month.is_empty() || rule.by_month.contains(&m)
+}
+
+/// Under DAILY a BYDAY entry limits by weekday alone (ordinals have no
+/// meaning at that frequency).
+fn weekday_allowed(day: i64, rule: &RRule) -> bool {
+    if rule.by_day.is_empty() {
+        return true;
+    }
+    let weekday = (day + 4).rem_euclid(7) as u32;
+    rule.by_day.iter().any(|entry| entry.weekday == weekday)
+}
+
+fn month_day_allowed(y: i64, m: u32, d: u32, rule: &RRule) -> bool {
+    if rule.by_month_day.is_empty() {
+        return true;
+    }
+    let last = civil::days_in_month(y, m) as i32;
+    rule.by_month_day.iter().any(|&raw| {
+        let resolved = if raw > 0 { raw } else { last + raw + 1 };
+        resolved == d as i32
+    })
 }
 
 /// Half-open containment: `[window_start, window_end)`.
@@ -348,11 +394,16 @@ fn days_in(y: i64, m: u32, anchor_day: u32, rule: &RRule) -> Vec<i64> {
     }
     let mut days: Vec<u32> = Vec::new();
 
-    for entry in &rule.by_day {
-        match entry.ordinal {
-            Some(n) => days.extend(nth_weekday(y, m, entry.weekday, n)),
-            // A plain weekday under MONTHLY/YEARLY means every such weekday.
-            None => days.extend(all_weekdays(y, m, entry.weekday)),
+    // BYDAY *expands* only when BYMONTHDAY is absent; alongside BYMONTHDAY it
+    // is a *limit* (RFC 5545: "Every Friday the 13th" =
+    // FREQ=MONTHLY;BYDAY=FR;BYMONTHDAY=13), applied below.
+    if rule.by_month_day.is_empty() {
+        for entry in &rule.by_day {
+            match entry.ordinal {
+                Some(n) => days.extend(nth_weekday(y, m, entry.weekday, n)),
+                // A plain weekday under MONTHLY/YEARLY means every such weekday.
+                None => days.extend(all_weekdays(y, m, entry.weekday)),
+            }
         }
     }
     for &raw in &rule.by_month_day {
@@ -367,7 +418,17 @@ fn days_in(y: i64, m: u32, anchor_day: u32, rule: &RRule) -> Vec<i64> {
             days.push(resolved as u32);
         }
     }
-    if days.is_empty() {
+    if !rule.by_day.is_empty() && !rule.by_month_day.is_empty() {
+        days.retain(|&d| {
+            let weekday = (civil::days_from_civil(y, m, d) + 4).rem_euclid(7) as u32;
+            rule.by_day.iter().any(|entry| entry.weekday == weekday)
+        });
+    }
+    // The anchor fallback is only for rules that specify no day-of-month part
+    // at all; when BYDAY/BYMONTHDAY are present an empty set is a legitimate
+    // "no occurrence this period" (e.g. the 13th that isn't a Friday), not a
+    // signal to fall back to the series' own day.
+    if days.is_empty() && rule.by_day.is_empty() && rule.by_month_day.is_empty() {
         if anchor_day > last {
             return Vec::new();
         }
@@ -683,5 +744,56 @@ mod tests {
         );
         assert_eq!(parse_by_day("XX"), None);
         assert_eq!(parse_by_day(""), None);
+    }
+
+    #[test]
+    fn daily_by_day_limits_to_the_listed_weekdays() {
+        // Thunderbird/Lightning's "Every weekday" shape. 2026-07-22 is a Wednesday.
+        let got = run(
+            "2026-07-22T09:00:00",
+            "FREQ=DAILY;BYDAY=MO,TU,WE,TH,FR",
+            "2026-07-22T00:00:00",
+            "2026-07-28T00:00:00",
+        );
+        assert_eq!(
+            got,
+            [
+                "2026-07-22T09:00:00", // Wed
+                "2026-07-23T09:00:00", // Thu
+                "2026-07-24T09:00:00", // Fri
+                "2026-07-27T09:00:00", // Mon — the weekend is skipped
+            ]
+        );
+    }
+
+    #[test]
+    fn daily_by_month_limits_to_the_listed_months() {
+        // RFC 5545's "every day in January" daily form.
+        let got = run(
+            "2026-01-30T08:00:00",
+            "FREQ=DAILY;BYMONTH=1",
+            "2026-01-30T00:00:00",
+            "2026-03-01T00:00:00",
+        );
+        assert_eq!(got, ["2026-01-30T08:00:00", "2026-01-31T08:00:00"]);
+    }
+
+    #[test]
+    fn monthly_by_day_with_by_month_day_is_an_intersection_not_a_union() {
+        // RFC 5545's "Every Friday the 13th". 2026 has exactly Feb/Mar/Nov.
+        let got = run(
+            "2026-02-13T13:00:00",
+            "FREQ=MONTHLY;BYDAY=FR;BYMONTHDAY=13",
+            "2026-01-01T00:00:00",
+            "2027-01-01T00:00:00",
+        );
+        assert_eq!(
+            got,
+            [
+                "2026-02-13T13:00:00",
+                "2026-03-13T13:00:00",
+                "2026-11-13T13:00:00"
+            ]
+        );
     }
 }
