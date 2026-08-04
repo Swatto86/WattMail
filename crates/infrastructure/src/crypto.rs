@@ -66,18 +66,44 @@ impl FieldCipher {
     }
 }
 
-fn load_or_create_key() -> Result<[u8; 32], MailError> {
-    let entry = keyring::Entry::new(KEYRING_SERVICE, KEYRING_ACCOUNT)
-        .map_err(|e| MailError::Storage(e.to_string()))?;
+/// What a stored-key lookup result means: reuse the key, create a fresh one
+/// (absent, or present but corrupt — that ciphertext is already lost), or fail
+/// WITHOUT touching the stored value (the store itself did not answer).
+enum KeyLookup {
+    Use([u8; 32]),
+    Create,
+    Fail(String),
+}
 
-    if let Ok(existing) = entry.get_password() {
-        if let Some(key) = base64::engine::general_purpose::STANDARD
+fn classify_key_lookup(result: Result<String, keyring::Error>) -> KeyLookup {
+    match result {
+        Ok(existing) => match base64::engine::general_purpose::STANDARD
             .decode(&existing)
             .ok()
             .and_then(|bytes| <[u8; 32]>::try_from(bytes.as_slice()).ok())
         {
-            return Ok(key);
-        }
+            Some(key) => KeyLookup::Use(key),
+            // Present but undecodable: replacing the corrupt value is the only
+            // recovery — whatever it protected is already unreadable.
+            None => KeyLookup::Create,
+        },
+        // Genuinely absent: first run.
+        Err(keyring::Error::NoEntry) => KeyLookup::Create,
+        // Any other failure (locked/unavailable store, platform error) is NOT
+        // absence: generating a new key here would overwrite the real one and
+        // orphan every ciphertext it protects. Surface the error instead.
+        Err(e) => KeyLookup::Fail(e.to_string()),
+    }
+}
+
+fn load_or_create_key() -> Result<[u8; 32], MailError> {
+    let entry = keyring::Entry::new(KEYRING_SERVICE, KEYRING_ACCOUNT)
+        .map_err(|e| MailError::Storage(e.to_string()))?;
+
+    match classify_key_lookup(entry.get_password()) {
+        KeyLookup::Use(key) => return Ok(key),
+        KeyLookup::Create => {}
+        KeyLookup::Fail(e) => return Err(MailError::Storage(format!("cache key read: {e}"))),
     }
 
     let mut key = [0u8; 32];
@@ -87,4 +113,36 @@ fn load_or_create_key() -> Result<[u8; 32], MailError> {
         .set_password(&encoded)
         .map_err(|e| MailError::Storage(e.to_string()))?;
     Ok(key)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use base64::Engine;
+
+    #[test]
+    fn key_lookup_reuses_valid_creates_on_absent_or_corrupt_and_fails_on_store_error() {
+        let key = [7u8; 32];
+        let encoded = base64::engine::general_purpose::STANDARD.encode(key);
+        assert!(matches!(
+            classify_key_lookup(Ok(encoded)),
+            KeyLookup::Use(k) if k == key
+        ));
+        // Corrupt value: regenerating is the intended recovery.
+        assert!(matches!(
+            classify_key_lookup(Ok("not base64!".into())),
+            KeyLookup::Create
+        ));
+        // Absent: first run creates a key.
+        assert!(matches!(
+            classify_key_lookup(Err(keyring::Error::NoEntry)),
+            KeyLookup::Create
+        ));
+        // A store failure must NOT be treated as absence — that path used to
+        // overwrite the live key and orphan every ciphertext.
+        assert!(matches!(
+            classify_key_lookup(Err(keyring::Error::TooLong("a".to_string(), 1))),
+            KeyLookup::Fail(_)
+        ));
+    }
 }
