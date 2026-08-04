@@ -1980,6 +1980,60 @@ fn recipients_summary(recipients: Option<Vec<GraphRecipient>>) -> String {
 static IMG_SRC_RE: LazyLock<regex::Regex> =
     LazyLock::new(|| regex::Regex::new(r#"(?i)src\s*=\s*["']([^"']+)["']"#).expect("valid regex"));
 
+/// True when `ip` is an address the remote-image fetcher must never contact
+/// (loopback, private, link-local incl. cloud metadata 169.254.169.254, CGNAT,
+/// unspecified) — the SSRF denylist.
+fn is_forbidden_ip(ip: std::net::IpAddr) -> bool {
+    match ip {
+        std::net::IpAddr::V4(v4) => {
+            v4.is_loopback()
+                || v4.is_private()
+                || v4.is_link_local()
+                || v4.is_unspecified()
+                || v4.is_broadcast()
+                || v4.is_documentation()
+                // CGNAT 100.64.0.0/10
+                || (v4.octets()[0] == 100 && (v4.octets()[1] & 0xc0) == 64)
+        }
+        std::net::IpAddr::V6(v6) => {
+            v6.is_loopback()
+                || v6.is_unspecified()
+                || (v6.segments()[0] & 0xffc0) == 0xfe80 // link-local fe80::/10
+                || (v6.segments()[0] & 0xfe00) == 0xfc00 // unique-local fc00::/7
+        }
+    }
+}
+
+/// Resolve `url`'s host and return true only when it is safe to fetch: an IP
+/// literal that is public, or a hostname that resolves exclusively to public
+/// addresses. Rejects unparsable URLs and resolution failures.
+async fn host_is_fetchable(url: &str) -> bool {
+    let Ok(parsed) = url::Url::parse(url) else {
+        return false;
+    };
+    let Some(host) = parsed.host_str() else {
+        return false;
+    };
+    if let Ok(ip) = host.parse::<std::net::IpAddr>() {
+        return !is_forbidden_ip(ip);
+    }
+    let port = parsed.port_or_known_default().unwrap_or(80);
+    let resolved = tokio::net::lookup_host((host, port)).await;
+    match resolved {
+        Ok(addrs) => {
+            let mut any = false;
+            for a in addrs {
+                any = true;
+                if is_forbidden_ip(a.ip()) {
+                    return false;
+                }
+            }
+            any
+        }
+        Err(_) => false,
+    }
+}
+
 /// Fetch remote `<img>` sources server-side (clean headers — no cookies, referer,
 /// or browser fingerprint) and inline them as `data:` URLs, so the webview makes
 /// no remote requests. Sources that fail or aren't images are blanked.
@@ -2006,6 +2060,9 @@ async fn inline_remote_images(html: &str) -> String {
     // budget the remaining images are BLANKED (never left as a remote `src`), so
     // the webview still makes no remote request.
     let client = reqwest::Client::builder()
+        // Do not follow redirects: a public URL must not be able to 302 into a
+        // loopback/private/link-local host past the guard below.
+        .redirect(reqwest::redirect::Policy::none())
         .connect_timeout(std::time::Duration::from_secs(5))
         .timeout(std::time::Duration::from_secs(10))
         .build()
@@ -2018,9 +2075,15 @@ async fn inline_remote_images(html: &str) -> String {
         } else {
             // The src in the cleaned HTML is HTML-escaped; the fetch URL is not.
             let fetch_url = url.replace("&amp;", "&");
-            fetch_image_data_url(&client, &fetch_url)
-                .await
-                .unwrap_or_default()
+            // SSRF guard: only fetch hosts that resolve to public addresses, so a
+            // hostile email cannot drive requests to the LAN/localhost/metadata.
+            if host_is_fetchable(&fetch_url).await {
+                fetch_image_data_url(&client, &fetch_url)
+                    .await
+                    .unwrap_or_default()
+            } else {
+                String::new()
+            }
         };
         result = result.replace(&format!("src=\"{url}\""), &format!("src=\"{replacement}\""));
         result = result.replace(&format!("src='{url}'"), &format!("src='{replacement}'"));
@@ -2251,6 +2314,40 @@ impl From<GraphMessage> for MessageSummary {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn forbidden_ips_cover_loopback_private_and_link_local() {
+        use std::net::IpAddr;
+        for ip in [
+            "127.0.0.1",
+            "10.0.0.5",
+            "192.168.1.1",
+            "172.16.0.1",
+            "169.254.169.254",
+            "0.0.0.0",
+            "::1",
+        ] {
+            assert!(
+                is_forbidden_ip(ip.parse::<IpAddr>().unwrap()),
+                "{ip} must be forbidden"
+            );
+        }
+        for ip in ["8.8.8.8", "1.1.1.1"] {
+            assert!(
+                !is_forbidden_ip(ip.parse::<IpAddr>().unwrap()),
+                "{ip} must be allowed"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn host_guard_rejects_internal_ip_literals() {
+        assert!(!host_is_fetchable("http://127.0.0.1/x.png").await);
+        assert!(!host_is_fetchable("http://169.254.169.254/latest/meta-data").await);
+        assert!(!host_is_fetchable("http://192.168.1.1/reboot").await);
+        // A public IP literal passes the guard (no DNS needed).
+        assert!(host_is_fetchable("http://93.184.216.34/x.png").await);
+    }
 
     #[test]
     fn empty_post_carries_explicit_zero_content_length() {
