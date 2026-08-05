@@ -355,6 +355,10 @@ body,
 .ctx-item:hover {
   background: oklch(var(--b2));
 }
+.ctx-item:focus-visible {
+  background: oklch(var(--b2));
+  outline: none;
+}
 .ctx-danger {
   color: oklch(var(--er));
 }

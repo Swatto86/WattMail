@@ -4944,6 +4944,7 @@ ctxMenu.addEventListener("click", (e) => {
   if (item.dataset.act === "moveMenu") {
     renderFolderMenu();
     placeMenu();
+    ctxMenu.querySelector<HTMLButtonElement>(".ctx-item")?.focus();
     return;
   }
   if (item.dataset.act === "back") {
@@ -4954,6 +4955,7 @@ ctxMenu.addEventListener("click", (e) => {
         rowFor(id)?.classList.contains("flagged") ?? false,
       );
     placeMenu();
+    ctxMenu.querySelector<HTMLButtonElement>(".ctx-item")?.focus();
     return;
   }
 
@@ -5032,6 +5034,21 @@ ctxMenu.addEventListener("click", (e) => {
       void bulkDelete([...checkedIds]);
       break;
   }
+});
+
+// Arrow-key navigation between menu items (the items are real <button>s, so
+// Enter activates the focused one natively).
+ctxMenu.addEventListener("keydown", (e) => {
+  if (e.key !== "ArrowDown" && e.key !== "ArrowUp") return;
+  e.preventDefault();
+  const items = Array.from(ctxMenu.querySelectorAll<HTMLButtonElement>(".ctx-item"));
+  if (items.length === 0) return;
+  const idx = items.indexOf(document.activeElement as HTMLButtonElement);
+  const next =
+    e.key === "ArrowDown"
+      ? (idx + 1) % items.length
+      : (idx - 1 + items.length) % items.length;
+  items[next].focus();
 });
 
 document.addEventListener("click", (e) => {
@@ -6076,6 +6093,23 @@ document.addEventListener("keydown", (e) => {
       e.preventDefault();
       void deleteMessage(id);
       break;
+    case "ContextMenu":
+    case "F10": {
+      if (e.key === "F10" && !e.shiftKey) break;
+      e.preventDefault();
+      const row = rowFor(id);
+      const rect = row?.getBoundingClientRect();
+      hideFolderMenu();
+      showCtxMenu(
+        rect ? rect.left + 24 : 100,
+        rect ? Math.min(rect.bottom - 4, window.innerHeight - 8) : 100,
+        id,
+        row?.classList.contains("unread") ?? false,
+        row?.classList.contains("flagged") ?? false,
+      );
+      ctxMenu.querySelector<HTMLButtonElement>(".ctx-item")?.focus();
+      break;
+    }
   }
 });
 
