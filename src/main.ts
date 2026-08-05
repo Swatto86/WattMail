@@ -447,7 +447,7 @@ appRoot.innerHTML = /* html */ `
   </div>
 
   <div id="settings-overlay" class="overlay hidden">
-    <div class="settings-panel">
+    <div class="settings-panel" role="dialog" aria-modal="true" aria-label="Settings">
       <div class="settings-title">Settings</div>
       <label class="settings-row">
         <span>Theme<br /><span class="hint">Light, dark, or follow Windows</span></span>
@@ -498,7 +498,7 @@ appRoot.innerHTML = /* html */ `
   </div>
 
   <div id="about-overlay" class="overlay hidden">
-    <div class="settings-panel about-panel">
+    <div class="settings-panel about-panel" role="dialog" aria-modal="true" aria-label="About WattMail">
       <div class="about-head">
         <div class="about-name">WattMail</div>
         <div id="about-version" class="about-version"></div>
@@ -522,7 +522,7 @@ appRoot.innerHTML = /* html */ `
   </div>
 
   <div id="provider-overlay" class="overlay hidden">
-    <div class="settings-panel provider-panel">
+    <div class="settings-panel provider-panel" role="dialog" aria-modal="true" aria-label="Add an account">
       <div class="settings-title">Add an account</div>
       <div class="hint" style="margin-bottom: 8px">Choose your email provider</div>
       <div id="provider-list" class="provider-list"></div>
@@ -532,7 +532,7 @@ appRoot.innerHTML = /* html */ `
   </div>
 
   <div id="icloud-overlay" class="overlay hidden">
-    <div class="settings-panel">
+    <div class="settings-panel" role="dialog" aria-modal="true" aria-label="Add an iCloud account">
       <div class="settings-title">Add an iCloud account</div>
       <div class="hint" style="margin-bottom: 8px">Calendar only. Generate an app-specific password at appleid.apple.com — your normal Apple Account password won't work with two-factor authentication enabled.</div>
       <input id="icloud-appleid" class="input input-bordered input-sm compose-input" placeholder="Apple ID" autocomplete="off" />
@@ -546,7 +546,7 @@ appRoot.innerHTML = /* html */ `
   </div>
 
   <div id="compose-overlay" class="overlay hidden">
-    <div class="settings-panel compose-panel" id="compose-panel">
+    <div class="settings-panel compose-panel" id="compose-panel" role="dialog" aria-modal="true" aria-label="Compose message">
       <div class="compose-head">
         <div class="settings-title" id="compose-title">New message</div>
         <button id="compose-maximize" class="compose-maximize" type="button" title="Maximize" aria-label="Maximize">&#9974;</button>
@@ -599,7 +599,7 @@ appRoot.innerHTML = /* html */ `
   </div>
 
   <div id="headers-overlay" class="overlay hidden">
-    <div class="settings-panel headers-panel">
+    <div class="settings-panel headers-panel" role="dialog" aria-modal="true" aria-label="Message headers">
       <div class="headers-head">
         <div class="settings-title" id="headers-title">Message headers</div>
         <div class="headers-tools">
@@ -613,7 +613,7 @@ appRoot.innerHTML = /* html */ `
   </div>
 
   <div id="rules-overlay" class="overlay hidden">
-    <div class="settings-panel rules-panel">
+    <div class="settings-panel rules-panel" role="dialog" aria-modal="true" aria-label="Inbox rules">
       <div class="rules-head">
         <div class="settings-title">Inbox rules</div>
         <div class="rules-tools">
@@ -644,7 +644,7 @@ appRoot.innerHTML = /* html */ `
   </div>
 
   <div id="oof-overlay" class="overlay hidden">
-    <div class="settings-panel oof-panel">
+    <div class="settings-panel oof-panel" role="dialog" aria-modal="true" aria-label="Automatic replies">
       <div class="settings-title">Automatic replies (Out of office)</div>
       <div class="oof-status" role="radiogroup" aria-label="Automatic replies status">
         <label><input type="radio" name="oof-status" value="disabled" /> Off</label>
@@ -677,7 +677,7 @@ appRoot.innerHTML = /* html */ `
   </div>
 
   <div id="shortcuts-overlay" class="overlay hidden">
-    <div class="settings-panel shortcuts-panel">
+    <div class="settings-panel shortcuts-panel" role="dialog" aria-modal="true" aria-label="Keyboard shortcuts">
       <div class="settings-title">Keyboard shortcuts</div>
       <table class="shortcuts-table">
         <tbody>
@@ -2069,6 +2069,7 @@ async function openHeaders(id: string, subject: string): Promise<void> {
   headersFilter.value = "";
   headersBody.innerHTML = `<div class="headers-loading">Loading headers…</div>`;
   headersOverlay.classList.remove("hidden");
+  headersFilter.focus();
   try {
     currentHeaders = await invoke<HeaderItem[]>("message_headers", { id });
   } catch (e) {
@@ -2367,6 +2368,7 @@ async function openRules(): Promise<void> {
   rulesMsg.textContent = "";
   rulesEditor.classList.add("hidden");
   rulesOverlay.classList.remove("hidden");
+  rulesNewBtn.focus();
   await loadRules();
 }
 
@@ -2523,6 +2525,7 @@ rulesOverlay.addEventListener("click", (e) => {
 // ---- Keyboard shortcut cheat-sheet overlay ----
 function toggleShortcuts(): void {
   shortcutsOverlay.classList.toggle("hidden");
+  if (!shortcutsOverlay.classList.contains("hidden")) shortcutsCloseBtn.focus();
 }
 function closeShortcuts(): void {
   shortcutsOverlay.classList.add("hidden");
@@ -3255,6 +3258,7 @@ function openSettings(): void {
     .then((v) => (setSignature.value = v))
     .catch(() => {});
   settingsOverlay.classList.remove("hidden");
+  setTheme.focus();
 }
 function closeSettings(): void {
   settingsOverlay.classList.add("hidden");
@@ -3276,6 +3280,7 @@ async function openAbout(): Promise<void> {
     aboutVersion.textContent = "";
   }
   aboutOverlay.classList.remove("hidden");
+  aboutUpdatesBtn.focus();
 }
 function closeAbout(): void {
   aboutOverlay.classList.add("hidden");
@@ -5801,6 +5806,7 @@ async function openOof(): Promise<void> {
   closeSettings(); // never stack over Settings (the About-dialog rule)
   oofMsg.textContent = "Loading…";
   oofOverlay.classList.remove("hidden");
+  oofCancelBtn.focus();
   try {
     const s = await invoke<AutoReplyState>("get_auto_reply");
     const radio =
@@ -5884,6 +5890,44 @@ document.addEventListener("keydown", (e) => {
   else if (!aboutOverlay.classList.contains("hidden")) closeAbout();
   else if (!settingsOverlay.classList.contains("hidden")) closeSettings();
   else if (!composeOverlay.classList.contains("hidden")) void requestCloseCompose();
+});
+
+// Keep Tab inside the topmost open overlay — the app behind a modal is
+// otherwise still focusable, letting Enter fire background controls.
+document.addEventListener("keydown", (e) => {
+  if (e.key !== "Tab" || isDialogOpen()) return;
+  const stack = [
+    providerOverlay,
+    icloudOverlay,
+    shortcutsOverlay,
+    rulesOverlay,
+    oofOverlay,
+    headersOverlay,
+    aboutOverlay,
+    settingsOverlay,
+    composeOverlay,
+  ];
+  const open = stack.find((o) => !o.classList.contains("hidden"));
+  if (!open) return;
+  const focusables = Array.from(
+    open.querySelectorAll<HTMLElement>(
+      'button, [href], input, select, textarea, [contenteditable="true"], [tabindex]:not([tabindex="-1"])',
+    ),
+  ).filter((el) => el.offsetParent !== null && !el.classList.contains("hidden"));
+  if (focusables.length === 0) return;
+  const first = focusables[0];
+  const last = focusables[focusables.length - 1];
+  const active = document.activeElement as HTMLElement | null;
+  if (!active || !open.contains(active)) {
+    e.preventDefault();
+    first.focus();
+  } else if (!e.shiftKey && active === last) {
+    e.preventDefault();
+    first.focus();
+  } else if (e.shiftKey && active === first) {
+    e.preventDefault();
+    last.focus();
+  }
 });
 
 // ---- Global keyboard shortcuts (message-list navigation + actions) ----
