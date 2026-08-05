@@ -3883,6 +3883,18 @@ async function loadCorrespondentSuggestions(): Promise<void> {
 
 function hideCorrespondentSuggestions(): void {
   correspondentsList.classList.add("hidden");
+  correspondentsList
+    .querySelectorAll<HTMLButtonElement>("button.active")
+    .forEach((b) => b.classList.remove("active"));
+}
+
+function applyCorrespondentSuggestion(input: HTMLInputElement, address: string): void {
+  const start = Math.max(input.value.lastIndexOf(","), input.value.lastIndexOf(";")) + 1;
+  const prefix = input.value.slice(0, start);
+  input.value = `${prefix}${prefix ? " " : ""}${address}, `;
+  input.dispatchEvent(new Event("input", { bubbles: true }));
+  hideCorrespondentSuggestions();
+  input.focus();
 }
 
 function showCorrespondentSuggestions(input: HTMLInputElement): void {
@@ -3904,11 +3916,7 @@ function showCorrespondentSuggestions(input: HTMLInputElement): void {
       button.textContent = address;
       button.addEventListener("mousedown", (event) => {
         event.preventDefault();
-        const prefix = input.value.slice(0, start);
-        input.value = `${prefix}${prefix ? " " : ""}${address}, `;
-        input.dispatchEvent(new Event("input", { bubbles: true }));
-        hideCorrespondentSuggestions();
-        input.focus();
+        applyCorrespondentSuggestion(input, address);
       });
       return button;
     }),
@@ -5576,6 +5584,26 @@ for (const field of [cToInput, cCcInput, cBccInput]) {
       event.preventDefault();
       event.stopPropagation();
       hideCorrespondentSuggestions();
+      return;
+    }
+    if (correspondentsList.classList.contains("hidden")) return;
+    const options = Array.from(correspondentsList.querySelectorAll<HTMLButtonElement>("button"));
+    if (options.length === 0) return;
+    const current = options.findIndex((b) => b.classList.contains("active"));
+    if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+      event.preventDefault();
+      const next =
+        event.key === "ArrowDown"
+          ? (current + 1) % options.length
+          : (current - 1 + options.length) % options.length;
+      options.forEach((b, i) => {
+        b.classList.toggle("active", i === next);
+        if (i === next) b.setAttribute("aria-selected", "true");
+        else b.removeAttribute("aria-selected");
+      });
+    } else if (event.key === "Enter" && current >= 0) {
+      event.preventDefault();
+      applyCorrespondentSuggestion(field, options[current].textContent ?? "");
     }
   });
 }

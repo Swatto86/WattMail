@@ -964,6 +964,9 @@ body,
 .correspondent-suggestions button:hover {
   background: oklch(var(--p) / 0.2);
 }
+.correspondent-suggestions button.active {
+  background: oklch(var(--p) / 0.2);
+}
 .compose-toolbar {
   display: flex;
   gap: 2px;
