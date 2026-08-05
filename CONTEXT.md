@@ -101,6 +101,34 @@ Entra app registration (public, not secret):
 
 ## Progress log
 
+### 2026-08-05 — One send budget, and a version check in the gate (v0.10.5)
+
+No user-visible behaviour change; both entries are about stopping a defect
+class rather than fixing a symptom.
+
+- **The 2.5 MB attachment cap was written four times** — `MAX_ATTACHMENT_BYTES`
+  in `commands.rs`, where it is enforced, and `INLINE_IMAGE_MAX_BYTES`,
+  `INLINE_TOTAL_WARN_BYTES` and `MAX_SEND_ATTACHMENT_BYTES` in `main.ts`.
+  Nothing made them agree, and the frontend's copies are what decide whether the
+  user learns before the undo-send wait or after it. All four are now one value,
+  asked for at startup via a new `max_attachment_bytes` command, with the
+  shipped number as a fallback: too small only warns needlessly, which is the
+  safe direction to fail. A boundary test asserts the command is registered and
+  that the window still asks for it.
+- **The gate compares the three files that carry the version.** A release that
+  bumped two of them would ship an installer whose name disagreed with the
+  app's About box and an updater offering a version that never existed. Each
+  value is read before comparing, so a moved key fails loudly rather than making
+  all three vacuously equal.
+
+**On the number itself:** it is Graph's, not ours. `send_message` posts to
+`/me/sendMail` with attachments inline in the JSON body as base64, and that
+request is size-limited at the Graph end; base64 inflates by 4/3, so 2.5 MB of
+raw attachment is ~3.3 MB on the wire with the rest as headroom for the body and
+recipients. Raising it is not a bigger constant — it means uploading through
+`createUploadSession` against a draft, in chunks, which lifts the ceiling to
+~150 MB. That remains open.
+
 ### 2026-08-05 — Second review batch: SSRF bypass, two remote-input panics (v0.10.4)
 
 Seven fixes on top of v0.10.3, each with a failing test first where the defect
