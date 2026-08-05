@@ -206,6 +206,13 @@ impl AuthService {
             // re-auth prompt. An OAuth error response (invalid_grant: refresh
             // token revoked/expired) genuinely needs re-authentication.
             Err(AuthError::Http(e)) => Err(AuthError::Network(e.to_string())),
+            // A structured OAuth error can still be a *server* problem
+            // (outage/throttle). Only a rejected grant needs re-sign-in.
+            Err(AuthError::Provider { error, description })
+                if is_transient_token_error(&error) =>
+            {
+                Err(AuthError::Network(format!("{error}: {description}")))
+            }
             Err(_) => Err(AuthError::ReauthRequired),
         }
     }
@@ -501,6 +508,16 @@ fn io_other(e: impl std::fmt::Display) -> std::io::Error {
     std::io::Error::other(e.to_string())
 }
 
+/// OAuth token-endpoint error codes that mean "the server couldn't answer
+/// right now" (RFC 6749 §5.2), not "the credential was rejected". A silent
+/// refresh hitting one of these must surface as a network-class failure —
+/// never as a demand to re-sign-in.
+fn is_transient_token_error(code: &str) -> bool {
+    code.eq_ignore_ascii_case("temporarily_unavailable")
+        || code.eq_ignore_ascii_case("server_error")
+        || code.eq_ignore_ascii_case("slow_down")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -549,5 +566,15 @@ mod tests {
         for server in &servers {
             server.unblock();
         }
+    }
+
+    #[test]
+    fn transient_token_endpoint_errors_are_not_credential_failures() {
+        assert!(is_transient_token_error("temporarily_unavailable"));
+        assert!(is_transient_token_error("server_error"));
+        assert!(is_transient_token_error("SLOW_DOWN"));
+        // A rejected grant is the one case that genuinely needs re-sign-in.
+        assert!(!is_transient_token_error("invalid_grant"));
+        assert!(!is_transient_token_error(""));
     }
 }
