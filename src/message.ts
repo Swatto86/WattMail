@@ -402,12 +402,18 @@ function renderInviteBar(bar: HTMLDivElement, invite: MeetingInviteInfo): void {
         sendResponse: true,
       })
         .then(() => {
-          bar.querySelector<HTMLElement>(".reader-invite-status")!.textContent =
-            INVITE_STATUS_LABEL[response === "tentative" ? "tentativelyAccepted" : response] ?? "";
+          const done =
+            response === "accept"
+              ? "Accepted"
+              : response === "tentative"
+                ? "Tentatively accepted"
+                : "Declined";
+          bar.innerHTML = `<span class="reader-invite-label">&#128197; ${done} — your response was sent to the organizer.</span>`;
         })
         .catch((e) => {
-          console.error("RSVP failed", e);
           bar.querySelectorAll<HTMLButtonElement>("button").forEach((b) => (b.disabled = false));
+          const label = bar.querySelector<HTMLSpanElement>(".reader-invite-label");
+          if (label) label.textContent = `Could not send response: ${e}`;
         });
     });
   });
