@@ -269,9 +269,7 @@ fn passes_limit_parts(day: i64, rule: &RRule) -> bool {
     let (y, m, d) = civil::civil_from_days(day);
     match rule.freq {
         Freq::Daily => {
-            month_allowed(m, rule)
-                && weekday_allowed(day, rule)
-                && month_day_allowed(y, m, d, rule)
+            month_allowed(m, rule) && weekday_allowed(day, rule) && month_day_allowed(y, m, d, rule)
         }
         Freq::Weekly | Freq::Monthly => month_allowed(m, rule),
         // Under YEARLY every supported BY* part expands; nothing to filter.

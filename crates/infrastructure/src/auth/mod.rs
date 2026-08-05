@@ -208,9 +208,7 @@ impl AuthService {
             Err(AuthError::Http(e)) => Err(AuthError::Network(e.to_string())),
             // A structured OAuth error can still be a *server* problem
             // (outage/throttle). Only a rejected grant needs re-sign-in.
-            Err(AuthError::Provider { error, description })
-                if is_transient_token_error(&error) =>
-            {
+            Err(AuthError::Provider { error, description }) if is_transient_token_error(&error) => {
                 Err(AuthError::Network(format!("{error}: {description}")))
             }
             Err(_) => Err(AuthError::ReauthRequired),
