@@ -2665,7 +2665,12 @@ let reauthRequired = false;
 let reauthPrompting = false;
 
 function looksLikeAuthRequired(e: unknown): boolean {
-  return String(e).includes("auth-required:");
+  // Two backend errors mean "sign in again": AuthError::ReauthRequired
+  // ("auth-required: …") from the token-acquisition path, and
+  // MailError::NotAuthenticated ("not authenticated") from a Graph 401 on a
+  // still-cached-but-revoked token. Recognize both.
+  const s = String(e);
+  return s.includes("auth-required:") || s.includes("not authenticated");
 }
 
 // Returns true when `e` was an auth-required error it handled (so the caller
