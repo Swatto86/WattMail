@@ -443,7 +443,7 @@ appRoot.innerHTML = /* html */ `
 
     <div id="calendar" class="calendar-view flex flex-col flex-1 min-h-0 hidden"></div>
 
-    <div id="status" class="text-xs px-3 py-1 border-t border-base-300 bg-base-200 opacity-80"></div>
+    <div id="status" role="status" aria-live="polite" class="text-xs px-3 py-1 border-t border-base-300 bg-base-200 opacity-80"></div>
   </div>
 
   <div id="settings-overlay" class="overlay hidden">
@@ -492,7 +492,7 @@ appRoot.innerHTML = /* html */ `
         </div>
         <div id="accounts-list" class="accounts-list"></div>
       </div>
-      <div id="settings-msg" class="settings-msg"></div>
+      <div id="settings-msg" class="settings-msg" role="status"></div>
       <div class="settings-actions"><button id="settings-close" class="btn btn-sm">Close</button></div>
     </div>
   </div>
@@ -512,7 +512,7 @@ appRoot.innerHTML = /* html */ `
           <a href="#" id="about-repo" class="about-link" title="Open the GitHub repository in your browser">github.com/Swatto86/WattMail</a>
         </div>
       </div>
-      <div id="about-msg" class="settings-msg"></div>
+      <div id="about-msg" class="settings-msg" role="status"></div>
       <div class="settings-actions" style="gap: 8px">
         <button id="about-updates" class="btn btn-sm">Check for updates</button>
         <span style="flex: 1"></span>
@@ -526,7 +526,7 @@ appRoot.innerHTML = /* html */ `
       <div class="settings-title">Add an account</div>
       <div class="hint" style="margin-bottom: 8px">Choose your email provider</div>
       <div id="provider-list" class="provider-list"></div>
-      <div id="provider-msg" class="settings-msg"></div>
+      <div id="provider-msg" class="settings-msg" role="status"></div>
       <div class="settings-actions"><button id="provider-cancel" class="btn btn-sm">Cancel</button></div>
     </div>
   </div>
@@ -537,7 +537,7 @@ appRoot.innerHTML = /* html */ `
       <div class="hint" style="margin-bottom: 8px">Calendar only. Generate an app-specific password at appleid.apple.com — your normal Apple Account password won't work with two-factor authentication enabled.</div>
       <input id="icloud-appleid" class="input input-bordered input-sm compose-input" placeholder="Apple ID" autocomplete="off" />
       <input id="icloud-password" class="input input-bordered input-sm compose-input" type="password" placeholder="App-specific password" autocomplete="off" />
-      <div id="icloud-msg" class="settings-msg"></div>
+      <div id="icloud-msg" class="settings-msg" role="status"></div>
       <div class="settings-actions" style="gap: 8px">
         <button id="icloud-cancel" class="btn btn-sm">Cancel</button>
         <button id="icloud-save" class="btn btn-sm btn-primary">Add account</button>
@@ -586,7 +586,7 @@ appRoot.innerHTML = /* html */ `
         <label title="Recipients' clients are asked to notify you when the message is read (they can decline)"><input type="checkbox" id="c-read-receipt" /> Request read receipt</label>
         <label title="The mail server reports when the message is delivered"><input type="checkbox" id="c-delivery-receipt" /> Request delivery receipt</label>
       </div>
-      <div id="compose-msg" class="settings-msg"></div>
+      <div id="compose-msg" class="settings-msg" role="status" aria-live="polite"></div>
       <div class="settings-actions" style="gap: 8px">
         <button id="compose-cancel" class="btn btn-sm">Cancel</button>
         <button id="compose-savedraft" class="btn btn-sm">Save draft</button>
@@ -621,7 +621,7 @@ appRoot.innerHTML = /* html */ `
           <button id="rules-close" class="btn btn-xs">Close</button>
         </div>
       </div>
-      <div id="rules-msg" class="settings-msg"></div>
+      <div id="rules-msg" class="settings-msg" role="status"></div>
       <div id="rules-list" class="rules-list"></div>
       <div id="rules-editor" class="rules-editor hidden">
         <div class="settings-title" id="rules-editor-title">New rule</div>
@@ -668,7 +668,7 @@ appRoot.innerHTML = /* html */ `
       <label class="oof-label" id="oof-external-wrap">External reply
         <textarea id="oof-external" class="textarea textarea-bordered textarea-sm" rows="4"></textarea>
       </label>
-      <div id="oof-msg" class="settings-msg"></div>
+      <div id="oof-msg" class="settings-msg" role="status"></div>
       <div class="settings-actions">
         <button id="oof-cancel" class="btn btn-sm">Cancel</button>
         <button id="oof-save" class="btn btn-sm btn-primary">Save</button>

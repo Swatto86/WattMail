@@ -1046,7 +1046,7 @@ function renderDetail(ev: CalendarEvent): void {
     ${actions}
     ${attendees}
     <div class="cal-detail-body" id="cal-detail-body"></div>
-    <div id="cal-detail-msg" class="settings-msg"></div>`;
+    <div id="cal-detail-msg" class="settings-msg" role="status" aria-live="polite"></div>`;
 
   // Body in a sandboxed, script-free iframe (server-sanitized, but isolated for
   // defense in depth — same posture as the mail reader).
