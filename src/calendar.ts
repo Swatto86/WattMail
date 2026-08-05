@@ -408,6 +408,13 @@ export function initCalendar(hostEl: HTMLDivElement): void {
   calPicker = host.querySelector<HTMLSelectElement>("#cal-picker")!;
   // Delegated so row clicks survive every agenda re-render.
   agendaEl.addEventListener("click", onAgendaClick);
+  // role="button" divs get no native Enter/Space activation — provide it.
+  agendaEl.addEventListener("keydown", (e) => {
+    if (e.key !== "Enter" && e.key !== " ") return;
+    if (!(e.target as HTMLElement).closest(".cal-event")) return;
+    e.preventDefault();
+    onAgendaClick(e);
+  });
   calPicker.addEventListener("change", () => {
     selectedCalendarId = calPicker.value || null;
     applyCalendarAccent();
