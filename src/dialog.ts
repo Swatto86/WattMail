@@ -38,9 +38,9 @@ function build(): void {
   overlay.className = "overlay hidden";
   overlay.id = "dialog-overlay";
   overlay.innerHTML = `
-    <div class="settings-panel dialog-panel" role="dialog" aria-modal="true">
-      <div class="settings-title" data-role="title"></div>
-      <div class="dialog-message" data-role="message"></div>
+    <div class="settings-panel dialog-panel" role="dialog" aria-modal="true" aria-labelledby="dialog-title" aria-describedby="dialog-message">
+      <div class="settings-title" data-role="title" id="dialog-title"></div>
+      <div class="dialog-message" data-role="message" id="dialog-message"></div>
       <input class="input input-bordered input-sm dialog-input" data-role="input" autocomplete="off" />
       <div class="settings-actions" style="gap: 8px">
         <button class="btn btn-sm" data-role="cancel"></button>
