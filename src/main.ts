@@ -1958,6 +1958,7 @@ async function downloadAttachment(messageId: string, attachmentId: string, name:
   try {
     const path = await save({ defaultPath: name });
     if (!path) return; // cancelled
+    statusEl.textContent = `Saving ${name}…`;
     await invoke("save_attachment", { messageId, attachmentId, destPath: path });
     statusEl.textContent = `Saved ${name}`;
   } catch (e) {
