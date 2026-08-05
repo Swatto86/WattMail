@@ -1256,15 +1256,15 @@ function buildEventModal(): void {
   evTimeInputs = [evStartTime, evEndTime];
 
   evAllDay.addEventListener("change", reflectAllDay);
-  eventOverlay.querySelector<HTMLButtonElement>("#ev-cancel")!.addEventListener("click", closeEventModal);
+  eventOverlay.querySelector<HTMLButtonElement>("#ev-cancel")!.addEventListener("click", () => void requestCloseEventModal());
   evSave.addEventListener("click", () => void saveEvent());
   // Click on the backdrop (not the panel) closes.
   eventOverlay.addEventListener("click", (e) => {
-    if (e.target === eventOverlay) closeEventModal();
+    if (e.target === eventOverlay) void requestCloseEventModal();
   });
   // Esc closes (only while the modal is open).
   document.addEventListener("keydown", (e) => {
-    if (e.key === "Escape" && !eventOverlay.classList.contains("hidden")) closeEventModal();
+    if (e.key === "Escape" && !eventOverlay.classList.contains("hidden")) void requestCloseEventModal();
   });
 }
 
@@ -1343,8 +1343,34 @@ function openEventModal(ev?: CalendarEvent): void {
     evEndTime.value = `${pad(end.getHours())}:${pad(end.getMinutes())}`;
   }
 
+  eventBaseline = eventFormFingerprint();
   eventOverlay.classList.remove("hidden");
   evSubject.focus();
+}
+
+// Form snapshot at open — closing warns only when edits would be lost.
+let eventBaseline = "";
+function eventFormFingerprint(): string {
+  return [
+    evSubject.value,
+    String(evAllDay.checked),
+    evStartDate.value,
+    evStartTime.value,
+    evEndDate.value,
+    evEndTime.value,
+    evLocation.value,
+    evAttendees.value,
+    evBody.value,
+    evReminder.value,
+    evRepeat.value,
+  ].join("");
+}
+async function requestCloseEventModal(): Promise<void> {
+  if (eventFormFingerprint() !== eventBaseline) {
+    const ok = await showConfirm("Discard this event?", { danger: true, okLabel: "Discard" });
+    if (!ok) return;
+  }
+  closeEventModal();
 }
 
 function closeEventModal(): void {
