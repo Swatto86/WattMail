@@ -437,7 +437,7 @@ appRoot.innerHTML = /* html */ `
     <div id="main" class="flex flex-1 min-h-0">
       <div id="folders" class="w-[200px] shrink-0 overflow-y-auto scroll-thin border-r border-base-300 py-1"></div>
       <div id="list" class="shrink-0 overflow-y-auto scroll-thin border-r border-base-300"></div>
-      <div id="splitter" class="splitter" title="Drag to resize"></div>
+      <div id="splitter" class="splitter" title="Drag to resize" role="separator" aria-orientation="vertical" aria-label="Resize message list" tabindex="0"></div>
       <div id="reader" class="flex-1 flex flex-col min-w-0"></div>
     </div>
 
@@ -2566,6 +2566,14 @@ splitter.addEventListener("pointerdown", (e) => {
   };
   splitter.addEventListener("pointermove", move);
   splitter.addEventListener("pointerup", up);
+});
+splitter.addEventListener("keydown", (e) => {
+  const step = e.key === "ArrowLeft" ? -16 : e.key === "ArrowRight" ? 16 : 0;
+  if (step === 0) return;
+  e.preventDefault();
+  const w = clampWidth(listEl.getBoundingClientRect().width + step);
+  applyListWidth(w);
+  localStorage.setItem(LIST_W_KEY, String(Math.round(w)));
 });
 
 // ---- Resizable / maximizable compose panel ----
