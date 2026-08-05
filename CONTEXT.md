@@ -101,6 +101,40 @@ Entra app registration (public, not secret):
 
 ## Progress log
 
+### 2026-08-05 — Second review batch: SSRF bypass, two remote-input panics (v0.10.4)
+
+Seven fixes on top of v0.10.3, each with a failing test first where the defect
+was in Rust. Three are reachable from a hostile email:
+
+- **[SECURITY] IPv4-mapped IPv6 bypassed the SSRF denylist** (`graph/mod.rs`).
+  `is_forbidden_ip` classified IPv6 only by native categories, so
+  `::ffff:127.0.0.1`, `::ffff:169.254.169.254` and `::ffff:10.0.0.1` passed a
+  guard the OS then connects to the embedded IPv4 host. A hostile AAAA record
+  could drive the load-images fetch at loopback, the LAN, or cloud metadata.
+  Mapped addresses are now canonicalised through `to_ipv4_mapped()` and judged
+  by one shared IPv4 predicate. +1 test covering all four cases.
+- **[PANIC] Non-char-boundary slice on an attacker-controlled `img src`**
+  (`rewrite_cid_images`). `reference[..4]` byte-sliced at a fixed offset, so a
+  multibyte character straddling byte 4 aborted the app — `panic = "abort"`
+  means the whole process, from reading a message. Now `reference.get(..4)`.
+- **[PANIC] Non-ASCII BYDAY token in `parse_by_day`** (`icloud/rrule.rs`).
+  `token.len() - 2` is a byte offset fed to `split_at`; a multibyte character
+  across it aborted. The offset now comes from `char_indices`.
+
+And four behavioural ones: a Graph 401 `not authenticated` now triggers the
+re-sign-in prompt instead of a silently failing sync loop; the compose window
+enforces the same combined 2.5 MB attachment budget the backend does, before
+the undo-send wait rather than after it; the shared confirm/prompt dialog has
+an accessible name and description, so a screen reader no longer announces
+"OK button" over a "cannot be undone" warning; and the calendar event modal is
+a real focus-trapped dialog rather than one Tab escapes.
+
+Gate green locally before the tag: 177 tests.
+
+**Worth knowing:** the 2.5 MB cap is now written twice — `MAX_SEND_ATTACHMENT_BYTES`
+in `src/main.ts` and `MAX_ATTACHMENT_BYTES` in `src-tauri/src/commands.rs`.
+They agree today and nothing makes them agree tomorrow.
+
 ### 2026-08-05 — Bug-sweep batch from automated review: 23 defects (v0.10.3)
 
 An automated review surfaced 23 defects (1 critical, 15 high, 3 medium, 6
