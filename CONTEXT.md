@@ -101,6 +101,81 @@ Entra app registration (public, not secret):
 
 ## Progress log
 
+### 2026-08-05 — Bug-sweep batch from automated review: 23 defects (v0.10.3)
+
+An automated review surfaced 23 defects (1 critical, 15 high, 3 medium, 6
+low); each was verified against the live code before fixing, with a failing
+test written first for every Rust defect. 22 of 23 confirmed real and fixed;
+one (Defect 4) was a false positive — `message-window.json` already existed
+with the required content. Bumped to **v0.10.3**.
+
+**Rust backend (4 defects, unit-tested):**
+- **[CRITICAL] SSRF guard on remote-image inlining** (`graph/mod.rs`). The
+  "load images" path fetched every `http(s)` `<img src>` from sender-controlled
+  email HTML with no host validation and default redirect-following, so a
+  crafted message could drive GETs to loopback/private/link-local hosts
+  (incl. cloud metadata `169.254.169.254`) from the victim's machine. Added
+  `is_forbidden_ip`/`host_is_fetchable` (resolve-and-denylist), disabled
+  redirects on the fetch client, only fetch hosts resolving to public
+  addresses. +2 tests.
+- **Cache key regenerated on a transient keyring read failure** (`crypto.rs`).
+  `load_or_create_key` treated every keyring error like "no key stored", so a
+  momentarily unavailable credential store regenerated and overwrote the real
+  key, orphaning every previously encrypted cache value. Extracted a pure
+  `classify_key_lookup` that only triggers key creation on `NoEntry` or a
+  present-but-undecodable value; any other read failure now propagates. +1 test.
+- **RRULE ignored BY* limit-role** (`icloud/rrule.rs`). BYDAY/BYMONTH/
+  BYMONTHDAY were applied only where they expand, never where RFC 5545 §3.3.10
+  makes them filters — so "every weekday" (`DAILY;BYDAY=MO..FR`) included
+  weekends, "every day in January" ran all year, and "every Friday the 13th"
+  emitted a union. Added the limit-role filters after candidate generation,
+  made BYDAY intersect BYMONTHDAY, and fixed an extra bug the tests caught
+  (the no-BY* anchor fallback re-adding a day the intersection removed). +3 tests.
+- **Transient token errors demanded re-sign-in** (`auth/mod.rs`).
+  `access_token()` mapped every non-transport refresh failure to
+  `ReauthRequired`, so an AAD outage/throttle pushed the user into a full
+  browser sign-in when a retry would have worked. RFC 6749 §5.2 transient
+  codes route to `Network`; only `invalid_grant` etc. need re-sign-in. +1 test.
+
+**Accessibility (the bulk — 11 defects):**
+- Calendar event rows, the message context menu, the list/reader splitter, and
+  recipient auto-suggestions all gained keyboard paths (Enter/Space
+  activation, Menu-key/Shift+F10 into the context menu with arrow nav, arrow
+  keys for the splitter and suggestions).
+- Every overlay (Settings/About/Rules/Headers/Automatic-replies/shortcuts/
+  compose/provider/iCloud) gained `role="dialog"` + `aria-modal` + an
+  `aria-label`, initial focus on open, and a Tab focus-trap.
+- All action-outcome divs (status bar, compose/calendar detail message lines,
+  settings panels) marked `role="status"` live regions so screen readers
+  announce results and failures.
+- Pop-out message window (Defect 13+14+15): attachment/EML save+open outcomes
+  routed to a visible status line instead of swallowed in `console.error`; the
+  RSVP success handler no longer dereferences a `.reader-invite-status` span
+  that only exists for already-answered invites (a swallowed throw that made a
+  sent response look like nothing happened).
+
+**Safety / UX:**
+- Pop-out **delete permanence** now requires the message to actually be a row
+  of the Deleted Items view (not just the folder the *main* window happens to
+  show) before hard-deleting — an Inbox message delegated from a pop-out while
+  the main window was on Deleted Items was being permanently deleted.
+- **Delete-rule** and **discard-typed-event** now danger-confirm, matching
+  every other destructive action.
+- "Load older messages" shows progress, disables the button, and reports
+  failures instead of silently doing nothing.
+- Attachment save shows immediate progress.
+- Missing `core:window:allow-set-focus` capability added so the main window's
+  `setFocus()` on pop-out action delegation isn't ACL-rejected.
+
+**Verification:** `npm run build` (tsc + vite) green; full Rust gate green
+(`cargo fmt --check`, `clippy --workspace --all-targets -D warnings`, 173
+workspace tests — 146 → 153 infra + desktop/domain/auth-spike suites). **Not
+live-run** — per the release-then-test policy; all fixes are compile/test/
+build-verified. Live sanity worth doing: trigger "load images" on a message
+with a private-IP `<img>` (must blank, not fetch); let a token refresh hit a
+5xx (should show offline, not re-auth); keyboard-only navigate to a calendar
+event and open it; Tab through Settings (focus must stay inside).
+
 ### 2026-07-31 — Empty meeting-invite bar no longer leaks in non-invite messages (v0.10.2)
 
 User feedback on v0.10.1: the thin blue bar between the action buttons and the
