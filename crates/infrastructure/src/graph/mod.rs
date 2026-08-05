@@ -1989,23 +1989,33 @@ static IMG_SRC_RE: LazyLock<regex::Regex> =
 /// unspecified) — the SSRF denylist.
 fn is_forbidden_ip(ip: std::net::IpAddr) -> bool {
     match ip {
-        std::net::IpAddr::V4(v4) => {
-            v4.is_loopback()
-                || v4.is_private()
-                || v4.is_link_local()
-                || v4.is_unspecified()
-                || v4.is_broadcast()
-                || v4.is_documentation()
-                // CGNAT 100.64.0.0/10
-                || (v4.octets()[0] == 100 && (v4.octets()[1] & 0xc0) == 64)
-        }
+        std::net::IpAddr::V4(v4) => is_forbidden_v4(v4),
         std::net::IpAddr::V6(v6) => {
+            // An IPv4-mapped address (`::ffff:a.b.c.d`) connects to the embedded
+            // IPv4 host, so classify it by that IPv4 — otherwise `::ffff:127.0.0.1`
+            // / `::ffff:169.254.169.254` slip past every check below.
+            if let Some(v4) = v6.to_ipv4_mapped() {
+                return is_forbidden_v4(v4);
+            }
             v6.is_loopback()
                 || v6.is_unspecified()
                 || (v6.segments()[0] & 0xffc0) == 0xfe80 // link-local fe80::/10
                 || (v6.segments()[0] & 0xfe00) == 0xfc00 // unique-local fc00::/7
         }
     }
+}
+
+/// True when an IPv4 address must never be contacted (loopback, private,
+/// link-local incl. metadata 169.254.169.254, CGNAT, unspecified, broadcast).
+fn is_forbidden_v4(v4: std::net::Ipv4Addr) -> bool {
+    v4.is_loopback()
+        || v4.is_private()
+        || v4.is_link_local()
+        || v4.is_unspecified()
+        || v4.is_broadcast()
+        || v4.is_documentation()
+        // CGNAT 100.64.0.0/10
+        || (v4.octets()[0] == 100 && (v4.octets()[1] & 0xc0) == 64)
 }
 
 /// Resolve `url`'s host and return true only when it is safe to fetch: an IP
@@ -2340,6 +2350,22 @@ mod tests {
             assert!(
                 !is_forbidden_ip(ip.parse::<IpAddr>().unwrap()),
                 "{ip} must be allowed"
+            );
+        }
+    }
+
+    #[test]
+    fn ipv4_mapped_ipv6_is_forbidden() {
+        use std::net::IpAddr;
+        for ip in [
+            "::ffff:127.0.0.1",
+            "::ffff:169.254.169.254",
+            "::ffff:10.0.0.1",
+            "::ffff:192.168.1.1",
+        ] {
+            assert!(
+                is_forbidden_ip(ip.parse::<IpAddr>().unwrap()),
+                "{ip} must be forbidden"
             );
         }
     }
