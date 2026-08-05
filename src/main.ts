@@ -1285,7 +1285,10 @@ async function deleteMessage(id: string): Promise<void> {
   // (search spans folders, so we can't tell where the row lives — default to the
   // safe recoverable move).
   const folder = folders.find((f) => f.id === currentFolderId);
-  const permanent = !searchActive && folder?.role === "deleteditems";
+  // Only hard-delete when the message is verifiably a row of the Deleted Items
+  // view — an id delegated from a pop-out window may live in another folder.
+  const permanent =
+    !searchActive && folder?.role === "deleteditems" && rowFor(id) !== null;
   if (permanent) {
     const ok = await showConfirm(
       "Permanently delete this message? This cannot be undone.",
