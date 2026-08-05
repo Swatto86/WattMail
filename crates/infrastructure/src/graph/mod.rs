@@ -410,8 +410,12 @@ fn rewrite_cid_images(html: &str, cid_map: &HashMap<String, String>) -> String {
     IMG_SRC_RE
         .replace_all(html, |caps: &regex::Captures| {
             let reference = &caps[1];
-            if reference.len() > 4 && reference[..4].eq_ignore_ascii_case("cid:") {
-                if let Some(data_url) = cid_map.get(&normalize_cid(&reference[4..])) {
+            if let Some(rest) = reference
+                .get(..4)
+                .filter(|p| p.eq_ignore_ascii_case("cid:"))
+                .map(|_| &reference[4..])
+            {
+                if let Some(data_url) = cid_map.get(&normalize_cid(rest)) {
                     return format!("src=\"{data_url}\"");
                 }
             }
@@ -2758,6 +2762,19 @@ mod tests {
         let out = rewrite_cid_images(html, &map);
         assert_eq!(out.matches("data:image/png;base64,AAAA").count(), 2);
         assert!(!out.to_ascii_lowercase().contains("cid:"));
+    }
+
+    #[test]
+    fn rewrite_cid_images_tolerates_a_multibyte_src_without_panicking() {
+        let mut map = HashMap::new();
+        map.insert(
+            "logo@01d".to_string(),
+            "data:image/png;base64,AAAA".to_string(),
+        );
+        let html = r#"<img src="cid:logo@01d"><img src="a😀b">"#;
+        let out = rewrite_cid_images(html, &map);
+        assert!(out.contains("data:image/png;base64,AAAA"));
+        assert!(out.contains("a😀b"));
     }
 
     fn msg_received(ts: &str) -> MessageSummary {
