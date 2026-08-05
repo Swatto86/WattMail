@@ -104,6 +104,19 @@ const win = getCurrentWindow();
 let messageId = "";
 let currentMsg: MessageView | null = null;
 
+// Outcome line for local actions — the pop-out otherwise has nowhere to
+// surface a failed save/preview.
+const statusBar = document.createElement("div");
+statusBar.className = "settings-msg";
+statusBar.setAttribute("role", "status");
+statusBar.setAttribute("aria-live", "polite");
+statusBar.style.cssText =
+  "position:fixed;left:8px;right:8px;bottom:4px;pointer-events:none;z-index:50";
+document.body.appendChild(statusBar);
+function showStatus(text: string): void {
+  statusBar.textContent = text;
+}
+
 async function main(): Promise<void> {
   applyThemePref(loadThemePref());
 
@@ -282,9 +295,11 @@ async function downloadAttachment(id: string, attachmentId: string, name: string
   try {
     const path = await save({ defaultPath: name });
     if (!path) return;
+    showStatus(`Saving ${name}…`);
     await invoke("save_attachment", { messageId: id, attachmentId, destPath: path });
+    showStatus(`Saved ${name}`);
   } catch (e) {
-    console.error("Download failed", e);
+    showStatus(`Download failed: ${e}`);
   }
 }
 
@@ -293,7 +308,7 @@ async function previewImage(id: string, a: AttachmentInfo): Promise<void> {
     const url = await invoke<string>("attachment_data_url", { messageId: id, attachmentId: a.id });
     openLightbox(url, a.name);
   } catch (e) {
-    console.error("Preview failed", e);
+    showStatus(`Preview failed: ${e}`);
   }
 }
 
@@ -301,7 +316,7 @@ async function openAttachmentExternal(id: string, a: AttachmentInfo): Promise<vo
   try {
     await invoke("open_attachment", { messageId: id, attachmentId: a.id });
   } catch (e) {
-    console.error("Open failed", e);
+    showStatus(`Open failed: ${e}`);
   }
 }
 
@@ -330,8 +345,9 @@ async function saveAsEml(): Promise<void> {
     });
     if (!path) return;
     await invoke("export_message", { id: messageId, destPath: path });
+    showStatus("Saved message as .eml");
   } catch (e) {
-    console.error("Save as EML failed", e);
+    showStatus(`Save failed: ${e}`);
   }
 }
 
