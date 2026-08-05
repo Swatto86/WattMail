@@ -1201,8 +1201,8 @@ function buildEventModal(): void {
   eventOverlay.id = "event-overlay";
   eventOverlay.className = "overlay hidden";
   eventOverlay.innerHTML = /* html */ `
-    <div class="settings-panel event-panel">
-      <div class="settings-title">New event</div>
+    <div class="settings-panel event-panel" role="dialog" aria-modal="true" aria-labelledby="ev-title">
+      <div class="settings-title" id="ev-title">New event</div>
       <input id="ev-subject" class="input input-bordered input-sm compose-input" placeholder="Title" autocomplete="off" />
       <label class="settings-row"><span>All day</span><input type="checkbox" id="ev-allday" class="toggle toggle-sm toggle-primary" /></label>
       <label class="settings-row"><span>Start</span><span class="ev-when"><input type="date" id="ev-start-date" class="input input-bordered input-sm" /><input type="time" id="ev-start-time" class="input input-bordered input-sm ev-time" /></span></label>
@@ -1265,6 +1265,31 @@ function buildEventModal(): void {
   // Esc closes (only while the modal is open).
   document.addEventListener("keydown", (e) => {
     if (e.key === "Escape" && !eventOverlay.classList.contains("hidden")) void requestCloseEventModal();
+  });
+  // Keep Tab inside the modal — the calendar behind it is otherwise still
+  // focusable (event pills are role="button" tabindex="0", toolbar buttons are
+  // in the tab order), letting Enter fire background controls under the dialog.
+  eventOverlay.addEventListener("keydown", (e) => {
+    if (e.key !== "Tab" || eventOverlay.classList.contains("hidden")) return;
+    const focusables = Array.from(
+      eventOverlay.querySelectorAll<HTMLElement>(
+        'button, input, select, textarea, [tabindex]:not([tabindex="-1"])',
+      ),
+    ).filter((el) => el.offsetParent !== null && !el.classList.contains("hidden"));
+    if (focusables.length === 0) return;
+    const first = focusables[0];
+    const last = focusables[focusables.length - 1];
+    const active = document.activeElement as HTMLElement | null;
+    if (!active || !eventOverlay.contains(active)) {
+      e.preventDefault();
+      first.focus();
+    } else if (!e.shiftKey && active === last) {
+      e.preventDefault();
+      first.focus();
+    } else if (e.shiftKey && active === first) {
+      e.preventDefault();
+      last.focus();
+    }
   });
 }
 
