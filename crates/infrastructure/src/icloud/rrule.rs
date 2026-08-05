@@ -142,7 +142,7 @@ impl RRule {
 /// Parse one `BYDAY` token (`MO`, `2TH`, `-1FR`).
 fn parse_by_day(token: &str) -> Option<ByDay> {
     let token = token.trim();
-    let split = token.len().checked_sub(2)?;
+    let split = token.char_indices().rev().nth(1).map(|(i, _)| i)?;
     let (prefix, day) = token.split_at(split);
     let weekday = match day.to_ascii_uppercase().as_str() {
         "SU" => 0,
@@ -742,6 +742,19 @@ mod tests {
         );
         assert_eq!(parse_by_day("XX"), None);
         assert_eq!(parse_by_day(""), None);
+    }
+
+    #[test]
+    fn by_day_token_with_a_multibyte_char_is_rejected_not_a_panic() {
+        assert_eq!(parse_by_day("😀"), None);
+        assert_eq!(parse_by_day("1€"), None);
+        let rule = RRule::parse("FREQ=WEEKLY;BYDAY=😀").expect("rule parses");
+        let _ = expand(
+            "2026-07-22T09:00:00",
+            &rule,
+            "2026-07-01T00:00:00",
+            "2026-08-01T00:00:00",
+        );
     }
 
     #[test]
