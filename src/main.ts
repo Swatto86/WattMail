@@ -2832,6 +2832,12 @@ async function backfillOlder(): Promise<void> {
   const fid = currentFolderId;
   if (!fid || backfilling) return;
   backfilling = true;
+  const moreBtn = listEl.querySelector<HTMLButtonElement>(".load-more");
+  if (moreBtn) {
+    moreBtn.disabled = true;
+    moreBtn.textContent = "Loading older messages…";
+  }
+  statusEl.textContent = "Loading older messages…";
   const scroll = listEl.scrollTop;
   const before = currentTotal;
   try {
@@ -2840,10 +2846,12 @@ async function backfillOlder(): Promise<void> {
     if (inbox.total <= before) reachedOldest = true; // server had nothing older
     renderInbox(inbox);
     listEl.scrollTop = scroll;
-  } catch {
+    statusEl.textContent = "";
+  } catch (e) {
     // Server backfill failed (offline). Still widen from the cache up to what it
     // holds, so the rows the "Load more" click promised do render; leave
     // reachedOldest false so the button stays for a retry.
+    statusEl.textContent = "Could not load older messages — check your connection and try again.";
     loadedCount = Math.max(PAGE_SIZE, Math.min(loadedCount, currentTotal));
     if (fid === currentFolderId && !searchActive) await refreshFromCache(true).catch(() => {});
   } finally {
