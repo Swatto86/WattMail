@@ -745,11 +745,11 @@ async fn collect_attachments(
     for fwd in &forwarded_attachments {
         total_bytes += fwd.size;
     }
-    const MAX_ATTACHMENT_BYTES: u64 = 2_500_000;
     if total_bytes > MAX_ATTACHMENT_BYTES {
         return Err(format!(
-            "Attachments total {:.1} MB — messages with more than ~2.5 MB of attachments can't be sent yet.",
-            total_bytes as f64 / 1_000_000.0
+            "Attachments total {:.1} MB — messages with more than {:.1} MB of attachments can't              be sent yet.",
+            total_bytes as f64 / 1_000_000.0,
+            MAX_ATTACHMENT_BYTES as f64 / 1_000_000.0
         ));
     }
 
@@ -798,6 +798,29 @@ async fn collect_attachments(
         });
     }
     Ok(attachments)
+}
+
+/// Every attachment a single send may carry, in bytes before base64.
+///
+/// Not an arbitrary number, and not ours: `send_message` posts to Graph's
+/// `/me/sendMail` with the attachments inline in the JSON body as base64, and
+/// that request has a hard size limit at the Graph end. base64 inflates by 4/3,
+/// so this budget of raw bytes becomes about a third more on the wire, and the
+/// remainder is headroom for the HTML body, the recipients and the JSON itself.
+///
+/// Raising it means leaving that request shape behind: attachments above the
+/// limit need `createUploadSession` against a draft, uploaded in chunks, which
+/// is a feature rather than a bigger number here.
+///
+/// **One definition.** It used to be four — this constant and three in
+/// `main.ts` — with nothing making them agree. The window now asks for it
+/// through `max_attachment_bytes`.
+pub const MAX_ATTACHMENT_BYTES: u64 = 2_500_000;
+
+/// The send budget, for the compose window's own pre-checks.
+#[tauri::command]
+pub fn max_attachment_bytes() -> u64 {
+    MAX_ATTACHMENT_BYTES
 }
 
 /// Sum the on-disk sizes of the given local attachment paths. The file-open
@@ -2022,5 +2045,46 @@ mod tests {
         let third = unique_eml_path(&dir, "subject");
         assert_eq!(third.file_name().unwrap(), "subject (3).eml");
         std::fs::remove_dir_all(&dir).ok();
+    }
+}
+
+#[cfg(test)]
+mod boundary_tests {
+    /// The window's send guard has to reach the backend's real budget.
+    ///
+    /// `invoke("max_attachment_bytes")` is a string on one side and a function
+    /// on the other, with no compiler spanning them. If either moves, the guard
+    /// silently falls back to the number this build happened to ship with — and
+    /// the whole point of the change was to stop that number existing twice.
+    ///
+    /// The budget itself used to be four literals: this constant and three in
+    /// `main.ts`. Nothing made them agree.
+    #[test]
+    fn the_send_budget_command_is_registered_and_the_window_asks_for_it() {
+        let lib = include_str!("lib.rs");
+        let frontend = include_str!("../../src/main.ts");
+
+        // Guarded against a scan that finds nothing: a command known to be
+        // registered must show up, or this test is measuring the wrong file.
+        assert!(
+            lib.contains("commands::attachment_paths_total_bytes"),
+            "the handler list is not where this test thinks it is"
+        );
+        assert!(
+            lib.contains("commands::max_attachment_bytes"),
+            "max_attachment_bytes is not registered, so the window's call fails at runtime"
+        );
+        assert!(
+            frontend.contains(r#"invoke<number>("max_attachment_bytes")"#),
+            "the window no longer asks for the budget, so its guard is a stale copy"
+        );
+        // And the fallback in the window must not have drifted below the real
+        // budget: too small only warns needlessly, too large lets a send through
+        // that the backend then rejects after the undo-send wait.
+        assert!(
+            frontend.contains("let sendBudgetBytes = 2_500_000;"),
+            "the window's fallback no longer matches the shipped budget of {}",
+            super::MAX_ATTACHMENT_BYTES
+        );
     }
 }

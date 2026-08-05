@@ -3700,12 +3700,17 @@ function restoreEditorSelection(snapshot: Range | null): void {
 }
 
 // ---- Inline images ----
-// Single-image and total-payload caps. These mirror the backend's hard
-// total-attachment budget (collect_attachments' MAX_ATTACHMENT_BYTES) — the
-// client-side guard must catch everything the backend would reject, or the
-// failure only surfaces after the full undo-send wait.
-const INLINE_IMAGE_MAX_BYTES = 2_500_000;
-const INLINE_TOTAL_WARN_BYTES = 2_500_000;
+// Every client-side attachment guard measures against one budget, and that
+// budget belongs to the backend: it is Graph's own limit on the `/me/sendMail`
+// request, enforced in `collect_attachments`. The window must catch everything
+// the backend would reject, or the failure only surfaces after the full
+// undo-send wait.
+//
+// It used to be three constants here and one in Rust, four copies of a number
+// with nothing keeping them equal. Now the window asks, once, at startup —
+// falling back to the value Rust shipped with if the call ever fails, which is
+// the safe direction: too small only costs a needless warning.
+let sendBudgetBytes = 2_500_000;
 const oneMb = (bytes: number): string => (bytes / (1024 * 1024)).toFixed(1);
 // data: image URLs are base64; raw bytes ≈ payload length * 3 / 4.
 function dataUrlByteLength(dataUrl: string): number {
@@ -3734,11 +3739,11 @@ function readFileAsDataUrl(file: File): Promise<string> {
 // Insert one image file at the caret as a data: URL, enforcing the per-image cap
 // and surfacing a running total. Returns false (with a message) when skipped.
 async function insertImageFile(file: File): Promise<boolean> {
-  if (file.size > INLINE_IMAGE_MAX_BYTES) {
+  if (file.size > sendBudgetBytes) {
     composeMsg.textContent = `Image "${file.name || "pasted image"}" skipped — ${oneMb(
       file.size,
     )} MB exceeds the ${Math.round(
-      INLINE_IMAGE_MAX_BYTES / (1024 * 1024),
+      sendBudgetBytes / (1024 * 1024),
     )} MB per-image inline limit. Attach it as a file instead.`;
     return false;
   }
@@ -3753,7 +3758,7 @@ async function insertImageFile(file: File): Promise<boolean> {
   document.execCommand("insertImage", false, dataUrl);
   const total = inlineImagesTotalBytes();
   composeMsg.textContent =
-    total > INLINE_TOTAL_WARN_BYTES
+    total > sendBudgetBytes
       ? `Inline images now total ${oneMb(total)} MB — large messages may be rejected; consider attaching files instead.`
       : "";
   return true;
@@ -3806,16 +3811,16 @@ function inlineImagesSizeProblem(images: InlineImage[]): string | null {
   let total = 0;
   for (const img of images) {
     const bytes = Math.floor((img.dataBase64.length * 3) / 4);
-    if (bytes > INLINE_IMAGE_MAX_BYTES) {
+    if (bytes > sendBudgetBytes) {
       return `An inline image is ${oneMb(bytes)} MB, over the ${Math.round(
-        INLINE_IMAGE_MAX_BYTES / (1024 * 1024),
+        sendBudgetBytes / (1024 * 1024),
       )} MB per-image limit. Remove it or attach it as a file instead.`;
     }
     total += bytes;
   }
-  if (total > INLINE_IMAGE_MAX_BYTES) {
+  if (total > sendBudgetBytes) {
     return `Inline images total ${oneMb(total)} MB, over the ${Math.round(
-      INLINE_IMAGE_MAX_BYTES / (1024 * 1024),
+      sendBudgetBytes / (1024 * 1024),
     )} MB limit. Remove some or attach them as files instead.`;
   }
   return null;
@@ -4418,10 +4423,10 @@ async function forwardMsg(id?: string): Promise<void> {
     // Warn early if the forwarded attachments alone exceed the send budget, so
     // the user learns before composing rather than at send (backend enforces it).
     const fwdBytes = fwdAtts.reduce((sum, a) => sum + a.size, 0);
-    if (fwdBytes > MAX_SEND_ATTACHMENT_BYTES) {
+    if (fwdBytes > sendBudgetBytes) {
       composeMsg.textContent = `The forwarded attachments total ${(fwdBytes / 1_000_000).toFixed(
         1,
-      )} MB — over the ~2.5 MB send limit. Remove some before sending.`;
+      )} MB — over the ${(sendBudgetBytes / 1_000_000).toFixed(1)} MB send limit. Remove some before sending.`;
     } else if (unforwardable) {
       composeMsg.textContent =
         "Some attachments on the original (embedded messages or cloud links) can't be forwarded by WattMail.";
@@ -4432,10 +4437,7 @@ async function forwardMsg(id?: string): Promise<void> {
   }
 }
 
-// Total-attachment budget for a single send (Graph's simple sendMail path). Must
-// match the backend guard in send_message — and INLINE_IMAGE_MAX_BYTES above,
-// which pre-screens inline images against the same budget.
-const MAX_SEND_ATTACHMENT_BYTES = 2_500_000;
+// The same budget, under the name the send path used to have its own copy of.
 
 // Mirror the backend's collect_attachments accounting: the 2.5 MB budget is
 // enforced on the COMBINED total of local files + inline images + forwarded
@@ -4454,7 +4456,7 @@ async function combinedAttachmentsSizeProblem(images: InlineImage[]): Promise<st
   const inlineBytes = images.reduce((n, i) => n + Math.floor((i.dataBase64.length * 3) / 4), 0);
   const fwdBytes = composeForwardedAtts.reduce((n, a) => n + a.size, 0);
   const total = fileBytes + inlineBytes + fwdBytes;
-  if (total > MAX_SEND_ATTACHMENT_BYTES) {
+  if (total > sendBudgetBytes) {
     return `Attachments total ${(total / 1_000_000).toFixed(
       1,
     )} MB — over the ~2.5 MB send limit. Remove some before sending.`;
@@ -6307,6 +6309,15 @@ applyListWidth(loadListWidth());
 resetReader();
 
 async function boot(): Promise<void> {
+  // Before any compose window can open, so every guard measures against the
+  // backend's real limit rather than the fallback.
+  void invoke<number>("max_attachment_bytes")
+    .then((bytes) => {
+      if (bytes > 0) sendBudgetBytes = bytes;
+    })
+    .catch(() => {
+      /* the shipped fallback stands; it is the smaller, safer claim */
+    });
   applyThemePref(loadThemePref());
   sortSelect.value = sortMode;
   updateFilterUi();
