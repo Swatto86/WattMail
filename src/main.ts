@@ -2499,6 +2499,12 @@ async function saveRule(): Promise<void> {
 
 async function deleteRule(): Promise<void> {
   if (!editingRuleId) return;
+  const ok = await showConfirm("Delete this rule? This cannot be undone.", {
+    title: "Delete rule",
+    okLabel: "Delete",
+    danger: true,
+  });
+  if (!ok) return;
   ruleDeleteBtn.disabled = true;
   rulesMsg.textContent = "Deleting…";
   try {
