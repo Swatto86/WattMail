@@ -800,6 +800,20 @@ async fn collect_attachments(
     Ok(attachments)
 }
 
+/// Sum the on-disk sizes of the given local attachment paths. The file-open
+/// dialog returns only paths (there is no filesystem plugin on the frontend),
+/// so the compose UI calls this to size local attachments and replicate the
+/// backend's combined-total guard *before* the undo-send wait, instead of
+/// discovering the limit only when `collect_attachments` rejects the send.
+/// Unreadable paths count as 0, matching `collect_attachments`' `unwrap_or(0)`.
+#[tauri::command]
+pub fn attachment_paths_total_bytes(paths: Vec<String>) -> u64 {
+    paths
+        .iter()
+        .map(|p| std::fs::metadata(p).map(|m| m.len()).unwrap_or(0))
+        .sum()
+}
+
 /// An attachment uploaded onto a draft, echoed back so the compose UI can turn
 /// its local chip into a removable server chip.
 #[derive(Serialize)]
@@ -1901,9 +1915,27 @@ pub fn started_hidden(flag: State<'_, crate::StartHidden>) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        is_previewable_image, safe_attachment_name, safe_filename, unique_attachment_path,
-        unique_eml_path,
+        attachment_paths_total_bytes, is_previewable_image, safe_attachment_name, safe_filename,
+        unique_attachment_path, unique_eml_path,
     };
+
+    #[test]
+    fn attachment_paths_total_bytes_sums_sizes_and_ignores_unreadable() {
+        let dir = std::env::temp_dir().join(format!("wattmail-size-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let a = dir.join("a.bin");
+        let b = dir.join("b.bin");
+        std::fs::write(&a, vec![0u8; 1000]).unwrap();
+        std::fs::write(&b, vec![0u8; 2500]).unwrap();
+        let missing = dir.join("does-not-exist.bin");
+        let total = attachment_paths_total_bytes(vec![
+            a.to_string_lossy().into_owned(),
+            b.to_string_lossy().into_owned(),
+            missing.to_string_lossy().into_owned(),
+        ]);
+        assert_eq!(total, 3500);
+        std::fs::remove_dir_all(&dir).ok();
+    }
 
     #[test]
     fn safe_attachment_name_keeps_plain_extensions_and_neutralizes_path_syntax() {

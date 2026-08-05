@@ -191,6 +191,7 @@ pub fn run() {
             commands::get_signature,
             commands::set_signature,
             commands::upload_draft_attachments,
+            commands::attachment_paths_total_bytes,
             commands::delete_draft_attachment,
             commands::check_new_mail,
             commands::list_message_rules,

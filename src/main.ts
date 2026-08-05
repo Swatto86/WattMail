@@ -4437,6 +4437,31 @@ async function forwardMsg(id?: string): Promise<void> {
 // which pre-screens inline images against the same budget.
 const MAX_SEND_ATTACHMENT_BYTES = 2_500_000;
 
+// Mirror the backend's collect_attachments accounting: the 2.5 MB budget is
+// enforced on the COMBINED total of local files + inline images + forwarded
+// refs. The per-category client checks never sized local files (the dialog only
+// hands back paths, and there is no filesystem plugin) nor summed across kinds,
+// so an oversized file passed every visible check and failed only at send. Sum
+// all three here — local sizes come from a read-only backend stat command — and
+// report the same limit, so the failure surfaces before the undo-send wait
+// instead of as the backend's raw rejection afterward. (Server attachments
+// already on a resumed draft are excluded, matching collect_attachments.)
+async function combinedAttachmentsSizeProblem(images: InlineImage[]): Promise<string | null> {
+  const fileBytes =
+    composeAttachPaths.length > 0
+      ? await invoke<number>("attachment_paths_total_bytes", { paths: composeAttachPaths })
+      : 0;
+  const inlineBytes = images.reduce((n, i) => n + Math.floor((i.dataBase64.length * 3) / 4), 0);
+  const fwdBytes = composeForwardedAtts.reduce((n, a) => n + a.size, 0);
+  const total = fileBytes + inlineBytes + fwdBytes;
+  if (total > MAX_SEND_ATTACHMENT_BYTES) {
+    return `Attachments total ${(total / 1_000_000).toFixed(
+      1,
+    )} MB — over the ~2.5 MB send limit. Remove some before sending.`;
+  }
+  return null;
+}
+
 // Resume editing a saved draft: load its RAW body (never the display-sanitized
 // reader HTML) and open compose in edit mode, tracking the draft id.
 async function resumeDraft(id: string): Promise<void> {
@@ -4676,6 +4701,11 @@ async function sendCompose(): Promise<void> {
         composeMsg.textContent = sizeProblem;
         return; // finally re-enables the buttons
       }
+      const totalProblem = await combinedAttachmentsSizeProblem(images);
+      if (totalProblem) {
+        composeMsg.textContent = totalProblem;
+        return; // finally re-enables the buttons
+      }
       if (composeAttachPaths.length > 0 || composeForwardedAtts.length > 0 || images.length > 0) {
         const uploaded = await invoke<ServerAttachment[]>("upload_draft_attachments", {
           draftId,
@@ -4716,6 +4746,13 @@ async function sendCompose(): Promise<void> {
       const sizeProblem = inlineImagesSizeProblem(images);
       if (sizeProblem) {
         composeMsg.textContent = sizeProblem;
+        composeSendBtn.disabled = false;
+        endComposeSave(session);
+        return;
+      }
+      const totalProblem = await combinedAttachmentsSizeProblem(images);
+      if (totalProblem) {
+        composeMsg.textContent = totalProblem;
         composeSendBtn.disabled = false;
         endComposeSave(session);
         return;
