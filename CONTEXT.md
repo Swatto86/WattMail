@@ -5,7 +5,7 @@
 > new milestone state, a decision made/reversed, or an open question resolved.
 > Keep newest progress entries at the top of the log.
 >
-> **Last updated:** 2026-07-31
+> **Last updated:** 2026-08-16
 
 ---
 
@@ -101,6 +101,34 @@ Entra app registration (public, not secret):
 
 ## Progress log
 
+### 2026-08-16 — Large attachments via Graph upload sessions (v0.11.0)
+
+Outgoing attachments were capped at ~2.5 MB because `sendMail` base64-inlines
+them in one JSON request. That ceiling is Graph's, not ours — raising the
+constant alone does nothing. This release leaves that path for small sends and
+adds the documented large-file path:
+
+- **`createUploadSession` + chunked `PUT`** in `graph/mod.rs` for any single
+  file ≥ 3 MB (Graph's own split). Chunks are 3 MiB with a 120s per-chunk
+  timeout; the final `Location` header yields the attachment id for draft chips.
+- **Oversized fresh sends** (combined raw bytes > 2.5 MB, or any file ≥ 3 MB)
+  create a draft, attach (simple POST or upload session per file), then
+  `/send` — same cleanup rules as the reply-draft path.
+- **Reply / draft-upload** already attached onto a draft; they inherit upload
+  sessions automatically via `add_attachment`.
+- **Budget** raised to **150 MB** (`MAX_ATTACHMENT_BYTES` / compose
+  `max_attachment_bytes`), Graph's documented per-file upload-session ceiling.
+  Tenant message-size limits (often ~35 MB) can still reject a send; the compose
+  surfaces Graph's error.
+
+Pure helpers covered by unit tests: `needs_draft_send`,
+`attachment_id_from_location`, upload-session JSON decode.
+
+**Residual:** attachments still load fully into memory before upload (fine for
+typical sizes; streaming from disk is a later polish). Inline images in the
+editor still use `data:` URLs, so embedding a multi-ten-MB image in the body is
+a bad idea even though send can carry it.
+
 ### 2026-08-05 — One send budget, and a version check in the gate (v0.10.5)
 
 No user-visible behaviour change; both entries are about stopping a defect
@@ -121,13 +149,10 @@ class rather than fixing a symptom.
   value is read before comparing, so a moved key fails loudly rather than making
   all three vacuously equal.
 
-**On the number itself:** it is Graph's, not ours. `send_message` posts to
-`/me/sendMail` with attachments inline in the JSON body as base64, and that
-request is size-limited at the Graph end; base64 inflates by 4/3, so 2.5 MB of
-raw attachment is ~3.3 MB on the wire with the rest as headroom for the body and
-recipients. Raising it is not a bigger constant — it means uploading through
-`createUploadSession` against a draft, in chunks, which lifts the ceiling to
-~150 MB. That remains open.
+**On the number itself:** it used to be Graph's `/me/sendMail` request limit
+(base64 inflation → ~2.5 MB raw). v0.11.0 lifts the product ceiling to 150 MB via
+upload sessions; the 2.5 MB figure remains only as the sendMail-vs-draft
+routing threshold inside the Graph client.
 
 ### 2026-08-05 — Second review batch: SSRF bypass, two remote-input panics (v0.10.4)
 
@@ -2268,11 +2293,13 @@ pending (needs a signed-in window).
   token chunking stays uniform across platforms (harmless but unnecessary on macOS Keychain /
   Linux Secret Service, which have no 2560-char limit); decide later whether to store the full
   blob off-Windows.
-- **Attachment limits** — outgoing attachments ride inline in `sendMail` (~3 MB total Graph limit);
-  larger files need an upload session (deferred). Inline images (v0.1.12) also ship as inline
-  `fileAttachment`s (`cid:`/`isInline`) under the same ~3 MB cap (enforced client-side at send).
-  Only `fileAttachment`s are listed — `itemAttachment` (embedded messages) and `referenceAttachment`
-  (links) aren't shown. Outgoing MIME type is guessed from the file extension.
+- **Attachment limits — ✓ resolved (v0.11.0):** files under ~3 MB still use the
+  simple base64 attach / `sendMail` path; larger files (and combined totals over
+  ~2.5 MB) go through draft + `createUploadSession` (up to 150 MB per Graph).
+  Residual: tenant message-size limits may be lower (~35 MB default); attachments
+  are still buffered in memory before upload; only `fileAttachment`s are listed
+  — `itemAttachment` / `referenceAttachment` aren't shown. Outgoing MIME type is
+  guessed from the file extension.
 - **Reply threading — ✓ resolved (v0.3.0):** replies now send via Graph `createReply` →
   PATCH → send, carrying `In-Reply-To`/`References` (see the v0.3.0 progress entry).
   Residual: a reply explicitly saved as a draft then sent goes out unthreaded (the
@@ -2393,9 +2420,11 @@ folder-switch frontend races; prod CSP. See the v0.1.18 progress entry.
 threading (`createReply`), undo-send, draft attachments. *Remaining* —
 junk/block-sender (S, reuses rules + move); templates (S); unified inbox across
 accounts (L); conversation/threaded view (L, blocked on whole-folder server-side
-date sort); large-attachment upload sessions (L, only if the ~2.5 MB cap bites);
-snooze (L). Next major direction per 2026-07-10 planning: **calendar completion**
+date sort); snooze (L). Next major direction per 2026-07-10 planning: **calendar completion**
 (in-email meeting-invite RSVP, event reminders, event editing, week/month grid).
+
+**Shipped in v0.11.0 (2026-08-16):** large-attachment upload sessions — Graph
+`createUploadSession` + draft send path; compose budget 150 MB.
 
 **Shipped in v0.2.12 (2026-07-10):** Compose To/Cc/Bcc fields suggest unique
 email addresses seen in the active account's encrypted local message cache

@@ -17,6 +17,22 @@ use wattmail_domain::{
 
 pub(super) const GRAPH_BASE: &str = "https://graph.microsoft.com/v1.0";
 
+/// Raw attachment bytes that still fit a single Graph `POST …/attachments`
+/// (under 3 MB). At or above this, Graph requires `createUploadSession`.
+const UPLOAD_SESSION_MIN_BYTES: usize = 3_000_000;
+
+/// Combined attachment budget that still fits `/me/sendMail` with base64
+/// inline content (~3–4 MB request limit after the 4/3 inflation). Larger
+/// totals go through create-draft → attach → send instead.
+const SENDMAIL_ATTACHMENT_BUDGET: u64 = 2_500_000;
+
+/// Bytes per `PUT` on an upload session. Graph asks for under 4 MB; 3 MiB
+/// leaves headroom and matches the documented examples' scale.
+const UPLOAD_CHUNK_BYTES: usize = 3_145_728;
+
+/// Per-chunk timeout for large-file upload session PUTs (slow uplinks).
+const UPLOAD_CHUNK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
+
 /// A Microsoft Graph mail backend, authenticated with a bearer access token.
 pub struct GraphClient {
     http: reqwest::Client,
@@ -31,8 +47,9 @@ impl GraphClient {
         Self {
             calendar_id: None,
             // Bounded so a black-holed request can never hang a command (and
-            // its spinner) forever; 60s total leaves room for the ~3 MB
-            // base64 attachment uploads on a slow uplink.
+            // its spinner) forever; 60s covers ordinary Graph calls and the
+            // sub-3 MB simple attachment POST. Upload-session chunks override
+            // this per request (see [`UPLOAD_CHUNK_TIMEOUT`]).
             http: reqwest::Client::builder()
                 .connect_timeout(std::time::Duration::from_secs(15))
                 .timeout(std::time::Duration::from_secs(60))
@@ -121,9 +138,24 @@ impl GraphClient {
     }
 
     /// POST one attachment onto an existing (draft) message, returning the new
-    /// attachment's id. Bytes ride inline as base64 — callers enforce the
-    /// ~3 MB simple-attach cap; larger files would need an upload session.
+    /// attachment's id. Files under 3 MB ride inline as base64; larger files
+    /// use Graph's `createUploadSession` + chunked `PUT` (up to 150 MB).
     pub(super) async fn add_attachment(
+        &self,
+        message_id: &str,
+        attachment: &OutgoingAttachment,
+    ) -> Result<String, MailError> {
+        if attachment.bytes.len() >= UPLOAD_SESSION_MIN_BYTES {
+            self.add_attachment_via_upload_session(message_id, attachment)
+                .await
+        } else {
+            self.add_attachment_simple(message_id, attachment).await
+        }
+    }
+
+    /// Simple `POST …/attachments` with base64 content — Graph's path for
+    /// files under 3 MB.
+    async fn add_attachment_simple(
         &self,
         message_id: &str,
         attachment: &OutgoingAttachment,
@@ -146,6 +178,118 @@ impl GraphClient {
             .await
             .map_err(|e| MailError::Decode(e.to_string()))?;
         Ok(created.id)
+    }
+
+    /// Attach a large file via `createUploadSession` and sequential chunked
+    /// `PUT`s to the pre-authenticated upload URL (no bearer token on PUTs).
+    async fn add_attachment_via_upload_session(
+        &self,
+        message_id: &str,
+        attachment: &OutgoingAttachment,
+    ) -> Result<String, MailError> {
+        let mut url = message_endpoint(message_id);
+        {
+            let mut segments = url.path_segments_mut().expect("base URL is a proper path");
+            segments.push("attachments");
+            segments.push("createUploadSession");
+        }
+
+        let mut item = serde_json::json!({
+            "attachmentType": "file",
+            "name": attachment.name,
+            "size": attachment.bytes.len(),
+            "contentType": attachment.content_type,
+        });
+        if attachment.is_inline {
+            let object = item.as_object_mut().expect("json! built an object above");
+            object.insert("isInline".to_string(), serde_json::Value::Bool(true));
+            if let Some(content_id) = &attachment.content_id {
+                object.insert(
+                    "contentId".to_string(),
+                    serde_json::Value::String(content_id.clone()),
+                );
+            }
+        }
+        let payload = serde_json::json!({ "AttachmentItem": item });
+
+        let response = self
+            .http
+            .post(url.as_str())
+            .bearer_auth(&self.access_token)
+            .timeout(UPLOAD_CHUNK_TIMEOUT)
+            .json(&payload)
+            .send()
+            .await
+            .map_err(|e| MailError::Network(e.to_string()))?;
+        let session: GraphUploadSession = check_status(response)
+            .await?
+            .json()
+            .await
+            .map_err(|e| MailError::Decode(e.to_string()))?;
+
+        let total = attachment.bytes.len();
+        let mut offset = 0usize;
+        while offset < total {
+            let end = (offset + UPLOAD_CHUNK_BYTES).min(total);
+            let chunk = &attachment.bytes[offset..end];
+            // Content-Range is inclusive on both ends: bytes start-(end-1)/total.
+            let range = format!("bytes {offset}-{}/{total}", end - 1);
+            let response = self
+                .http
+                .put(&session.upload_url)
+                .timeout(UPLOAD_CHUNK_TIMEOUT)
+                .header(reqwest::header::CONTENT_TYPE, "application/octet-stream")
+                .header(reqwest::header::CONTENT_RANGE, &range)
+                .header(reqwest::header::CONTENT_LENGTH, chunk.len())
+                .body(chunk.to_vec())
+                .send()
+                .await
+                .map_err(|e| MailError::Network(e.to_string()))?;
+
+            if end == total {
+                // Final chunk: 201 Created + Location with the new attachment id.
+                let response = check_status(response).await?;
+                let location = response
+                    .headers()
+                    .get(reqwest::header::LOCATION)
+                    .and_then(|v| v.to_str().ok())
+                    .unwrap_or("");
+                return attachment_id_from_location(location).ok_or_else(|| {
+                    MailError::Decode(
+                        "upload finished but Graph returned no attachment id in Location".into(),
+                    )
+                });
+            }
+
+            // Intermediate chunk: 200 OK with nextExpectedRanges.
+            check_status(response).await?;
+            offset = end;
+        }
+
+        Err(MailError::Decode(
+            "upload session ended without a final chunk".into(),
+        ))
+    }
+
+    /// Create a draft, attach every file (simple POST or upload session), then
+    /// send. Used when the combined attachment payload would blow past
+    /// `/me/sendMail`'s request-size limit. Mirrors the reply-draft path's
+    /// cleanup rules: delete the skeleton if prepare fails; leave it alone
+    /// once send is attempted.
+    async fn send_message_via_draft(&self, message: &OutgoingMessage) -> Result<(), MailError> {
+        let draft_id = self.create_draft(message).await?;
+        let prepared: Result<(), MailError> = async {
+            for attachment in &message.attachments {
+                self.add_attachment(&draft_id, attachment).await?;
+            }
+            Ok(())
+        }
+        .await;
+        if let Err(e) = prepared {
+            let _ = self.delete_message(&draft_id, true).await;
+            return Err(e);
+        }
+        self.send_draft(&draft_id).await
     }
 
     /// Fetch the immediate child folders of `parent` (`None` = top level).
@@ -1031,6 +1175,15 @@ impl MailProvider for GraphClient {
     }
 
     async fn send_message(&self, message: &OutgoingMessage) -> Result<(), MailError> {
+        // `/me/sendMail` base64-inlines every attachment in one JSON body.
+        // Past ~2.5 MB raw (or any single file ≥ 3 MB) that request is rejected
+        // by Graph — route through a draft + attach (upload session when needed)
+        // + send instead, which is how Outlook itself ships large files.
+        let sizes: Vec<usize> = message.attachments.iter().map(|a| a.bytes.len()).collect();
+        if needs_draft_send(&sizes) {
+            return self.send_message_via_draft(message).await;
+        }
+
         let payload = serde_json::json!({
             "message": {
                 "subject": message.subject,
@@ -1486,6 +1639,13 @@ struct GraphCreatedDraft {
     id: String,
 }
 
+/// Response from `POST …/attachments/createUploadSession`.
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GraphUploadSession {
+    upload_url: String,
+}
+
 /// A draft fetched for editing: its raw editable fields. The body is *not*
 /// sanitized here — it is fed back into the compose editor verbatim.
 #[derive(serde::Deserialize)]
@@ -1573,6 +1733,33 @@ pub(super) async fn check_status(
 
 fn reply_target_missing(error: &MailError) -> bool {
     matches!(error, MailError::Api { status: 404, .. })
+}
+
+/// Whether a send must leave `/me/sendMail` and go through draft + attach.
+/// True when the combined raw size would exceed the sendMail request budget,
+/// or any single file needs an upload session (≥ 3 MB).
+fn needs_draft_send(attachment_sizes: &[usize]) -> bool {
+    let total: u64 = attachment_sizes.iter().map(|&s| s as u64).sum();
+    total > SENDMAIL_ATTACHMENT_BUDGET
+        || attachment_sizes
+            .iter()
+            .any(|&s| s >= UPLOAD_SESSION_MIN_BYTES)
+}
+
+/// Pull the attachment id out of the `Location` header Graph returns on the
+/// final upload-session `PUT`. The URL looks like
+/// `…/Messages('…')/Attachments('THE_ID')` (Outlook REST host).
+fn attachment_id_from_location(location: &str) -> Option<String> {
+    const MARKER: &str = "/Attachments('";
+    let start = location.rfind(MARKER)? + MARKER.len();
+    let rest = location.get(start..)?;
+    let end = rest.find("')")?;
+    let id = &rest[..end];
+    if id.is_empty() {
+        None
+    } else {
+        Some(id.to_string())
+    }
 }
 
 /// Build the `/me/messages/{id}` endpoint with the opaque id safely encoded as a
@@ -2439,6 +2626,44 @@ mod tests {
         });
         assert_eq!(json["isInline"], true);
         assert_eq!(json["contentId"], "cid123");
+    }
+
+    #[test]
+    fn attachment_id_parses_from_upload_session_location() {
+        let location = "https://outlook.office.com/api/v2.0/Users('u')/Messages('m')/Attachments('AAMkADI5MAAIT3drCAAABEgAQANAqbAe7qaROhYdTnUQwXm0=')";
+        assert_eq!(
+            attachment_id_from_location(location).as_deref(),
+            Some("AAMkADI5MAAIT3drCAAABEgAQANAqbAe7qaROhYdTnUQwXm0=")
+        );
+        assert!(attachment_id_from_location("https://example.com/nope").is_none());
+        assert!(attachment_id_from_location("").is_none());
+    }
+
+    #[test]
+    fn upload_session_response_decodes_upload_url() {
+        let session: GraphUploadSession = serde_json::from_str(
+            r#"{"uploadUrl":"https://outlook.office.com/api/v2.0/Users('u')/Messages('m')/AttachmentSessions('s')?authtoken=t","expirationDateTime":"2020-01-01T00:00:00Z","nextExpectedRanges":["0"]}"#,
+        )
+        .expect("parses");
+        assert!(session.upload_url.contains("AttachmentSessions"));
+    }
+
+    #[test]
+    fn small_attachments_stay_on_sendmail_path() {
+        assert!(!needs_draft_send(&[]));
+        assert!(!needs_draft_send(&[1000]));
+        assert!(!needs_draft_send(&[1_000_000, 1_000_000]));
+        // Exactly the sendMail budget still fits.
+        assert!(!needs_draft_send(&[2_500_000]));
+    }
+
+    #[test]
+    fn oversized_total_or_single_file_uses_draft_path() {
+        assert!(needs_draft_send(&[2_500_001]));
+        assert!(needs_draft_send(&[1_500_000, 1_500_000]));
+        // One file at the upload-session threshold forces the draft path even
+        // when the total would otherwise fit sendMail's budget.
+        assert!(needs_draft_send(&[3_000_000]));
     }
 
     #[test]

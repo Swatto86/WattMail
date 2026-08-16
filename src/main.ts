@@ -3701,16 +3701,16 @@ function restoreEditorSelection(snapshot: Range | null): void {
 
 // ---- Inline images ----
 // Every client-side attachment guard measures against one budget, and that
-// budget belongs to the backend: it is Graph's own limit on the `/me/sendMail`
-// request, enforced in `collect_attachments`. The window must catch everything
-// the backend would reject, or the failure only surfaces after the full
-// undo-send wait.
+// budget belongs to the backend: Graph's large-file ceiling (upload sessions
+// lift it to ~150 MB), enforced in `collect_attachments`. The window must
+// catch everything the backend would reject, or the failure only surfaces
+// after the full undo-send wait.
 //
 // It used to be three constants here and one in Rust, four copies of a number
 // with nothing keeping them equal. Now the window asks, once, at startup —
 // falling back to the value Rust shipped with if the call ever fails, which is
 // the safe direction: too small only costs a needless warning.
-let sendBudgetBytes = 2_500_000;
+let sendBudgetBytes = 150_000_000;
 const oneMb = (bytes: number): string => (bytes / (1024 * 1024)).toFixed(1);
 // data: image URLs are base64; raw bytes ≈ payload length * 3 / 4.
 function dataUrlByteLength(dataUrl: string): number {
@@ -4439,7 +4439,7 @@ async function forwardMsg(id?: string): Promise<void> {
 
 // The same budget, under the name the send path used to have its own copy of.
 
-// Mirror the backend's collect_attachments accounting: the 2.5 MB budget is
+// Mirror the backend's collect_attachments accounting: the send budget is
 // enforced on the COMBINED total of local files + inline images + forwarded
 // refs. The per-category client checks never sized local files (the dialog only
 // hands back paths, and there is no filesystem plugin) nor summed across kinds,
@@ -4459,7 +4459,7 @@ async function combinedAttachmentsSizeProblem(images: InlineImage[]): Promise<st
   if (total > sendBudgetBytes) {
     return `Attachments total ${(total / 1_000_000).toFixed(
       1,
-    )} MB — over the ~2.5 MB send limit. Remove some before sending.`;
+    )} MB — over the ~${Math.round(sendBudgetBytes / 1_000_000)} MB send limit. Remove some before sending.`;
   }
   return null;
 }

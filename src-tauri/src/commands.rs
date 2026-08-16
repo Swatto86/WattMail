@@ -725,9 +725,9 @@ pub async fn send_message(
 /// Materialize a compose's attachments — local file paths (read from disk),
 /// inline images (base64 from the editor), and forwarded refs (downloaded from
 /// the provider so multi-MB files don't cross the IPC bridge twice) — into
-/// outgoing attachments, guarding Graph's ~3-4 MB simple-attach cap up front
-/// (upload sessions are out of scope) so an oversized batch fails fast with a
-/// readable message instead of a raw 413.
+/// outgoing attachments. Caps the combined total at Graph's large-file ceiling
+/// (~150 MB); individual files over ~3 MB ride Graph upload sessions rather
+/// than the simple base64 POST.
 async fn collect_attachments(
     provider: &dyn MailProvider,
     attachment_paths: &[String],
@@ -747,7 +747,7 @@ async fn collect_attachments(
     }
     if total_bytes > MAX_ATTACHMENT_BYTES {
         return Err(format!(
-            "Attachments total {:.1} MB — messages with more than {:.1} MB of attachments can't              be sent yet.",
+            "Attachments total {:.1} MB — messages with more than {:.0} MB of attachments can't be sent.",
             total_bytes as f64 / 1_000_000.0,
             MAX_ATTACHMENT_BYTES as f64 / 1_000_000.0
         ));
@@ -802,20 +802,16 @@ async fn collect_attachments(
 
 /// Every attachment a single send may carry, in bytes before base64.
 ///
-/// Not an arbitrary number, and not ours: `send_message` posts to Graph's
-/// `/me/sendMail` with the attachments inline in the JSON body as base64, and
-/// that request has a hard size limit at the Graph end. base64 inflates by 4/3,
-/// so this budget of raw bytes becomes about a third more on the wire, and the
-/// remainder is headroom for the HTML body, the recipients and the JSON itself.
+/// Graph's documented ceiling for a file attached via `createUploadSession`
+/// is 150 MB. Below ~3 MB the Graph client still uses the simple base64 POST;
+/// above that (or when the combined payload would blow past `/me/sendMail`'s
+/// ~2.5 MB request budget) it creates a draft, uploads in chunks, and sends.
+/// Exchange tenants may enforce a lower *message* size (often ~35 MB) — Graph
+/// then rejects the send with an API error the compose surfaces.
 ///
-/// Raising it means leaving that request shape behind: attachments above the
-/// limit need `createUploadSession` against a draft, uploaded in chunks, which
-/// is a feature rather than a bigger number here.
-///
-/// **One definition.** It used to be four — this constant and three in
-/// `main.ts` — with nothing making them agree. The window now asks for it
-/// through `max_attachment_bytes`.
-pub const MAX_ATTACHMENT_BYTES: u64 = 2_500_000;
+/// **One definition.** The compose window asks for this through
+/// `max_attachment_bytes` so its pre-check cannot drift from the backend.
+pub const MAX_ATTACHMENT_BYTES: u64 = 150_000_000;
 
 /// The send budget, for the compose window's own pre-checks.
 #[tauri::command]
@@ -867,10 +863,10 @@ pub async fn upload_draft_attachments(
         forwarded_attachments,
     )
     .await?;
-    // ponytail: the ~2.5 MB guard covers this upload batch only — attachments
-    // already on the draft aren't counted, so a draft grown across several
-    // saves can exceed the send cap; Graph then rejects the send with an error
-    // the compose surfaces. Track a running total if that ever bites.
+    // ponytail: the per-batch guard covers this upload batch only — attachments
+    // already on the draft aren't counted. A draft grown across several saves
+    // can still exceed a tenant's message-size limit; Graph then rejects the
+    // send with an error the compose surfaces.
     let mut uploaded = Vec::new();
     for attachment in &attachments {
         let id = app_add_draft_attachment(&*provider, &draft_id, attachment)
@@ -2082,7 +2078,7 @@ mod boundary_tests {
         // budget: too small only warns needlessly, too large lets a send through
         // that the backend then rejects after the undo-send wait.
         assert!(
-            frontend.contains("let sendBudgetBytes = 2_500_000;"),
+            frontend.contains("let sendBudgetBytes = 150_000_000;"),
             "the window's fallback no longer matches the shipped budget of {}",
             super::MAX_ATTACHMENT_BYTES
         );
