@@ -404,7 +404,7 @@ appRoot.innerHTML = /* html */ `
       </div>
       <button id="account" class="account-switch text-xs opacity-70 flex-1 hidden" title="Switch account" type="button"></button>
       <div class="toolbar-search mail-only">
-        <input id="search" class="input input-bordered input-xs" type="search" placeholder="Search mail…" autocomplete="off" />
+        <input id="search" class="input input-bordered input-xs" type="search" placeholder="Search mail… (from:, subject:, is:unread)" autocomplete="off" />
         <button id="search-clear" class="search-clear hidden" type="button" title="Clear search">&times;</button>
       </div>
       <div id="filter-seg" class="filter-seg mail-only" role="group" aria-label="Filter messages">
@@ -1491,10 +1491,14 @@ async function runSearch(query: string): Promise<void> {
     `<div class="search-header">Search results for: ${esc(trimmed)}</div>` +
     `<div class="p-6 text-center opacity-60">Searching…</div>`;
   try {
-    const results = await invoke<Message[]>("search_messages", { query: trimmed, top: SEARCH_TOP });
+    const results = await invoke<{ messages: Message[]; fromCache: boolean }>(
+      "search_messages",
+      { query: trimmed, top: SEARCH_TOP, folderId: currentFolderId },
+    );
     if (seq !== searchSeq || !searchActive) return; // superseded or cleared
-    renderSearchResults(trimmed, results);
-    statusEl.textContent = `${results.length} search result(s) for "${trimmed}"`;
+    renderSearchResults(trimmed, results.messages);
+    const where = results.fromCache ? " (local cache)" : "";
+    statusEl.textContent = `${results.messages.length} search result(s) for "${trimmed}"${where}`;
   } catch (e) {
     if (seq !== searchSeq || !searchActive) return;
     listEl.innerHTML =
@@ -3855,8 +3859,10 @@ const composeSessionStale = (session: number): boolean => session !== composeSes
 // True when the open draft was resumed from the Drafts folder (as opposed to
 // auto-created this session). A resumed draft is never deleted on discard.
 let currentDraftIsResumed = false;
-// The message the open compose replies to (null = not a reply). The send path
-// hands it to the backend so the reply carries threading headers.
+// The message the open compose replies to (null = not a reply). The first
+// save creates a threading-preserving reply draft (Graph createReply); send
+// of that draft keeps In-Reply-To / References. A fresh send (no draft)
+// still passes this to send_message.
 let currentReplyToId: string | null = null;
 // The compose session that currently has a save (manual, send, or autosave) in
 // flight, or null. Scoped to the session — not a bare bool — so a save left
@@ -4051,8 +4057,8 @@ function openCompose(opts: {
   draftId?: string | null;
   // Whether the draft was resumed from the Drafts folder (never deleted on discard).
   draftIsResumed?: boolean;
-  // The message being replied to — the send then preserves threading headers.
-  // Not carried across a draft save/resume: a resumed reply sends unthreaded.
+  // The message being replied to — the first save creates a threaded reply
+  // draft; a fresh send (no draft) still uses this for createReply.
   replyToId?: string;
   // Non-inline file attachments from the original message (forward only).
   // The user can remove any of these individually before sending.
@@ -4319,6 +4325,7 @@ async function runAutosave(): Promise<void> {
       importance: composeImportance,
       requestReadReceipt: cReadReceipt.checked,
       requestDeliveryReceipt: cDeliveryReceipt.checked,
+      replyToId: currentReplyToId,
     });
     // Compose was closed/replaced while this save was in flight — the returned
     // id belongs to that gone session; adopting it would hijack the new one.
@@ -4584,6 +4591,7 @@ async function saveDraft(): Promise<void> {
       importance: composeImportance,
       requestReadReceipt: cReadReceipt.checked,
       requestDeliveryReceipt: cDeliveryReceipt.checked,
+      replyToId: currentReplyToId,
     });
     // Compose closed/replaced mid-save: the draft is safely persisted server-side,
     // but writing back its id (and attachments/baseline) would land on the new
@@ -4610,16 +4618,12 @@ async function saveDraft(): Promise<void> {
     }
     // The draft (and its attachments) now lives in Drafts — from here treat it
     // like a resumed draft: send via the draft path so the server attachments
-    // ride along, and never delete it on discard. (A reply saved this way
-    // sends without threading headers — the draft path can't thread.)
+    // ride along, and never delete it on discard. A reply saved this way was
+    // created via createReply, so send_draft keeps threading headers.
     currentDraftIsResumed = true;
     captureComposeBaseline();
     delete composeMsg.dataset.error;
-    // Surface the threading tradeoff instead of leaving it to a code comment.
-    composeMsg.textContent =
-      currentReplyToId !== null
-        ? "Draft saved. A reply sent from a saved draft won't thread with the original conversation."
-        : "Draft saved.";
+    composeMsg.textContent = "Draft saved.";
     await syncDraftsFolder();
   } catch (e) {
     // A stale session gets the one-tap re-sign-in prompt, not a dead-end
@@ -4735,6 +4739,7 @@ async function sendCompose(): Promise<void> {
         importance: composeImportance,
         requestReadReceipt: cReadReceipt.checked,
         requestDeliveryReceipt: cDeliveryReceipt.checked,
+        replyToId: currentReplyToId,
       });
       await invoke("send_draft", { id: draftId });
       currentDraftId = null;

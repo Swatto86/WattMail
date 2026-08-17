@@ -82,6 +82,26 @@ impl GraphClient {
         self.calendar_id.as_deref()
     }
 
+    /// POST `/me/messages/{id}/createReply` and return the new draft's id.
+    /// The draft carries Graph's threading headers; the caller PATCHes content.
+    async fn create_reply_skeleton(&self, original_id: &str) -> Result<String, MailError> {
+        let mut url = message_endpoint(original_id);
+        url.path_segments_mut()
+            .expect("base URL is a proper path")
+            .push("createReply");
+        let response = self
+            .post_empty(url.as_str())
+            .send()
+            .await
+            .map_err(|e| MailError::Network(e.to_string()))?;
+        let response = check_status(response).await?;
+        let draft: GraphCreatedDraft = response
+            .json()
+            .await
+            .map_err(|e| MailError::Decode(e.to_string()))?;
+        Ok(draft.id)
+    }
+
     /// POST with a deliberately empty body. Graph's frontend rejects body-less
     /// POSTs with 411 Length Required, so `Content-Length: 0` must be explicit
     /// (reqwest omits the header entirely when no body is set).
@@ -654,22 +674,18 @@ impl MailProvider for GraphClient {
     }
 
     async fn search(&self, query: &str, top: u32) -> Result<Vec<MessageSummary>, MailError> {
-        // `$search` matches across folders by relevance. It cannot be combined
-        // with `$orderby` and requires the `ConsistencyLevel: eventual` header;
-        // we sort the results newest-first ourselves below.
-        //
-        // The query is wrapped in KQL double-quotes for a phrase match, so any
-        // double-quotes the user typed would break the quoting and produce a
-        // malformed phrase (HTTP 400). Replace them with spaces to keep the
-        // phrase well-formed.
-        let search_value = format!("\"{}\"", query.replace('"', " "));
+        // `$search` is KQL. The application layer builds the string (quoted
+        // phrase for free text, `from:`/`subject:`/… operators AND-combined);
+        // wrapping the whole thing in extra quotes would turn operators into
+        // a literal phrase. It cannot be combined with `$orderby` and requires
+        // the `ConsistencyLevel: eventual` header; we sort newest-first below.
         let response = self
             .http
             .get(format!("{GRAPH_BASE}/me/messages"))
             .bearer_auth(&self.access_token)
             .header("ConsistencyLevel", "eventual")
             .query(&[
-                ("$search", search_value.as_str()),
+                ("$search", query),
                 (
                     "$select",
                     "id,subject,from,toRecipients,receivedDateTime,bodyPreview,isRead,flag,hasAttachments,importance",
@@ -1231,47 +1247,55 @@ impl MailProvider for GraphClient {
         // replaced wholesale with the client-composed message (PATCH),
         // attachments are added, and the draft is sent — consuming it into
         // Sent Items exactly like a resumed-draft send.
-        let mut url = message_endpoint(original_id);
-        url.path_segments_mut()
-            .expect("base URL is a proper path")
-            .push("createReply");
-        let response = self
-            .post_empty(url.as_str())
-            .send()
-            .await
-            .map_err(|e| MailError::Network(e.to_string()))?;
-        let response = match check_status(response).await {
-            Ok(response) => response,
+        let draft_id = match self.create_reply_skeleton(original_id).await {
+            Ok(id) => id,
             // Graph's default message ids change when a message moves. If the
             // cached reply target has gone stale, no reply draft was created,
             // so a normal send is the safe, non-duplicating fallback.
             Err(error) if reply_target_missing(&error) => return self.send_message(message).await,
             Err(error) => return Err(error),
         };
-        let draft: GraphCreatedDraft = response
-            .json()
-            .await
-            .map_err(|e| MailError::Decode(e.to_string()))?;
 
         // The draft now exists server-side: if preparing it fails, best-effort
         // delete it so an aborted send doesn't leave a skeleton in Drafts.
         let prepared: Result<(), MailError> = async {
-            self.update_draft(&draft.id, message).await?;
+            self.update_draft(&draft_id, message).await?;
             for attachment in &message.attachments {
-                self.add_attachment(&draft.id, attachment).await?;
+                self.add_attachment(&draft_id, attachment).await?;
             }
             Ok(())
         }
         .await;
         if let Err(e) = prepared {
-            let _ = self.delete_message(&draft.id, true).await;
+            let _ = self.delete_message(&draft_id, true).await;
             return Err(e);
         }
         // NO cleanup once the send is attempted: a send whose response is lost
         // (network blip) may still have succeeded server-side, and deleting the
         // draft then could destroy a message that was actually sent. A genuine
         // send failure just leaves the finished reply in Drafts to retry.
-        self.send_draft(&draft.id).await
+        self.send_draft(&draft_id).await
+    }
+
+    async fn create_reply_draft(
+        &self,
+        original_id: &str,
+        message: &OutgoingMessage,
+    ) -> Result<String, MailError> {
+        let draft_id = match self.create_reply_skeleton(original_id).await {
+            Ok(id) => id,
+            // Original gone (moved/deleted): fall back to an unthreaded draft
+            // so the user still has something to resume, matching send_reply.
+            Err(error) if reply_target_missing(&error) => {
+                return self.create_draft(message).await;
+            }
+            Err(error) => return Err(error),
+        };
+        if let Err(e) = self.update_draft(&draft_id, message).await {
+            let _ = self.delete_message(&draft_id, true).await;
+            return Err(e);
+        }
+        Ok(draft_id)
     }
 
     async fn create_draft(&self, message: &OutgoingMessage) -> Result<String, MailError> {

@@ -8,12 +8,13 @@
 // All three are async: callers `await` the result. Only one dialog shows at a
 // time; opening a second resolves the first as cancelled first.
 
-type DialogKind = "alert" | "confirm" | "prompt";
+type DialogKind = "alert" | "confirm" | "prompt" | "ternary";
 
 interface DialogOptions {
   title?: string;
   okLabel?: string;
   cancelLabel?: string;
+  altLabel?: string;
   // Style the confirm/OK button as a destructive action.
   danger?: boolean;
   // prompt-only:
@@ -28,6 +29,7 @@ let messageEl: HTMLDivElement;
 let inputEl: HTMLInputElement;
 let okBtn: HTMLButtonElement;
 let cancelBtn: HTMLButtonElement;
+let altBtn: HTMLButtonElement;
 
 // Resolver + key handler for the dialog currently on screen, if any.
 let activeResolve: ((value: string | boolean | null) => void) | null = null;
@@ -44,6 +46,7 @@ function build(): void {
       <input class="input input-bordered input-sm dialog-input" data-role="input" autocomplete="off" />
       <div class="settings-actions" style="gap: 8px">
         <button class="btn btn-sm" data-role="cancel"></button>
+        <button class="btn btn-sm hidden" data-role="alt"></button>
         <button class="btn btn-sm btn-primary" data-role="ok"></button>
       </div>
     </div>`;
@@ -53,9 +56,11 @@ function build(): void {
   inputEl = overlay.querySelector('[data-role="input"]')!;
   okBtn = overlay.querySelector('[data-role="ok"]')!;
   cancelBtn = overlay.querySelector('[data-role="cancel"]')!;
+  altBtn = overlay.querySelector('[data-role="alt"]')!;
 
   okBtn.addEventListener("click", () => settle(currentResult()));
   cancelBtn.addEventListener("click", () => settle(cancelResult()));
+  altBtn.addEventListener("click", () => settle("alt"));
   // Backdrop click cancels (matches the other overlays).
   overlay.addEventListener("click", (e) => {
     if (e.target === overlay) settle(cancelResult());
@@ -73,6 +78,7 @@ let currentKind: DialogKind = "alert";
 // The value a successful (OK) close resolves to, per dialog kind.
 function currentResult(): string | boolean | null {
   if (currentKind === "prompt") return inputEl.value;
+  if (currentKind === "ternary") return "primary";
   if (currentKind === "confirm") return true;
   return null; // alert
 }
@@ -114,6 +120,8 @@ function open(kind: DialogKind, message: string, opts: DialogOptions): Promise<s
   // Cancel button hidden for a bare alert.
   cancelBtn.classList.toggle("hidden", kind === "alert");
   cancelBtn.textContent = opts.cancelLabel ?? "Cancel";
+  altBtn.classList.toggle("hidden", kind !== "ternary");
+  altBtn.textContent = opts.altLabel ?? "";
   okBtn.textContent = opts.okLabel ?? "OK";
   okBtn.classList.toggle("btn-error", opts.danger === true);
   okBtn.classList.toggle("btn-primary", opts.danger !== true);
@@ -134,12 +142,14 @@ function open(kind: DialogKind, message: string, opts: DialogOptions): Promise<s
       // deleting a folder). Enter on the OK button (or elsewhere) still confirms.
       e.preventDefault();
       e.stopPropagation();
-      settle(document.activeElement === cancelBtn ? cancelResult() : currentResult());
+      if (document.activeElement === cancelBtn) settle(cancelResult());
+      else if (document.activeElement === altBtn) settle("alt");
+      else settle(currentResult());
     } else if (e.key === "Tab") {
       // Trap focus within the dialog's own controls. Without this, Tab walks out
       // to the (still-interactive) app behind the modal, letting Enter/Space hit
       // a background control while a confirm/delete dialog is up.
-      const focusables = ([inputEl, cancelBtn, okBtn] as HTMLElement[]).filter(
+      const focusables = ([inputEl, cancelBtn, altBtn, okBtn] as HTMLElement[]).filter(
         (el) => !el.classList.contains("hidden"),
       );
       if (focusables.length === 0) return;
@@ -191,4 +201,18 @@ export async function showConfirm(message: string, opts: DialogOptions = {}): Pr
 export async function showPrompt(message: string, opts: DialogOptions = {}): Promise<string | null> {
   const r = await open("prompt", message, opts);
   return typeof r === "string" ? r : null;
+}
+
+/**
+ * Three-way choice: OK → `"primary"`, the extra button → `"secondary"`,
+ * Cancel / Esc / backdrop → `null`.
+ */
+export async function showTernary(
+  message: string,
+  opts: DialogOptions & { altLabel: string },
+): Promise<"primary" | "secondary" | null> {
+  const r = await open("ternary", message, opts);
+  if (r === "primary") return "primary";
+  if (r === "alt") return "secondary";
+  return null;
 }

@@ -5,7 +5,7 @@
 > new milestone state, a decision made/reversed, or an open question resolved.
 > Keep newest progress entries at the top of the log.
 >
-> **Last updated:** 2026-08-16
+> **Last updated:** 2026-08-17
 
 ---
 
@@ -24,11 +24,12 @@ but macOS/Linux are compile-gated in CI only — never built into a bundle or ru
 offered (the user supplies their own app-specific password, so there is nothing
 to pre-configure); read-only until milestone 2. **v0.8.0: milestone 2 shipped** — create/edit/delete/RSVP with emoji + reminders. Earlier status below.
 
-**Provider status (v0.1.20):** Office 365 = live/configured (real client+tenant ids in
-`accounts.rs`). Outlook.com + Gmail = code-complete but **gated off** by
-`REPLACE_WITH_…` placeholder creds (`is_provider_configured()` = false → filtered from
+**Provider status:** Office 365 = live/configured (real client+tenant ids in
+`accounts.rs`). Outlook.com / Hotmail Graph code exists but is **gated off** by
+a placeholder client ID (`is_provider_configured()` = false → filtered from
 the picker, rejected by `add_account`); a default build offers **only Office 365**.
-Generic IMAP/SMTP = **built but parked** on `feature/imap-accounts`.
+The Gmail crate is **not in this tree**. Generic IMAP/SMTP is parked on
+`feature/imap-accounts`.
 
 **Release policy (2026-06-25):** personal, single-user tool — **release once CI is
 green** (frontend build + `cargo fmt --check` + `clippy --all-targets -D warnings` +
@@ -48,7 +49,7 @@ test-then-release" describe the *prior* policy, now retired.
 | Mail API | Microsoft Graph (REST) via `reqwest` |
 | Auth | `oauth2`-style public-client + PKCE done with raw form-posts; tokens in OS keychain (`keyring`) |
 | MIME export | provider raw-MIME endpoint (Graph `GET /me/messages/{id}/$value`); `mail-builder`/`mail-parser` reserved for backends that can't serve raw MIME (e.g. parked IMAP) |
-| Local cache (future) | SQLite (`rusqlite`/`sqlx`) |
+| Local cache | Encrypted SQLite (`rusqlite`); AES-256-GCM content, key in OS keychain |
 
 Stack and patterns deliberately mirror Swatto's **AllTheThings**
 (github.com/Swatto86/AllTheThings) for a proven fast-startup Tauri setup.
@@ -100,6 +101,32 @@ Entra app registration (public, not secret):
 ---
 
 ## Progress log
+
+### 2026-08-17 — Threaded reply drafts, KQL/local search, week grid (v0.12.0)
+
+Daily mail + calendar slice from the 2026-08 review. No contacts, Gmail, or IMAP.
+
+- **Reply-as-draft keeps threading.** First save of a reply uses Graph
+  `createReply` (`MailProvider::create_reply_draft`); later `send_draft` already
+  carries `In-Reply-To` / `References`. Original-gone (404) falls back to an
+  unthreaded draft, matching `send_reply`. The compose warning is gone.
+- **Search is KQL-ish, with a cache fallback.** `from:` / `to:` / `subject:` /
+  `has:attachment` / `is:unread` / `is:read` / `in:folder` are parsed in
+  `crates/domain/src/mail_search.rs`. Free text is still a quoted Graph phrase;
+  operators are AND-combined and **not** wrapped as one `$search` phrase.
+  `in:folder` searches the decrypted cache (newest 2000 rows). Graph `Network`
+  errors fall through to the same cache. Status line appends `(local cache)`.
+- **Calendar week grid.** Agenda | Week | Month. Mon–Sun hour columns, all-day
+  row, now-line, overlap columns, scroll to 8:00. Today always recenters; week
+  nav snaps to Monday.
+- **Recurring this-event vs the series.** Edit is no longer hidden on recurring
+  events. A ternary dialog picks occurrence vs `seriesMasterId` (Graph) or the
+  iCloud master resource. iCloud occurrence edits synthesise an override VEVENT
+  and leave the master.
+
+**Not in this slice:** conversation grouping, server `$orderby` for whole-folder
+Oldest/Newest, calendar `$search`, newsletter CSS inliner, `main.ts` / Graph mail
+splits.
 
 ### 2026-08-16 — Large attachments via Graph upload sessions (v0.11.0)
 

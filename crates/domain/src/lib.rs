@@ -6,6 +6,9 @@
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
+mod mail_search;
+pub use mail_search::{matches_cached, parse_mail_query, to_kql, MailQuery};
+
 /// A server-side inbox rule (Microsoft Graph `messageRule`).
 ///
 /// Conditions and actions are simplified to the subset the UI manages: sender /
@@ -570,6 +573,17 @@ pub trait MailProvider: Send + Sync {
     /// are not persisted on the draft), returning the new draft's id.
     async fn create_draft(&self, message: &OutgoingMessage) -> Result<String, MailError>;
 
+    /// Create a draft that is a reply to `original_id`, so sending it later
+    /// preserves threading headers. Default: a normal unthreaded draft (the
+    /// original may be gone, or the backend may not thread).
+    async fn create_reply_draft(
+        &self,
+        _original_id: &str,
+        message: &OutgoingMessage,
+    ) -> Result<String, MailError> {
+        self.create_draft(message).await
+    }
+
     /// Update an existing draft's subject/body/recipients in place.
     async fn update_draft(&self, id: &str, message: &OutgoingMessage) -> Result<(), MailError>;
 
@@ -791,8 +805,13 @@ pub struct CalendarEvent {
     pub body_html: String,
     pub is_cancelled: bool,
     /// True when this is an occurrence/exception of a recurring series (so the UI
-    /// can show a recurrence glyph). Recurrence *editing* is out of scope.
+    /// can show a recurrence glyph) or the series master itself.
     pub is_recurring: bool,
+    /// The series this occurrence belongs to, when the provider can address the
+    /// whole series as a distinct id (Graph `seriesMasterId`, iCloud resource
+    /// with an empty recurrence segment). `None` for one-off events. Edit/delete
+    /// "the series" uses this id; "this event" uses [`id`](Self::id).
+    pub series_id: Option<String>,
     /// Join URL for an online meeting (Teams, …), if any.
     pub online_meeting_url: Option<String>,
     /// The signed-in user's own response to this event.
@@ -997,6 +1016,17 @@ pub trait MailStore: Send + Sync {
     async fn cached_folders(&self) -> Result<Vec<Folder>, MailError>;
     async fn load_state(&self, key: &str) -> Result<Option<String>, MailError>;
     async fn save_state(&self, key: &str, value: &str) -> Result<(), MailError>;
+    /// Decrypted cached messages for local search, newest first. `folder_id`
+    /// `None` searches every folder. `cap` bounds how many rows are decrypted
+    /// so a huge mailbox cannot dump the whole DB into memory. Default: empty
+    /// (stores that cannot decrypt content simply offer no local search).
+    async fn cached_for_search(
+        &self,
+        _folder_id: Option<&str>,
+        _cap: u32,
+    ) -> Result<Vec<MessageSummary>, MailError> {
+        Ok(Vec::new())
+    }
 }
 
 #[cfg(test)]

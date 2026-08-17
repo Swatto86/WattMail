@@ -11,7 +11,7 @@ rest.
 The code is cross-platform-capable (paths and the keychain backend are abstracted
 per-OS) but macOS and Linux are only compile-checked in CI — not built or run live.
 
-> Status: **v0.11.0** — functional and actively developed. See [`CONTEXT.md`](CONTEXT.md)
+> Status: **v0.12.0** — functional and actively developed. See [`CONTEXT.md`](CONTEXT.md)
 > for the live progress log, architecture decisions, and roadmap.
 
 ## Features
@@ -30,12 +30,19 @@ per-OS) but macOS and Linux are only compile-checked in CI — not built or run 
 - **Folder navigation** (nested folders, unread counts) with per-folder delta sync;
   the folder sidebar is cached, so it still renders on a cold offline start.
 - **Local SQLite cache** — instant, offline-capable; auto-syncs every 60s.
-- **Search** — cross-folder mail search via Microsoft Graph server-side `$search`.
+- **Search** — Graph `$search` with KQL-ish prefixes (`from:`, `to:`, `subject:`,
+  `has:attachment`, `is:unread`) plus a local encrypted-cache fallback when
+  offline or with `in:folder`.
 - **Reading pane** with hostile-HTML sanitization in a sandboxed iframe; links open
   in your real browser.
 - **Compose / reply / reply-all / forward** in a resizable, maximizable window with a
   rich-text editor, sanitized rich-HTML paste, inline images (paste/drag-drop), and attachments.
 - **Drafts** — save, resume and send drafts (stored server-side in your mailbox).
+  Saving a reply as a draft keeps threading (`In-Reply-To` / `References`) when
+  you send it later.
+- **Calendar** — agenda, week time-grid, and month views for Office 365 (Graph)
+  and iCloud (CalDAV). Create / edit / delete, RSVP, reminders while the app is
+  running; recurring events offer this-occurrence vs the whole series.
 - **Follow-up flags** — flag / clear messages from the list or the context menu.
 - **Save as EML** — right-click a message (or use the reader toolbar) to save it
   to disk as a raw `.eml` file: Graph's `/$value` endpoint serves the exact MIME

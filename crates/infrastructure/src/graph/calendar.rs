@@ -57,7 +57,8 @@ struct GraphCalendar {
 
 /// Event fields the agenda needs. `body` is fetched so the detail pane can render
 /// the description; `onlineMeeting`/`onlineMeetingUrl` give a join link.
-const EVENT_SELECT: &str = "id,subject,start,end,isAllDay,isCancelled,isOrganizer,type,location,\
+const EVENT_SELECT: &str =
+    "id,subject,start,end,isAllDay,isCancelled,isOrganizer,type,seriesMasterId,location,\
 organizer,attendees,body,onlineMeeting,onlineMeetingUrl,webLink,responseStatus,\
 isReminderOn,reminderMinutesBeforeStart";
 
@@ -689,11 +690,15 @@ fn to_domain_event(event: GraphEvent, tz: &str) -> CalendarEvent {
         .collect();
 
     // calendarView yields occurrences/exceptions; create-event returns the
-    // seriesMaster itself.
+    // seriesMaster itself. seriesMasterId is set on occurrences/exceptions.
     let is_recurring = matches!(
         event.event_type.as_deref(),
         Some("occurrence") | Some("exception") | Some("seriesMaster")
     );
+    let series_id = match event.event_type.as_deref() {
+        Some("seriesMaster") => Some(event.id.clone()),
+        _ => event.series_master_id.filter(|id| !id.is_empty()),
+    };
 
     let online_meeting_url = http_url(
         event
@@ -730,6 +735,7 @@ fn to_domain_event(event: GraphEvent, tz: &str) -> CalendarEvent {
         body_html,
         is_cancelled: event.is_cancelled.unwrap_or(false),
         is_recurring,
+        series_id,
         online_meeting_url,
         response_status: ResponseStatus::parse(
             event.response_status.and_then(|s| s.response).as_deref(),
@@ -803,6 +809,7 @@ struct GraphEvent {
     is_organizer: Option<bool>,
     #[serde(rename = "type")]
     event_type: Option<String>,
+    series_master_id: Option<String>,
     location: Option<GraphLocation>,
     organizer: Option<GraphRecipient>,
     #[serde(default)]
@@ -1130,6 +1137,7 @@ mod tests {
             "id": "AAA",
             "subject": "Sprint review",
             "type": "occurrence",
+            "seriesMasterId": "MASTER-1",
             "isOrganizer": false,
             "isAllDay": false,
             "start": { "dateTime": "2026-06-24T09:00:00.0000000", "timeZone": "Europe/London" },
@@ -1151,6 +1159,7 @@ mod tests {
 
         assert_eq!(domain.subject, "Sprint review");
         assert!(domain.is_recurring);
+        assert_eq!(domain.series_id.as_deref(), Some("MASTER-1"));
         assert!(!domain.is_organizer);
         assert_eq!(domain.start.date_time, "2026-06-24T09:00:00");
         assert_eq!(domain.location, "Room 1");

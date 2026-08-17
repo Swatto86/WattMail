@@ -16,7 +16,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { sendNotification } from "@tauri-apps/plugin-notification";
-import { showConfirm } from "./dialog";
+import { showConfirm, showTernary } from "./dialog";
 
 interface Attendee {
   name: string;
@@ -39,6 +39,7 @@ interface CalendarEvent {
   bodyHtml: string;
   isCancelled: boolean;
   isRecurring: boolean;
+  seriesId: string | null;
   onlineMeetingUrl: string | null;
   responseStatus: string;
   webLink: string | null;
@@ -60,7 +61,7 @@ const RANGE_DAYS = 7;
 // Month view renders a fixed 6-week grid (stable layout across months).
 const MONTH_GRID_DAYS = 42;
 const MONTH_MAX_PILLS = 3;
-type CalView = "agenda" | "month";
+type CalView = "agenda" | "week" | "month";
 const VIEW_KEY = "wattmail.calView";
 
 // Adjustable calendar text/pill size — a multiplier the stylesheet applies via
@@ -88,8 +89,12 @@ let rangeLabel: HTMLSpanElement;
 // First day of the visible window, at local midnight. In month view only its
 // year/month matter (the grid always starts on the Monday on/before the 1st).
 let rangeStart = startOfToday();
-let viewMode: CalView = localStorage.getItem(VIEW_KEY) === "month" ? "month" : "agenda";
+let viewMode: CalView = ((): CalView => {
+  const v = localStorage.getItem(VIEW_KEY);
+  return v === "month" || v === "week" ? v : "agenda";
+})();
 let viewAgendaBtn: HTMLButtonElement;
+let viewWeekBtn: HTMLButtonElement;
 let viewMonthBtn: HTMLButtonElement;
 let prevBtn: HTMLButtonElement;
 let nextBtn: HTMLButtonElement;
@@ -391,6 +396,7 @@ export function initCalendar(hostEl: HTMLDivElement): void {
       <select id="cal-picker" class="select select-bordered select-xs" title="Calendar" aria-label="Calendar" hidden></select>
       <span class="cal-viewswitch">
         <button id="cal-view-agenda" class="btn btn-xs">Agenda</button>
+        <button id="cal-view-week" class="btn btn-xs">Week</button>
         <button id="cal-view-month" class="btn btn-xs">Month</button>
       </span>
       <button id="cal-size" class="btn btn-xs cal-size-btn" title="Text size" aria-label="Text size">Aa</button>
@@ -435,6 +441,7 @@ export function initCalendar(hostEl: HTMLDivElement): void {
   prevBtn = host.querySelector<HTMLButtonElement>("#cal-prev")!;
   nextBtn = host.querySelector<HTMLButtonElement>("#cal-next")!;
   viewAgendaBtn = host.querySelector<HTMLButtonElement>("#cal-view-agenda")!;
+  viewWeekBtn = host.querySelector<HTMLButtonElement>("#cal-view-week")!;
   viewMonthBtn = host.querySelector<HTMLButtonElement>("#cal-view-month")!;
   prevBtn.addEventListener("click", () => {
     rangeStart =
@@ -461,6 +468,7 @@ export function initCalendar(hostEl: HTMLDivElement): void {
     openEventModal();
   });
   viewAgendaBtn.addEventListener("click", () => setViewMode("agenda"));
+  viewWeekBtn.addEventListener("click", () => setViewMode("week"));
   viewMonthBtn.addEventListener("click", () => setViewMode("month"));
 
   reflectViewMode();
@@ -469,6 +477,7 @@ export function initCalendar(hostEl: HTMLDivElement): void {
 }
 
 function setViewMode(mode: CalView): void {
+  if (mode === "week") rangeStart = mondayOnOrBefore(rangeStart);
   viewMode = mode;
   try {
     localStorage.setItem(VIEW_KEY, mode);
@@ -481,11 +490,14 @@ function setViewMode(mode: CalView): void {
 
 function reflectViewMode(): void {
   const month = viewMode === "month";
-  viewAgendaBtn.classList.toggle("btn-active", !month);
+  const week = viewMode === "week";
+  viewAgendaBtn.classList.toggle("btn-active", viewMode === "agenda");
+  viewWeekBtn.classList.toggle("btn-active", week);
   viewMonthBtn.classList.toggle("btn-active", month);
-  prevBtn.title = month ? "Previous month" : "Previous week";
-  nextBtn.title = month ? "Next month" : "Next week";
+  prevBtn.title = month ? "Previous month" : week ? "Previous week" : "Previous week";
+  nextBtn.title = month ? "Next month" : week ? "Next week" : "Next week";
   agendaEl.classList.toggle("cal-month-mode", month);
+  agendaEl.classList.toggle("cal-week-mode", week);
 }
 
 // ---- Calendar picker ----
@@ -643,6 +655,12 @@ export async function loadCalendar(): Promise<void> {
       month: "long",
       year: "numeric",
     });
+  } else if (viewMode === "week") {
+    // Always Mon–Sun, including Today / a restored week view that landed mid-week.
+    rangeStart = mondayOnOrBefore(rangeStart);
+    start = new Date(rangeStart);
+    end = addDays(start, RANGE_DAYS);
+    rangeLabel.textContent = fmtRangeLabel(start, addDays(end, -1));
   } else {
     start = new Date(rangeStart);
     end = addDays(start, RANGE_DAYS);
@@ -669,6 +687,7 @@ export async function loadCalendar(): Promise<void> {
     // No-op against Graph, which never over-fetches.
     events = result.filter((ev) => overlapsWindow(ev, start, end));
     if (viewMode === "month") renderMonth(start);
+    else if (viewMode === "week") renderWeek(start);
     else renderAgenda(start);
     // Keep the open event selected if it's still present; else clear detail.
     if (selectedId && events.some((e) => e.id === selectedId)) {
@@ -771,6 +790,144 @@ function renderAgenda(start: Date): void {
     }
   }
   agendaEl.innerHTML = html;
+}
+
+const WEEK_HOUR_PX = 44;
+const WEEK_HOURS = 24;
+
+function renderWeek(start: Date): void {
+  const windowStartKey = dayKey(start);
+  const windowEndKey = dayKey(addDays(start, RANGE_DAYS - 1));
+  const todayKey = dayKey(startOfToday());
+  const now = new Date();
+  const nowMin = now.getHours() * 60 + now.getMinutes();
+
+  const allDayByDay: CalendarEvent[][] = Array.from({ length: RANGE_DAYS }, () => []);
+  const timedByDay: CalendarEvent[][] = Array.from({ length: RANGE_DAYS }, () => []);
+  for (const ev of events) {
+    for (const key of coveredDayKeys(ev, windowStartKey, windowEndKey)) {
+      let idx = -1;
+      for (let i = 0; i < RANGE_DAYS; i++) {
+        if (dayKey(addDays(start, i)) === key) {
+          idx = i;
+          break;
+        }
+      }
+      if (idx < 0) continue;
+      if (ev.isAllDay) allDayByDay[idx].push(ev);
+      else timedByDay[idx].push(ev);
+    }
+  }
+
+  const head = Array.from({ length: RANGE_DAYS }, (_, i) => {
+    const day = addDays(start, i);
+    const key = dayKey(day);
+    const isToday = key === todayKey;
+    return `<div class="cal-week-dayhead${isToday ? " is-today" : ""}">${esc(
+      day.toLocaleDateString(undefined, { weekday: "short", day: "numeric" }),
+    )}</div>`;
+  }).join("");
+
+  const allDayCells = allDayByDay
+    .map(
+      (list) =>
+        `<div class="cal-week-allday-cell">${list
+          .slice()
+          .sort(sortEvents)
+          .map(monthPillHtml)
+          .join("")}</div>`,
+    )
+    .join("");
+
+  const hours = Array.from(
+    { length: WEEK_HOURS },
+    (_, h) => `<div class="cal-week-hour" style="height:${WEEK_HOUR_PX}px">${pad(h)}:00</div>`,
+  ).join("");
+
+  const columns = timedByDay
+    .map((list, i) => {
+      const day = addDays(start, i);
+      const isToday = dayKey(day) === todayKey;
+      const blocks = layoutTimedBlocks(list, day)
+        .map(
+          ({ ev, top, height, col, cols }) => {
+            const selected = ev.id === selectedId ? " selected" : "";
+            const cancelled = ev.isCancelled ? " cancelled" : "";
+            const width = `calc((100% - 4px) / ${cols})`;
+            const left = `calc(2px + ${col} * (100% - 4px) / ${cols})`;
+            return `<div class="cal-event cal-week-block${selected}${cancelled}" data-id="${esc(
+              ev.id,
+            )}" role="button" tabindex="0" title="${esc(ev.subject)}" style="top:${top}px;height:${height}px;left:${left};width:${width}"><span class="cal-week-block-time">${esc(
+              fmtTime(parseLocal(ev.start, ev.startZone, ev.isAllDay)),
+            )}</span> ${esc(ev.subject)}</div>`;
+          },
+        )
+        .join("");
+      const nowLine =
+        isToday
+          ? `<div class="cal-week-now" style="top:${(nowMin / 60) * WEEK_HOUR_PX}px"></div>`
+          : "";
+      return `<div class="cal-week-col${isToday ? " is-today" : ""}">${nowLine}${blocks}</div>`;
+    })
+    .join("");
+
+  agendaEl.innerHTML = `<div class="cal-week">
+    <div class="cal-week-head"><div class="cal-week-gutter"></div>${head}</div>
+    <div class="cal-week-allday"><div class="cal-week-gutter cal-week-allday-label">All day</div>${allDayCells}</div>
+    <div class="cal-week-scroll scroll-thin" id="cal-week-scroll">
+      <div class="cal-week-body" style="height:${WEEK_HOURS * WEEK_HOUR_PX}px">
+        <div class="cal-week-hours">${hours}</div>
+        <div class="cal-week-cols">${columns}</div>
+      </div>
+    </div>
+  </div>`;
+
+  const scroll = agendaEl.querySelector<HTMLElement>("#cal-week-scroll");
+  if (scroll) scroll.scrollTop = 8 * WEEK_HOUR_PX;
+}
+
+function layoutTimedBlocks(
+  list: CalendarEvent[],
+  day: Date,
+): { ev: CalendarEvent; top: number; height: number; col: number; cols: number }[] {
+  const dayStart = new Date(day);
+  dayStart.setHours(0, 0, 0, 0);
+  const dayEnd = addDays(dayStart, 1);
+  const items = list
+    .map((ev) => {
+      const s = parseLocal(ev.start, ev.startZone, false);
+      const e = parseLocal(ev.end, ev.endZone, false);
+      const clipS = Math.max(s.getTime(), dayStart.getTime());
+      const clipE = Math.min(e.getTime(), dayEnd.getTime());
+      const startMin = (clipS - dayStart.getTime()) / 60000;
+      const endMin = (clipE - dayStart.getTime()) / 60000;
+      return { ev, startMin, endMin };
+    })
+    .filter((x) => x.endMin > x.startMin)
+    .sort((a, b) => a.startMin - b.startMin || b.endMin - a.endMin);
+
+  // Greedy columns: an event shares a cluster with anything that overlaps it
+  // (transitively); columns are packed left-to-right within the cluster.
+  const placed: { ev: CalendarEvent; startMin: number; endMin: number; col: number }[] = [];
+  const colEnds: number[] = [];
+  for (const item of items) {
+    let col = colEnds.findIndex((end) => end <= item.startMin);
+    if (col < 0) {
+      col = colEnds.length;
+      colEnds.push(item.endMin);
+    } else {
+      colEnds[col] = item.endMin;
+    }
+    placed.push({ ...item, col });
+  }
+  const maxCols = Math.max(1, colEnds.length);
+  return placed.map((p) => ({
+    ev: p.ev,
+    top: (p.startMin / 60) * WEEK_HOUR_PX,
+    height: Math.max(16, ((p.endMin - p.startMin) / 60) * WEEK_HOUR_PX),
+    col: p.col,
+    cols: maxCols,
+  }));
 }
 
 function sortEvents(a: CalendarEvent, b: CalendarEvent): number {
@@ -1004,12 +1161,11 @@ function renderDetail(ev: CalendarEvent): void {
         <button class="btn btn-xs" data-rsvp="decline">Decline</button>
       </div>`;
   } else if (ev.isOrganizer) {
-    // Recurrence editing is out of scope: occurrences/exceptions get no Edit
-    // (a PATCH on an occurrence id would fork it in surprising ways).
-    const edit =
-      !ev.isRecurring && !ev.isCancelled
-        ? `<button class="btn btn-xs" data-cal-edit="1">Edit</button>`
-        : "";
+    // Recurring events offer this-occurrence vs whole-series for both edit
+    // and delete (seriesId is the master; id is this occurrence).
+    const edit = !ev.isCancelled
+      ? `<button class="btn btn-xs" data-cal-edit="1">Edit</button>`
+      : "";
     actions = `<div class="cal-rsvp">${edit}<button class="btn btn-xs btn-error" data-cal-delete="1">Delete event</button></div>`;
   }
 
@@ -1067,7 +1223,7 @@ function renderDetail(ev: CalendarEvent): void {
     void deleteEvent(ev);
   });
   detailEl.querySelector<HTMLButtonElement>("[data-cal-edit]")?.addEventListener("click", () => {
-    openEventModal(ev);
+    void startEditEvent(ev);
   });
 }
 
@@ -1171,28 +1327,55 @@ function conflictMessage(e: unknown, prefix: string): string {
 }
 
 async function deleteEvent(ev: CalendarEvent): Promise<void> {
-  // A recurring event's id addresses one occurrence, so deleting it removes
-  // just that occurrence (the backend writes an EXDATE) — say so plainly.
-  const prompt = ev.isRecurring
-    ? `Delete this occurrence of "${ev.subject}"? The rest of the series stays.`
-    : `Delete "${ev.subject}"? This cancels the event for all attendees.`;
-  const ok = await showConfirm(prompt, {
-    title: "Delete event",
-    okLabel: "Delete",
-    danger: true,
-  });
-  if (!ok) return;
+  let id = ev.id;
+  if (ev.isRecurring && ev.seriesId) {
+    const choice = await showTernary(
+      `Delete "${ev.subject}"? This event only, or every event in the series.`,
+      {
+        title: "Delete recurring event",
+        okLabel: "This event",
+        altLabel: "The series",
+        danger: true,
+      },
+    );
+    if (choice === null) return;
+    if (choice === "secondary") id = ev.seriesId;
+  } else {
+    const ok = await showConfirm(`Delete "${ev.subject}"? This cancels the event for all attendees.`, {
+      title: "Delete event",
+      okLabel: "Delete",
+      danger: true,
+    });
+    if (!ok) return;
+  }
   const msg = detailEl.querySelector<HTMLDivElement>("#cal-detail-msg");
   if (msg) msg.textContent = "Deleting…";
   setDetailActionsDisabled(true);
   try {
-    await invoke("delete_event", { id: ev.id });
+    await invoke("delete_event", { id });
     selectedId = null;
     await loadCalendar();
   } catch (e) {
     if (msg) msg.textContent = conflictMessage(e, "Could not delete event");
     setDetailActionsDisabled(false);
   }
+}
+
+async function startEditEvent(ev: CalendarEvent): Promise<void> {
+  if (ev.isRecurring && ev.seriesId) {
+    const choice = await showTernary(
+      "Apply this edit to just this event, or to every event in the series.",
+      {
+        title: "Edit recurring event",
+        okLabel: "This event",
+        altLabel: "The series",
+      },
+    );
+    if (choice === null) return;
+    openEventModal(ev, choice === "secondary" ? "series" : "this");
+    return;
+  }
+  openEventModal(ev);
 }
 
 // ---- Create-event modal ----
@@ -1312,9 +1495,15 @@ function htmlToPlainText(html: string): string {
 }
 
 // Open the modal to create a new event, or — given `ev` — to edit it in place.
-function openEventModal(ev?: CalendarEvent): void {
-  editingId = ev?.id ?? null;
-  evTitle.textContent = ev ? "Edit event" : "New event";
+// `scope` "series" addresses the whole recurring series (seriesId); default
+// is this occurrence.
+function openEventModal(ev?: CalendarEvent, scope: "this" | "series" = "this"): void {
+  editingId = ev ? (scope === "series" && ev.seriesId ? ev.seriesId : ev.id) : null;
+  evTitle.textContent = ev
+    ? scope === "series"
+      ? "Edit series"
+      : "Edit event"
+    : "New event";
   evSave.textContent = ev ? "Save changes" : "Create event";
   evMsg.textContent = "";
   evSubject.value = ev?.subject ?? "";

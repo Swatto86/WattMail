@@ -442,16 +442,28 @@ impl CalendarProvider for IcloudClient {
         // any X- extensions, a VTIMEZONE) survive an edit untouched.
         let (body, etag) = self.get_resource(url.clone()).await?;
         let mut calendars = ical::parse(&body);
-        let (ci, vi) = find_master(&calendars)
-            .ok_or_else(|| MailError::Decode("event not found in its resource".into()))?;
-        apply_edits(&mut calendars[ci].children[vi], event, &now_utc_stamp());
-        self.put_resource(
-            url.clone(),
-            emit::serialize(&calendars[ci]),
-            etag.as_deref(),
-            false,
-        )
-        .await?;
+        let stamp = now_utc_stamp();
+        if recurrence.is_empty() {
+            let (ci, vi) = find_master(&calendars)
+                .ok_or_else(|| MailError::Decode("event not found in its resource".into()))?;
+            apply_edits(&mut calendars[ci].children[vi], event, &stamp);
+            self.put_resource(
+                url.clone(),
+                emit::serialize(&calendars[ci]),
+                etag.as_deref(),
+                false,
+            )
+            .await?;
+        } else {
+            let ci = apply_occurrence_edits(&mut calendars, &recurrence, event, &stamp)?;
+            self.put_resource(
+                url.clone(),
+                emit::serialize(&calendars[ci]),
+                etag.as_deref(),
+                false,
+            )
+            .await?;
+        }
         Ok(echo_event(event, &url, &recurrence))
     }
 
@@ -936,6 +948,43 @@ fn apply_response(
     }
 }
 
+/// Apply an edit to one occurrence of a series: mutate an existing override, or
+/// synthesise one from the master so the rest of the series is untouched.
+fn apply_occurrence_edits(
+    calendars: &mut [ical::Component],
+    recurrence: &str,
+    event: &NewEvent,
+    stamp: &str,
+) -> Result<usize, MailError> {
+    match resolve_response_target(calendars, recurrence)
+        .ok_or_else(|| MailError::Decode("event not found in its resource".into()))?
+    {
+        ResponseTarget::Existing(ci, vi) => {
+            apply_edits(&mut calendars[ci].children[vi], event, stamp);
+            // An override must never carry the series rule — apply_edits would
+            // write one if the form sent a recurrence (it shouldn't on edit).
+            calendars[ci].children[vi].remove("RRULE");
+            calendars[ci].children[vi].remove("RDATE");
+            Ok(ci)
+        }
+        ResponseTarget::Synthesize(ci, master_vi) => {
+            if master_excludes(&calendars[ci].children[master_vi], recurrence) {
+                return Err(MailError::Decode(
+                    "occurrence was deleted from the series; refresh and try again".into(),
+                ));
+            }
+            let mut over =
+                build_occurrence_override(&calendars[ci].children[master_vi], recurrence)
+                    .ok_or_else(|| MailError::Decode("cannot build occurrence override".into()))?;
+            apply_edits(&mut over, event, stamp);
+            over.remove("RRULE");
+            over.remove("RDATE");
+            calendars[ci].children.push(over);
+            Ok(ci)
+        }
+    }
+}
+
 /// The override VEVENT whose `RECURRENCE-ID` is exactly `recurrence`, if one
 /// exists. Matched by exact wall clock, deliberately NOT the tolerant
 /// [`excludes_occurrence`]: a write must never bind to a *different* occurrence,
@@ -1083,6 +1132,11 @@ fn echo_event(event: &NewEvent, resource: &Url, recurrence: &str) -> CalendarEve
         body_html: crate::html::sanitize_email(&html_to_plain(&event.body_html), false, false).html,
         is_cancelled: false,
         is_recurring: event.recurrence.is_some() || !recurrence.is_empty(),
+        series_id: if event.recurrence.is_some() || !recurrence.is_empty() {
+            Some(format!("icloud:{resource}|"))
+        } else {
+            None
+        },
         online_meeting_url: None,
         response_status: ResponseStatus::Organizer,
         web_link: None,
@@ -1382,6 +1436,11 @@ fn build_event(
         body_html: crate::html::sanitize_email(&source.text("DESCRIPTION"), false, false).html,
         is_cancelled: source.text("STATUS").eq_ignore_ascii_case("CANCELLED"),
         is_recurring,
+        series_id: if is_recurring {
+            Some(format!("icloud:{resource}|"))
+        } else {
+            None
+        },
         online_meeting_url: meeting_url(source),
         response_status,
         web_link: None,
@@ -2052,6 +2111,35 @@ END:VCALENDAR\r\n";
             .map(|e| e.start.date_time)
             .collect();
         assert!(!starts.iter().any(|s| s.starts_with("2026-07-29")));
+    }
+
+    #[test]
+    fn occurrence_edit_synthesises_an_override_and_leaves_the_master_title() {
+        let mut calendars = ical::parse(SERIES);
+        let event = new_event(
+            "Standup (this week only)",
+            "2026-07-22T10:00:00",
+            "2026-07-22T10:15:00",
+        );
+        apply_occurrence_edits(&mut calendars, "2026-07-22T09:00:00", &event, STAMP)
+            .expect("edit occurrence");
+        let vevents: Vec<_> = calendars[0].children_named("VEVENT").collect();
+        assert_eq!(vevents.len(), 3); // master + moved override + new override
+        let master = vevents
+            .iter()
+            .find(|v| v.get("RECURRENCE-ID").is_none())
+            .unwrap();
+        assert_eq!(master.text("SUMMARY"), "Standup");
+        assert!(master.get("RRULE").is_some());
+        let over = vevents
+            .iter()
+            .find(|v| {
+                v.get("RECURRENCE-ID")
+                    .is_some_and(|p| p.value.contains("20260722T090000"))
+            })
+            .expect("override for 22 Jul");
+        assert_eq!(over.text("SUMMARY"), "Standup (this week only)");
+        assert!(over.get("RRULE").is_none());
     }
 
     /// The `(calendar, vevent)` indices of an RSVP target that must already

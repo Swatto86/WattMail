@@ -290,19 +290,36 @@ pub async fn sync_folder(
         .map_err(|e| e.to_string())
 }
 
-/// Search the mailbox across folders (live Graph `$search`). Results are not
-/// cached; an empty/whitespace query yields no results.
+/// Search the mailbox across folders (live Graph `$search`), with a local-cache
+/// fallback when offline or when the query contains `in:folder`.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SearchResultsDto {
+    pub messages: Vec<MessageDto>,
+    pub from_cache: bool,
+}
+
 #[tauri::command]
 pub async fn search_messages(
     accounts: State<'_, AccountManager>,
     query: String,
     top: u32,
-) -> Result<Vec<MessageDto>, String> {
-    let (_account, provider) = active_provider(&accounts).await?;
-    let results = app_search_messages(&*provider, &query, top)
-        .await
-        .map_err(|e| e.to_string())?;
-    Ok(results.into_iter().map(message_dto).collect())
+    folder_id: Option<String>,
+) -> Result<SearchResultsDto, String> {
+    let (account, provider) = active_provider(&accounts).await?;
+    let results = app_search_messages(
+        &*provider,
+        &account.store,
+        &query,
+        top,
+        folder_id.as_deref(),
+    )
+    .await
+    .map_err(|e| e.to_string())?;
+    Ok(SearchResultsDto {
+        messages: results.messages.into_iter().map(message_dto).collect(),
+        from_cache: results.from_cache,
+    })
 }
 
 #[derive(Serialize)]
@@ -950,6 +967,7 @@ pub async fn save_draft(
     importance: Option<String>,
     request_read_receipt: Option<bool>,
     request_delivery_receipt: Option<bool>,
+    reply_to_id: Option<String>,
 ) -> Result<String, String> {
     let (_account, provider) = active_provider(&accounts).await?;
     let message = OutgoingMessage {
@@ -963,7 +981,7 @@ pub async fn save_draft(
         request_read_receipt: request_read_receipt.unwrap_or(false),
         request_delivery_receipt: request_delivery_receipt.unwrap_or(false),
     };
-    app_save_draft(&*provider, id.as_deref(), &message)
+    app_save_draft(&*provider, id.as_deref(), &message, reply_to_id.as_deref())
         .await
         .map_err(|e| e.to_string())
 }
@@ -1662,6 +1680,7 @@ pub struct CalendarEventDto {
     pub body_html: String,
     pub is_cancelled: bool,
     pub is_recurring: bool,
+    pub series_id: Option<String>,
     pub online_meeting_url: Option<String>,
     /// The signed-in user's own response tag (same vocabulary as attendee status).
     pub response_status: String,
@@ -1697,6 +1716,7 @@ fn calendar_event_dto(e: wattmail_domain::CalendarEvent) -> CalendarEventDto {
         body_html: e.body_html,
         is_cancelled: e.is_cancelled,
         is_recurring: e.is_recurring,
+        series_id: e.series_id,
         online_meeting_url: e.online_meeting_url,
         response_status: e.response_status.as_str().to_string(),
         web_link: e.web_link,
@@ -1876,8 +1896,8 @@ pub async fn create_event(
     Ok(calendar_event_dto(created))
 }
 
-/// Replace an event's editable fields; returns the updated event. The UI
-/// offers this only for non-recurring events the user organizes.
+/// Replace an existing event's editable fields. Recurring events: pass the
+/// occurrence id for this event, or `seriesId` for the whole series.
 #[tauri::command]
 pub async fn update_event(
     accounts: State<'_, AccountManager>,

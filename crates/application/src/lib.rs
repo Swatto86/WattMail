@@ -4,10 +4,10 @@
 //! composition root.
 
 use wattmail_domain::{
-    Attachment, AutoReplySettings, CalendarEvent, CalendarInfo, CalendarProvider, DraftPrefill,
-    Folder, FolderRole, InviteResponse, MailError, MailProvider, MailStore, MeetingInvite,
-    MessageBody, MessageChange, MessageHeader, MessageSummary, NewEvent, OutgoingAttachment,
-    OutgoingMessage, SyncToken, UserProfile,
+    matches_cached, parse_mail_query, to_kql, Attachment, AutoReplySettings, CalendarEvent,
+    CalendarInfo, CalendarProvider, DraftPrefill, Folder, FolderRole, InviteResponse, MailError,
+    MailProvider, MailStore, MeetingInvite, MessageBody, MessageChange, MessageHeader,
+    MessageSummary, NewEvent, OutgoingAttachment, OutgoingMessage, SyncToken, UserProfile,
 };
 
 const ACCOUNT_NAME_KEY: &str = "account.displayName";
@@ -34,14 +34,71 @@ pub async fn inbox_preview(
     Ok(InboxPreview { user, messages })
 }
 
-/// Search the mailbox across folders, live from the provider (the local cache
-/// can't be searched — its content columns are encrypted per-value).
+/// Search the mailbox. Graph `$search` is used when the query is not
+/// `in:folder`; on a network failure (offline) the decrypted local cache is
+/// searched instead. `folder_id` scopes `in:folder` / cache fallback to the
+/// folder the user is viewing.
+pub struct SearchResults {
+    pub messages: Vec<MessageSummary>,
+    /// True when results came from the local cache rather than the server.
+    pub from_cache: bool,
+}
+
+/// Search the mailbox across folders, live from the provider, with a local-cache
+/// fallback when the network is down or the user asked for this folder only.
 pub async fn search_messages(
     provider: &dyn MailProvider,
+    store: &dyn MailStore,
     query: &str,
     top: u32,
+    folder_id: Option<&str>,
+) -> Result<SearchResults, MailError> {
+    let parsed = parse_mail_query(query);
+    if parsed.is_empty() {
+        return Ok(SearchResults {
+            messages: Vec::new(),
+            from_cache: false,
+        });
+    }
+    if parsed.in_folder {
+        let messages = search_cached(store, &parsed, folder_id, top).await?;
+        return Ok(SearchResults {
+            messages,
+            from_cache: true,
+        });
+    }
+    let kql = to_kql(&parsed);
+    match provider.search(&kql, top).await {
+        Ok(messages) => Ok(SearchResults {
+            messages,
+            from_cache: false,
+        }),
+        Err(MailError::Network(_)) => {
+            let messages = search_cached(store, &parsed, folder_id, top).await?;
+            Ok(SearchResults {
+                messages,
+                from_cache: true,
+            })
+        }
+        Err(e) => Err(e),
+    }
+}
+
+async fn search_cached(
+    store: &dyn MailStore,
+    query: &wattmail_domain::MailQuery,
+    folder_id: Option<&str>,
+    top: u32,
 ) -> Result<Vec<MessageSummary>, MailError> {
-    provider.search(query, top).await
+    // Decrypt a bounded window (newest first) then filter. Cap is well above
+    // the UI's SEARCH_TOP so a folder-scoped search still sees older mail.
+    const CAP: u32 = 2000;
+    let rows = store.cached_for_search(folder_id, CAP).await?;
+    Ok(rows
+        .into_iter()
+        .filter(|m| matches_cached(query, m))
+        .take(top as usize)
+        .collect())
 }
 
 /// List the user's mail folders live from the provider, persisting them to the
@@ -385,19 +442,23 @@ pub async fn send_reply(
 }
 
 /// Save a draft: create a new one when `id` is `None`, otherwise update the
-/// existing draft in place. Returns the draft's id so the caller can track it
+/// existing draft in place. When creating and `reply_to_id` is set, the draft
+/// is a Graph `createReply` (or the provider equivalent) so a later send
+/// keeps threading headers. Returns the draft's id so the caller can track it
 /// for subsequent saves and sends.
 pub async fn save_draft(
     provider: &dyn MailProvider,
     id: Option<&str>,
     message: &OutgoingMessage,
+    reply_to_id: Option<&str>,
 ) -> Result<String, MailError> {
-    match id {
-        Some(id) => {
+    match (id, reply_to_id) {
+        (Some(id), _) => {
             provider.update_draft(id, message).await?;
             Ok(id.to_string())
         }
-        None => provider.create_draft(message).await,
+        (None, Some(original_id)) => provider.create_reply_draft(original_id, message).await,
+        (None, None) => provider.create_draft(message).await,
     }
 }
 
@@ -644,8 +705,8 @@ mod tests {
     use std::collections::HashMap;
     use std::sync::Mutex;
     use wattmail_domain::{
-        EmailAddress, Folder, Importance, MessageBody, MessageHeader, MessageSummary, SyncBatch,
-        SyncToken,
+        EmailAddress, Folder, Importance, MessageBody, MessageHeader, MessageSummary,
+        OutgoingMessage, SyncBatch, SyncToken,
     };
 
     fn summary(id: &str) -> MessageSummary {
@@ -693,6 +754,17 @@ mod tests {
         }
         async fn recent(&self, _f: &str, _t: u32) -> Result<Vec<MessageSummary>, MailError> {
             Ok(Vec::new())
+        }
+        async fn cached_for_search(
+            &self,
+            _folder_id: Option<&str>,
+            cap: u32,
+        ) -> Result<Vec<MessageSummary>, MailError> {
+            let mut rows: Vec<MessageSummary> =
+                self.messages.lock().unwrap().values().cloned().collect();
+            rows.sort_by(|a, b| b.received.cmp(&a.received));
+            rows.truncate(cap as usize);
+            Ok(rows)
         }
         async fn oldest_received(&self, _f: &str) -> Result<Option<String>, MailError> {
             Ok(None)
@@ -743,9 +815,38 @@ mod tests {
     }
 
     /// A mock provider that returns a preset sync batch. Only the methods
-    /// [`sync_folder`] touches are implemented.
+    /// [`sync_folder`] touches are implemented, plus optional search/draft
+    /// spies used by the search and save_draft tests.
     struct MockProvider {
         batch: Mutex<Option<SyncBatch>>,
+        search: Mutex<Option<Result<Vec<MessageSummary>, MailError>>>,
+        search_queries: Mutex<Vec<String>>,
+        reply_drafts: Mutex<Vec<String>>,
+        plain_drafts: Mutex<u32>,
+    }
+
+    fn mock_provider(batch: Option<SyncBatch>) -> MockProvider {
+        MockProvider {
+            batch: Mutex::new(batch),
+            search: Mutex::new(None),
+            search_queries: Mutex::new(Vec::new()),
+            reply_drafts: Mutex::new(Vec::new()),
+            plain_drafts: Mutex::new(0),
+        }
+    }
+
+    fn outgoing() -> OutgoingMessage {
+        OutgoingMessage {
+            to: vec!["ada@ex.com".into()],
+            cc: Vec::new(),
+            bcc: Vec::new(),
+            subject: "Re: hello".into(),
+            body_html: "<p>hi</p>".into(),
+            attachments: Vec::new(),
+            importance: Importance::Normal,
+            request_read_receipt: false,
+            request_delivery_receipt: false,
+        }
     }
 
     #[async_trait]
@@ -772,8 +873,14 @@ mod tests {
         async fn list_recent(&self, _top: u32) -> Result<Vec<MessageSummary>, MailError> {
             unreachable!()
         }
-        async fn search(&self, _q: &str, _t: u32) -> Result<Vec<MessageSummary>, MailError> {
-            unreachable!()
+        async fn search(&self, q: &str, _t: u32) -> Result<Vec<MessageSummary>, MailError> {
+            self.search_queries.lock().unwrap().push(q.to_string());
+            match &*self.search.lock().unwrap() {
+                Some(Ok(v)) => Ok(v.clone()),
+                Some(Err(MailError::Network(s))) => Err(MailError::Network(s.clone())),
+                Some(Err(_)) => Err(MailError::Network("search failed".into())),
+                None => unreachable!("search not configured for this test"),
+            }
         }
         async fn message(&self, _id: &str, _i: bool) -> Result<MessageBody, MailError> {
             unreachable!()
@@ -800,7 +907,19 @@ mod tests {
             unreachable!()
         }
         async fn create_draft(&self, _m: &OutgoingMessage) -> Result<String, MailError> {
-            unreachable!()
+            *self.plain_drafts.lock().unwrap() += 1;
+            Ok("plain-draft".into())
+        }
+        async fn create_reply_draft(
+            &self,
+            original_id: &str,
+            _m: &OutgoingMessage,
+        ) -> Result<String, MailError> {
+            self.reply_drafts
+                .lock()
+                .unwrap()
+                .push(original_id.to_string());
+            Ok("reply-draft".into())
         }
         async fn update_draft(&self, _id: &str, _m: &OutgoingMessage) -> Result<(), MailError> {
             unreachable!()
@@ -825,15 +944,13 @@ mod tests {
         // a message the same feed had already removed. Applied in feed order, the
         // remove must win.
         let store = MockStore::default();
-        let provider = MockProvider {
-            batch: Mutex::new(Some(SyncBatch {
-                changes: vec![
-                    MessageChange::Upserted(summary("A")),
-                    MessageChange::Removed("A".to_string()),
-                ],
-                token: SyncToken::new("delta-token"),
-            })),
-        };
+        let provider = mock_provider(Some(SyncBatch {
+            changes: vec![
+                MessageChange::Upserted(summary("A")),
+                MessageChange::Removed("A".to_string()),
+            ],
+            token: SyncToken::new("delta-token"),
+        }));
 
         sync_folder(&provider, &store, "inbox").await.unwrap();
 
@@ -849,9 +966,7 @@ mod tests {
         // handing in an ordinary folder id (no deleteditems/junkemail role in
         // the cached list) is rejected before the provider is ever asked.
         let store = MockStore::default();
-        let provider = MockProvider {
-            batch: Mutex::new(None),
-        };
+        let provider = mock_provider(None);
         let err = empty_folder(&provider, &store, "ordinary-folder")
             .await
             .unwrap_err();
@@ -909,5 +1024,78 @@ mod tests {
             vec!["sender@x.com".to_string(), "alice@x.com".to_string()]
         );
         assert_eq!(prefill.cc, vec!["bob@x.com".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn in_folder_search_skips_the_provider_and_filters_the_cache() {
+        let store = MockStore::default();
+        store
+            .upsert_messages(
+                "inbox",
+                vec![
+                    MessageSummary {
+                        from: "Ada <ada@ex.com>".into(),
+                        subject: "Q3 invoice".into(),
+                        ..summary("1")
+                    },
+                    MessageSummary {
+                        from: "Bob <bob@ex.com>".into(),
+                        subject: "lunch".into(),
+                        ..summary("2")
+                    },
+                ],
+            )
+            .await
+            .unwrap();
+        let provider = mock_provider(None);
+        let results = search_messages(&provider, &store, "in:folder from:ada", 25, Some("inbox"))
+            .await
+            .unwrap();
+        assert!(results.from_cache);
+        assert!(provider.search_queries.lock().unwrap().is_empty());
+        assert_eq!(results.messages.len(), 1);
+        assert_eq!(results.messages[0].id, "1");
+    }
+
+    #[tokio::test]
+    async fn network_search_falls_back_to_the_local_cache() {
+        let store = MockStore::default();
+        store
+            .upsert_messages("inbox", vec![summary("cached")])
+            .await
+            .unwrap();
+        let provider = mock_provider(None);
+        *provider.search.lock().unwrap() = Some(Err(MailError::Network("offline".into())));
+        let results = search_messages(&provider, &store, "s", 25, None)
+            .await
+            .unwrap();
+        assert!(results.from_cache);
+        assert_eq!(results.messages[0].id, "cached");
+        assert_eq!(
+            provider.search_queries.lock().unwrap().as_slice(),
+            ["\"s\""]
+        );
+    }
+
+    #[tokio::test]
+    async fn new_reply_draft_uses_create_reply_draft() {
+        let provider = mock_provider(None);
+        let id = save_draft(&provider, None, &outgoing(), Some("orig-1"))
+            .await
+            .unwrap();
+        assert_eq!(id, "reply-draft");
+        assert_eq!(provider.reply_drafts.lock().unwrap().as_slice(), ["orig-1"]);
+        assert_eq!(*provider.plain_drafts.lock().unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn new_unthreaded_draft_uses_create_draft() {
+        let provider = mock_provider(None);
+        let id = save_draft(&provider, None, &outgoing(), None)
+            .await
+            .unwrap();
+        assert_eq!(id, "plain-draft");
+        assert!(provider.reply_drafts.lock().unwrap().is_empty());
+        assert_eq!(*provider.plain_drafts.lock().unwrap(), 1);
     }
 }

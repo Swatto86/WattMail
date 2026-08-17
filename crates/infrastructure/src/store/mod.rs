@@ -541,6 +541,58 @@ impl MailStore for SqliteStore {
         })
         .await
     }
+
+    async fn cached_for_search(
+        &self,
+        folder_id: Option<&str>,
+        cap: u32,
+    ) -> Result<Vec<MessageSummary>, MailError> {
+        let folder_id = folder_id.map(str::to_string);
+        let mut rows = self
+            .run(move |conn| {
+                let mut stmt = if folder_id.is_some() {
+                    conn.prepare(
+                        "SELECT id, subject, sender, recipients, received, preview, is_read, is_flagged, has_attachments, importance
+                         FROM messages WHERE folder_id = ?1 ORDER BY received DESC LIMIT ?2",
+                    )?
+                } else {
+                    conn.prepare(
+                        "SELECT id, subject, sender, recipients, received, preview, is_read, is_flagged, has_attachments, importance
+                         FROM messages ORDER BY received DESC LIMIT ?1",
+                    )?
+                };
+                let map_row = |row: &rusqlite::Row| {
+                    Ok(MessageSummary {
+                        id: row.get(0)?,
+                        subject: row.get(1)?,
+                        from: row.get(2)?,
+                        to: row.get(3)?,
+                        received: row.get(4)?,
+                        preview: row.get(5)?,
+                        is_read: row.get::<_, i64>(6)? != 0,
+                        is_flagged: row.get::<_, i64>(7)? != 0,
+                        has_attachments: row.get::<_, i64>(8)? != 0,
+                        importance: Importance::parse(Some(&row.get::<_, String>(9)?)),
+                    })
+                };
+                let rows = if let Some(fid) = folder_id.as_ref() {
+                    stmt.query_map(rusqlite::params![fid, cap], map_row)?
+                        .collect::<rusqlite::Result<Vec<_>>>()?
+                } else {
+                    stmt.query_map(rusqlite::params![cap], map_row)?
+                        .collect::<rusqlite::Result<Vec<_>>>()?
+                };
+                Ok(rows)
+            })
+            .await?;
+        for m in &mut rows {
+            m.subject = self.cipher.decrypt(&m.subject);
+            m.from = self.cipher.decrypt(&m.from);
+            m.to = self.cipher.decrypt(&m.to);
+            m.preview = self.cipher.decrypt(&m.preview);
+        }
+        Ok(rows)
+    }
 }
 
 fn storage_err(e: impl std::fmt::Display) -> MailError {
@@ -619,6 +671,60 @@ mod tests {
             store.set_read("m1", false).await.expect("mark unread");
             let folders = store.cached_folders().await.expect("folders");
             assert_eq!(folders[0].unread_count, 1);
+        }
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn cached_for_search_decrypts_and_can_scope_to_a_folder() {
+        let path = temp_db("cached-search");
+        {
+            let store = SqliteStore::open(&path).expect("open store");
+            store
+                .upsert_messages(
+                    "inbox",
+                    vec![MessageSummary {
+                        id: "a".into(),
+                        subject: "Invoice Q3".into(),
+                        from: "ada@ex.com".into(),
+                        to: "me@ex.com".into(),
+                        received: "2026-08-02T12:00:00Z".into(),
+                        preview: "Please pay".into(),
+                        is_read: false,
+                        is_flagged: false,
+                        has_attachments: true,
+                        importance: Importance::Normal,
+                    }],
+                )
+                .await
+                .expect("inbox");
+            store
+                .upsert_messages(
+                    "sent",
+                    vec![MessageSummary {
+                        id: "b".into(),
+                        subject: "Thanks".into(),
+                        from: "me@ex.com".into(),
+                        to: "ada@ex.com".into(),
+                        received: "2026-08-03T12:00:00Z".into(),
+                        preview: "Cheers".into(),
+                        is_read: true,
+                        is_flagged: false,
+                        has_attachments: false,
+                        importance: Importance::Normal,
+                    }],
+                )
+                .await
+                .expect("sent");
+            let all = store.cached_for_search(None, 10).await.expect("all");
+            assert_eq!(all.len(), 2);
+            assert_eq!(all[0].subject, "Thanks"); // newest first
+            let inbox = store
+                .cached_for_search(Some("inbox"), 10)
+                .await
+                .expect("inbox");
+            assert_eq!(inbox.len(), 1);
+            assert_eq!(inbox[0].from, "ada@ex.com");
         }
         let _ = std::fs::remove_file(path);
     }
