@@ -2450,6 +2450,11 @@ accounts (L); conversation/threaded view (L, blocked on whole-folder server-side
 date sort); snooze (L). Next major direction per 2026-07-10 planning: **calendar completion**
 (in-email meeting-invite RSVP, event reminders, event editing, week/month grid).
 
+**Shipped in v0.12.0 (2026-08-17):** reply-as-draft keeps threading (Graph
+`createReply`); KQL-ish mail search (`from:` / `subject:` / `is:unread` / …)
+with encrypted-cache fallback; calendar week time-grid; recurring this-event
+vs the series.
+
 **Shipped in v0.11.0 (2026-08-16):** large-attachment upload sessions — Graph
 `createUploadSession` + draft send path; compose budget 150 MB.
 
@@ -2464,8 +2469,8 @@ reply threading, draft attachments (details in the progress log).
 **Shipped in v0.4.0 (2026-07-11):** calendar completion — event editing,
 in-email meeting-invite RSVP, event reminders, month grid (details in the
 progress log). The calendar now covers the user's stated scope (mail +
-calendar); remaining calendar ideas are polish (week grid, multi-day pills,
-multi-calendar picker, rich description editing).
+calendar); remaining calendar ideas are polish (calendar `$search`, jump-to-date
+picker, missed-reminder banner on launch).
 
 ---
 
