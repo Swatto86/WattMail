@@ -5,7 +5,7 @@
 > new milestone state, a decision made/reversed, or an open question resolved.
 > Keep newest progress entries at the top of the log.
 >
-> **Last updated:** 2026-08-17
+> **Last updated:** 2026-08-22
 
 ---
 
@@ -101,6 +101,19 @@ Entra app registration (public, not secret):
 ---
 
 ## Progress log
+
+### 2026-08-22 — Re-auth token not persisted after browser sign-in
+
+- **Symptom:** session expired → user re-signed in via the browser ("Signed in to
+  WattMail") but the app still showed `auth-required`, including after restart.
+- **Root cause:** `reauthenticate_active` required the Entra object id to equal
+  the persisted account id. Legacy/upgraded installs keep id `"default"` while
+  Graph returns the real oid — identity check failed *after* the browser redirect,
+  so `persist_reauth` never ran and the old revoked refresh token stayed in the
+  keyring.
+- **Fix:** match sign-in identity by email as well as id (same rule as
+  `add_account` / `find_existing`); reload the open message after a successful
+  re-auth; preserve the refresh token on silent refresh when Microsoft omits it.
 
 ### 2026-08-17 — Threaded reply drafts, KQL/local search, week grid (v0.12.0)
 
