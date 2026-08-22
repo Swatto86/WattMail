@@ -102,6 +102,11 @@ Entra app registration (public, not secret):
 
 ## Progress log
 
+### 2026-08-22 — Re-auth token fix (v0.12.1)
+
+Patch release: re-authentication after session expiry now persists tokens for
+legacy `"default"` accounts and reloads the open message.
+
 ### 2026-08-22 — Re-auth token not persisted after browser sign-in
 
 - **Symptom:** session expired → user re-signed in via the browser ("Signed in to
