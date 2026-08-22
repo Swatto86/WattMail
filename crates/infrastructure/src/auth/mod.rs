@@ -398,7 +398,13 @@ impl AuthService {
             ("refresh_token", refresh_token),
             ("scope", scope.as_str()),
         ];
-        self.post_token(params).await
+        let mut tokens = self.post_token(params).await?;
+        // Microsoft often omits a rotated refresh token on refresh grants — keep
+        // using the one we just redeemed so the in-memory cache stays usable.
+        if tokens.refresh_token.is_none() {
+            tokens.refresh_token = Some(refresh_token.to_string());
+        }
+        Ok(tokens)
     }
 
     async fn post_token(&self, mut params: Vec<(&str, &str)>) -> Result<TokenSet, AuthError> {

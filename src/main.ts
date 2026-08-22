@@ -1535,6 +1535,13 @@ async function openMessage(id: string, allowImages = false): Promise<void> {
     void loadAttachments(id);
     void probeMeetingInvite(id);
   } catch (e) {
+    if (await handlePossibleAuthError(e)) {
+      if (reauthRequired) {
+        readerEl.innerHTML =
+          `<div class="reader-empty">Your session has expired — sign in again.</div>`;
+      }
+      return;
+    }
     readerEl.innerHTML = `<div class="reader-empty">Failed to load message: ${esc(String(e))}</div>`;
   }
 }
@@ -2699,6 +2706,8 @@ async function handlePossibleAuthError(e: unknown): Promise<boolean> {
     await loadFolders();
     await refreshFromCache().catch(() => {});
     await syncFolder();
+    // Reload the open message (if any) so a stale auth error clears.
+    if (selectedId) void openMessage(selectedId);
   } catch (err) {
     statusEl.textContent = `Sign-in failed: ${err}`;
   } finally {

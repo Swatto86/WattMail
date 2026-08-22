@@ -434,14 +434,27 @@ impl AccountManager {
         )
         .ok_or_else(|| format!("{} has no mailbox backend", provider.label()))?;
         let profile = backend.current_user().await.map_err(|e| e.to_string())?;
-        let signed_in_id = account_id_for(&profile.id, &profile.email.to_string());
-        if signed_in_id != account.record.id {
+        let signed_in_email = profile.email.to_string();
+        let signed_in_id = account_id_for(&profile.id, &signed_in_email);
+        let expected_email = account_email(&account);
+        if !identity_matches_account(
+            &account.record,
+            &signed_in_id,
+            &signed_in_email,
+            &expected_email,
+        ) {
             return Err(format!(
                 "Signed in as a different account ({}). Choose {} in the browser and try again.",
-                profile.email, account.record.email
+                signed_in_email,
+                if expected_email.is_empty() {
+                    account.record.email.as_str()
+                } else {
+                    &expected_email
+                }
             ));
         }
-        auth.persist_reauth(&tokens).map_err(|e| e.to_string())
+        auth.persist_reauth(&tokens).map_err(|e| e.to_string())?;
+        Ok(())
     }
 
     /// Register an iCloud account from an Apple ID and an app-specific password.
@@ -727,7 +740,24 @@ fn db_path(provider: ProviderKind, id: &str) -> PathBuf {
     }
 }
 
-/// Choose a stable account id: the Entra object id when present, else a value
+/// Whether a fresh sign-in's discovered identity matches a persisted account.
+/// Id equality is the primary check; email equality covers the adopted legacy
+/// slot (id is the sentinel [`LEGACY_ID`] but Graph returns the real oid) and
+/// accounts whose id form changed between sign-ins (upn-… vs oid).
+fn identity_matches_account(
+    record: &AccountRecord,
+    signed_in_id: &str,
+    signed_in_email: &str,
+    account_email: &str,
+) -> bool {
+    if signed_in_id == record.id {
+        return true;
+    }
+    !signed_in_email.is_empty()
+        && !account_email.is_empty()
+        && account_email.eq_ignore_ascii_case(signed_in_email)
+}
+
 /// derived from the email, else a timestamp so an add never silently fails.
 fn account_id_for(object_id: &str, email: &str) -> String {
     if !object_id.is_empty() {
@@ -802,5 +832,54 @@ mod tests {
         // picker; providers still on placeholder credentials are filtered out.
         assert!(configured_provider_tags().contains(&"office365".to_string()));
         assert!(is_provider_configured(ProviderKind::Office365));
+    }
+
+    #[test]
+    fn identity_match_accepts_legacy_default_id_with_real_oid() {
+        let record = AccountRecord {
+            id: LEGACY_ID.to_string(),
+            provider: ProviderKind::Office365,
+            email: "pat@swatto.co.uk".to_string(),
+            display_name: String::new(),
+        };
+        assert!(identity_matches_account(
+            &record,
+            "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+            "pat@swatto.co.uk",
+            "pat@swatto.co.uk",
+        ));
+    }
+
+    #[test]
+    fn identity_match_rejects_different_mailbox() {
+        let record = AccountRecord {
+            id: LEGACY_ID.to_string(),
+            provider: ProviderKind::Office365,
+            email: "pat@swatto.co.uk".to_string(),
+            display_name: String::new(),
+        };
+        assert!(!identity_matches_account(
+            &record,
+            "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+            "other@example.com",
+            "pat@swatto.co.uk",
+        ));
+    }
+
+    #[test]
+    fn identity_match_accepts_same_oid() {
+        let oid = "a1b2c3d4-e5f6-7890-abcd-ef1234567890";
+        let record = AccountRecord {
+            id: oid.to_string(),
+            provider: ProviderKind::Office365,
+            email: "pat@swatto.co.uk".to_string(),
+            display_name: String::new(),
+        };
+        assert!(identity_matches_account(
+            &record,
+            oid,
+            "pat@swatto.co.uk",
+            "pat@swatto.co.uk",
+        ));
     }
 }
