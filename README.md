@@ -11,7 +11,7 @@ rest.
 The code is cross-platform-capable (paths and the keychain backend are abstracted
 per-OS) but macOS and Linux are only compile-checked in CI — not built or run live.
 
-> Status: **v0.12.0** — functional and actively developed. See [`CONTEXT.md`](CONTEXT.md)
+> Status: **v0.13.0** — functional and actively developed. See [`CONTEXT.md`](CONTEXT.md)
 > for the live progress log, architecture decisions, and roadmap.
 
 ## Features

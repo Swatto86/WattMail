@@ -2481,6 +2481,10 @@ accounts (L); conversation/threaded view (L, blocked on whole-folder server-side
 date sort); snooze (L). Next major direction per 2026-07-10 planning: **calendar completion**
 (in-email meeting-invite RSVP, event reminders, event editing, week/month grid).
 
+**Shipped in v0.13.0 (2026-08-25):** drag a message (or a multi-selection) onto
+a sidebar folder to move it; search's Move-to-folder picker keeps the currently
+selected folder as a destination during mailbox-wide `$search`.
+
 **Shipped in v0.12.0 (2026-08-17):** reply-as-draft keeps threading (Graph
 `createReply`); KQL-ish mail search (`from:` / `subject:` / `is:unread` / …)
 with encrypted-cache fallback; calendar week time-grid; recurring this-event
