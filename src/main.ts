@@ -278,6 +278,22 @@ function folderByRole(role: string): FolderInfo | undefined {
 function currentFolderRole(): string | null {
   return folders.find((f) => f.id === currentFolderId)?.role ?? null;
 }
+// Graph $search is mailbox-wide unless the query carries `in:folder` (cache-only,
+// current folder). Used so "Move to folder" / drag-drop can offer the sidebar's
+// selected folder as a destination when the result may live somewhere else.
+function searchIsFolderScoped(): boolean {
+  return /\bin:folder\b/i.test(searchInput.value);
+}
+// Destinations the move UI will offer. Outgoing system folders are never valid
+// (dropping a received message into Drafts makes the next autosave PATCH it).
+// The currently open folder is excluded while browsing it, and during an
+// `in:folder` search whose hits already live there. Mailbox-wide search keeps
+// it — a hit can come from anywhere, including not the sidebar selection.
+function folderAcceptsMove(f: FolderInfo): boolean {
+  if (isOutgoingFolder(f)) return false;
+  if (f.id === currentFolderId && (!searchActive || searchIsFolderScoped())) return false;
+  return true;
+}
 
 // ---- Sort (client-side, over the loaded window) ----
 type SortMode = "dateDesc" | "dateAsc" | "sender" | "subject" | "unread";
@@ -1008,7 +1024,7 @@ function messageRowHtml(m: Message, showRecipient: boolean): string {
         ? `<span class="msg-importance-low" title="Low importance">&darr;</span>`
         : "";
   return `
-        <div class="msg ${unread}${flagged}" data-id="${esc(m.id)}">
+        <div class="msg ${unread}${flagged}" data-id="${esc(m.id)}" draggable="true">
           <div class="msg-dot">${dot}</div>
           ${avatar}
           <div class="msg-main">
@@ -1314,6 +1330,13 @@ async function deleteMessage(id: string): Promise<void> {
 // Move a message to another folder (it leaves the current folder's list).
 async function moveMessage(id: string, destinationFolderId: string): Promise<void> {
   if (actionInFlight.has(id)) return;
+  const dest = folders.find((f) => f.id === destinationFolderId);
+  if (dest && !folderAcceptsMove(dest)) {
+    statusEl.textContent = isOutgoingFolder(dest)
+      ? "Can't move messages into Drafts, Sent, or Outbox."
+      : "Already in this folder.";
+    return;
+  }
   actionInFlight.add(id);
   rowFor(id)?.remove();
   if (selectedId === id) resetReader();
@@ -1321,6 +1344,8 @@ async function moveMessage(id: string, destinationFolderId: string): Promise<voi
     await invoke("move_message", { id, destinationFolderId });
     notifyMessageRemoved(id);
     await reconcileAfterAction(); // update loaded/total count and unread badges
+    const name = folders.find((f) => f.id === destinationFolderId)?.name;
+    statusEl.textContent = name ? `Moved to ${name}` : "Moved";
   } catch (e) {
     statusEl.textContent = `Move failed: ${e}`;
     await revertOptimisticAction(); // restore the removed row
@@ -1359,24 +1384,43 @@ async function bulkSetRead(ids: string[], read: boolean): Promise<void> {
 }
 
 async function bulkMove(ids: string[], destinationFolderId: string): Promise<void> {
-  let failed = 0;
-  for (const id of ids) {
-    rowFor(id)?.remove();
-    if (selectedId === id) resetReader();
-    try {
-      await invoke("move_message", { id, destinationFolderId });
-      notifyMessageRemoved(id);
-    } catch {
-      failed++;
-    }
+  const dest = folders.find((f) => f.id === destinationFolderId);
+  if (dest && !folderAcceptsMove(dest)) {
+    statusEl.textContent = isOutgoingFolder(dest)
+      ? "Can't move messages into Drafts, Sent, or Outbox."
+      : "Already in this folder.";
+    return;
   }
-  clearChecked();
-  await reconcileAfterAction();
-  if (failed) {
-    statusEl.textContent = `Moved ${ids.length - failed} of ${ids.length}; ${failed} failed`;
-    await revertOptimisticAction();
-  } else {
-    statusEl.textContent = `Moved ${ids.length} messages`;
+  // Same in-flight guard as the single-message path: a held shortcut or a
+  // second drop of the same rows must not 404 on an id that's already moving.
+  const unique = [...new Set(ids)].filter((id) => !actionInFlight.has(id));
+  if (!unique.length) return;
+  for (const id of unique) actionInFlight.add(id);
+  let failed = 0;
+  try {
+    for (const id of unique) {
+      rowFor(id)?.remove();
+      if (selectedId === id) resetReader();
+      try {
+        await invoke("move_message", { id, destinationFolderId });
+        notifyMessageRemoved(id);
+      } catch {
+        failed++;
+      }
+    }
+    clearChecked();
+    await reconcileAfterAction();
+    if (failed) {
+      statusEl.textContent = `Moved ${unique.length - failed} of ${unique.length}; ${failed} failed`;
+      await revertOptimisticAction();
+    } else {
+      const name = folders.find((f) => f.id === destinationFolderId)?.name;
+      statusEl.textContent = name
+        ? `Moved ${unique.length} messages to ${name}`
+        : `Moved ${unique.length} messages`;
+    }
+  } finally {
+    for (const id of unique) actionInFlight.delete(id);
   }
 }
 
@@ -4826,6 +4870,139 @@ foldersEl.addEventListener("click", (e) => {
   const btn = (e.target as HTMLElement).closest<HTMLElement>(".folder");
   if (btn?.dataset.fid) void selectFolder(btn.dataset.fid);
 });
+
+// Drag a list row onto a folder to move it (same seam as the context-menu
+// "Move to folder…" picker). Custom MIME plus a module-level id list: Chromium
+// withholds getData() until drop, so dragover highlighting keys off the flag.
+const MAIL_DRAG_TYPE = "application/x-wattmail-messages";
+let mailDragIds: string[] | null = null;
+let mailDragDidMove = false;
+let mailDropFolderEl: HTMLElement | null = null;
+
+function isMailDrag(dt: DataTransfer | null): boolean {
+  if (mailDragIds) return true;
+  return !!dt && Array.from(dt.types).includes(MAIL_DRAG_TYPE);
+}
+
+function clearMailDropTarget(): void {
+  if (!mailDropFolderEl) return;
+  mailDropFolderEl.classList.remove("folder-drop", "folder-drop-forbidden");
+  mailDropFolderEl = null;
+}
+
+function setMailDropTarget(btn: HTMLElement | null): void {
+  if (mailDropFolderEl === btn) return;
+  clearMailDropTarget();
+  if (!btn) return;
+  mailDropFolderEl = btn;
+  const f = folders.find((x) => x.id === btn.dataset.fid);
+  btn.classList.add(f && folderAcceptsMove(f) ? "folder-drop" : "folder-drop-forbidden");
+}
+
+function endMailDrag(): void {
+  document.body.classList.remove("is-dragging-mail");
+  listEl.querySelectorAll(".msg.dragging").forEach((el) => el.classList.remove("dragging"));
+  clearMailDropTarget();
+  mailDragIds = null;
+}
+
+listEl.addEventListener("dragstart", (e) => {
+  const row = (e.target as HTMLElement).closest<HTMLElement>(".msg");
+  if (!row?.dataset.id || !e.dataTransfer) return;
+  const id = row.dataset.id;
+  // Dragging a row that's part of the multi-selection moves the whole set
+  // (Outlook-style); dragging an unselected row moves only that message.
+  const ids = checkedIds.size > 1 && checkedIds.has(id) ? [...checkedIds] : [id];
+  mailDragIds = ids;
+  mailDragDidMove = false;
+  e.dataTransfer.setData(MAIL_DRAG_TYPE, JSON.stringify(ids));
+  e.dataTransfer.setData("text/plain", ids.length === 1 ? "1 message" : `${ids.length} messages`);
+  e.dataTransfer.effectAllowed = "move";
+  document.body.classList.add("is-dragging-mail");
+  for (const mid of ids) rowFor(mid)?.classList.add("dragging");
+  hideCtxMenu();
+  hideFolderMenu();
+  statusEl.textContent =
+    ids.length === 1
+      ? "Drop on a folder to move this message"
+      : `Drop on a folder to move ${ids.length} messages`;
+});
+
+listEl.addEventListener("dragend", () => {
+  const wasHint = statusEl.textContent.startsWith("Drop on a folder");
+  endMailDrag();
+  if (wasHint && !mailDragDidMove) statusEl.textContent = "";
+  // Some engines fire a click after a drag. Swallow it for this turn, then
+  // clear so the next real click (open message / switch folder) still works.
+  if (mailDragDidMove) {
+    setTimeout(() => {
+      mailDragDidMove = false;
+    }, 0);
+  }
+});
+
+foldersEl.addEventListener("dragenter", (e) => {
+  if (!isMailDrag(e.dataTransfer)) return;
+  e.preventDefault();
+});
+
+foldersEl.addEventListener("dragover", (e) => {
+  if (!isMailDrag(e.dataTransfer)) return;
+  e.preventDefault();
+  const btn = (e.target as HTMLElement).closest<HTMLElement>(".folder");
+  setMailDropTarget(btn);
+  const f = btn && folders.find((x) => x.id === btn.dataset.fid);
+  if (e.dataTransfer) e.dataTransfer.dropEffect = f && folderAcceptsMove(f) ? "move" : "none";
+});
+
+foldersEl.addEventListener("dragleave", (e) => {
+  if (!isMailDrag(e.dataTransfer)) return;
+  const related = e.relatedTarget as Node | null;
+  if (related && foldersEl.contains(related)) return;
+  clearMailDropTarget();
+});
+
+foldersEl.addEventListener("drop", (e) => {
+  if (!isMailDrag(e.dataTransfer)) return;
+  e.preventDefault();
+  const btn = (e.target as HTMLElement).closest<HTMLElement>(".folder");
+  const destId = btn?.dataset.fid;
+  const ids = mailDragIds;
+  clearMailDropTarget();
+  if (!destId || !ids?.length) return;
+  const dest = folders.find((f) => f.id === destId);
+  if (!dest || !folderAcceptsMove(dest)) {
+    statusEl.textContent = dest && isOutgoingFolder(dest)
+      ? "Can't move messages into Drafts, Sent, or Outbox."
+      : "Already in this folder.";
+    return;
+  }
+  mailDragDidMove = true;
+  if (ids.length === 1) void moveMessage(ids[0], destId);
+  else void bulkMove(ids, destId);
+});
+
+// Swallow the click that can follow a successful drop so it doesn't open the
+// dropped-on folder or the dragged message.
+foldersEl.addEventListener(
+  "click",
+  (e) => {
+    if (!mailDragDidMove) return;
+    e.preventDefault();
+    e.stopImmediatePropagation();
+  },
+  true,
+);
+listEl.addEventListener(
+  "click",
+  (e) => {
+    if (!mailDragDidMove) return;
+    e.preventDefault();
+    e.stopImmediatePropagation();
+  },
+  true,
+);
+
 listEl.addEventListener("click", (e) => {
   const target = e.target as HTMLElement;
   if (target.closest(".load-more")) {
@@ -4949,12 +5126,14 @@ function renderMainMenu(unread: boolean, flagged: boolean): void {
     .join("");
 }
 
-// Second "page" of the menu: pick a destination folder. Excludes the current
-// folder and the outgoing system folders (Drafts/Sent Items/Outbox): moving an
-// ordinary message into Drafts makes the reader resume it as an editable draft,
-// so the next edit/autosave would PATCH-overwrite the original message.
+// Second "page" of the menu: pick a destination folder. Excludes outgoing
+// system folders (Drafts/Sent Items/Outbox): moving an ordinary message into
+// Drafts makes the reader resume it as an editable draft, so the next
+// edit/autosave would PATCH-overwrite the original message. The currently
+// open folder is excluded while browsing it, but kept during mailbox-wide
+// search — those hits can live in any folder, including not this one.
 function renderFolderMenu(): void {
-  const others = folders.filter((f) => f.id !== currentFolderId && !isOutgoingFolder(f));
+  const others = folders.filter((f) => folderAcceptsMove(f));
   const list = others.length
     ? others
         .map(

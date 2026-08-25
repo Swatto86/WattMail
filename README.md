@@ -29,6 +29,8 @@ per-OS) but macOS and Linux are only compile-checked in CI — not built or run 
   Flagged), and a group-by-date toggle (on by default for date-ordered sorts).
 - **Folder navigation** (nested folders, unread counts) with per-folder delta sync;
   the folder sidebar is cached, so it still renders on a cold offline start.
+  Drag a message (or a multi-selection) onto a folder to move it — same rules as
+  the context-menu picker (not into Drafts / Sent / Outbox).
 - **Local SQLite cache** — instant, offline-capable; auto-syncs every 60s.
 - **Search** — Graph `$search` with KQL-ish prefixes (`from:`, `to:`, `subject:`,
   `has:attachment`, `is:unread`) plus a local encrypted-cache fallback when

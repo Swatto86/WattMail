@@ -118,6 +118,7 @@ body,
   padding: 8px 12px;
   border-bottom: 1px solid oklch(var(--bc) / 0.08);
   cursor: pointer;
+  -webkit-user-drag: element;
   /* Keep the keyboard cursor row clear of the sticky date-section header. */
   scroll-margin-top: 28px;
 }
@@ -863,6 +864,22 @@ body,
   background: oklch(var(--bc) / 0.12);
   border-radius: 8px;
   padding: 0 6px;
+}
+/* Drag-and-drop: list rows onto folders. */
+.msg.dragging {
+  opacity: 0.45;
+}
+body.is-dragging-mail .folder.folder-drop,
+body.is-dragging-mail .folder.folder-drop:hover {
+  background: oklch(var(--p) / 0.28);
+  box-shadow: inset 3px 0 0 oklch(var(--p));
+  outline: 1px dashed oklch(var(--p));
+  outline-offset: -1px;
+}
+body.is-dragging-mail .folder.folder-drop-forbidden,
+body.is-dragging-mail .folder.folder-drop-forbidden:hover {
+  opacity: 0.45;
+  cursor: not-allowed;
 }
 
 /* Split layout */

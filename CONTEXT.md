@@ -5,7 +5,7 @@
 > new milestone state, a decision made/reversed, or an open question resolved.
 > Keep newest progress entries at the top of the log.
 >
-> **Last updated:** 2026-08-22
+> **Last updated:** 2026-08-25
 
 ---
 
@@ -101,6 +101,19 @@ Entra app registration (public, not secret):
 ---
 
 ## Progress log
+
+### 2026-08-25 — Drag-and-drop folder moves (v0.13.0)
+
+- **Drag a message onto a folder to move it.** List rows are draggable; the
+  sidebar highlights a valid drop target (and greys out Drafts/Sent/Outbox and
+  the folder you're already in). A multi-selection moves together when the
+  dragged row is part of it. Reuses `move_message` / `bulkMove`.
+- **Fix: "Move to folder…" hid the current sidebar folder during search.** Graph
+  `$search` is mailbox-wide unless the query has `in:folder`, so a hit can live
+  anywhere — including not the folder that's selected. The picker (and now
+  drag-drop) keeps that folder as a destination during mailbox-wide search.
+- Bulk move now shares the in-flight id guard with the single-message path, so a
+  second drop or a held shortcut can't 404 on an id that's already moving.
 
 ### 2026-08-22 — Re-auth token fix (v0.12.1)
 
