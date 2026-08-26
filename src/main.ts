@@ -4876,7 +4876,13 @@ foldersEl.addEventListener("click", (e) => {
 // withholds getData() until drop, so dragover highlighting keys off the flag.
 const MAIL_DRAG_TYPE = "application/x-wattmail-messages";
 let mailDragIds: string[] | null = null;
+// When true, capture-phase click handlers on the list/folders swallow the
+// synthetic post-drop click. Must be cleared on a timer from `drop` itself —
+// not from `dragend` — because moveMessage removes the drag-source row during
+// drop and WebView2 then often skips dragend, which used to leave this flag
+// stuck and freeze folder/list clicks for the rest of the session.
 let mailDragDidMove = false;
+let mailDragClickTimer: ReturnType<typeof setTimeout> | null = null;
 let mailDropFolderEl: HTMLElement | null = null;
 
 function isMailDrag(dt: DataTransfer | null): boolean {
@@ -4906,6 +4912,15 @@ function endMailDrag(): void {
   mailDragIds = null;
 }
 
+function suppressPostDropClicks(): void {
+  mailDragDidMove = true;
+  if (mailDragClickTimer !== null) clearTimeout(mailDragClickTimer);
+  mailDragClickTimer = setTimeout(() => {
+    mailDragDidMove = false;
+    mailDragClickTimer = null;
+  }, 100);
+}
+
 listEl.addEventListener("dragstart", (e) => {
   const row = (e.target as HTMLElement).closest<HTMLElement>(".msg");
   if (!row?.dataset.id || !e.dataTransfer) return;
@@ -4915,6 +4930,10 @@ listEl.addEventListener("dragstart", (e) => {
   const ids = checkedIds.size > 1 && checkedIds.has(id) ? [...checkedIds] : [id];
   mailDragIds = ids;
   mailDragDidMove = false;
+  if (mailDragClickTimer !== null) {
+    clearTimeout(mailDragClickTimer);
+    mailDragClickTimer = null;
+  }
   e.dataTransfer.setData(MAIL_DRAG_TYPE, JSON.stringify(ids));
   e.dataTransfer.setData("text/plain", ids.length === 1 ? "1 message" : `${ids.length} messages`);
   e.dataTransfer.effectAllowed = "move";
@@ -4930,15 +4949,9 @@ listEl.addEventListener("dragstart", (e) => {
 
 listEl.addEventListener("dragend", () => {
   const wasHint = statusEl.textContent.startsWith("Drop on a folder");
+  const didMove = mailDragDidMove;
   endMailDrag();
-  if (wasHint && !mailDragDidMove) statusEl.textContent = "";
-  // Some engines fire a click after a drag. Swallow it for this turn, then
-  // clear so the next real click (open message / switch folder) still works.
-  if (mailDragDidMove) {
-    setTimeout(() => {
-      mailDragDidMove = false;
-    }, 0);
-  }
+  if (wasHint && !didMove) statusEl.textContent = "";
 });
 
 foldersEl.addEventListener("dragenter", (e) => {
@@ -4967,19 +4980,32 @@ foldersEl.addEventListener("drop", (e) => {
   e.preventDefault();
   const btn = (e.target as HTMLElement).closest<HTMLElement>(".folder");
   const destId = btn?.dataset.fid;
-  const ids = mailDragIds;
+  const ids = mailDragIds ? [...mailDragIds] : null;
   clearMailDropTarget();
-  if (!destId || !ids?.length) return;
+  if (!destId || !ids?.length) {
+    endMailDrag();
+    return;
+  }
   const dest = folders.find((f) => f.id === destId);
   if (!dest || !folderAcceptsMove(dest)) {
     statusEl.textContent = dest && isOutgoingFolder(dest)
       ? "Can't move messages into Drafts, Sent, or Outbox."
       : "Already in this folder.";
+    endMailDrag();
     return;
   }
-  mailDragDidMove = true;
-  if (ids.length === 1) void moveMessage(ids[0], destId);
-  else void bulkMove(ids, destId);
+  // Arm the click suppressor and clear drag chrome before starting the move.
+  // moveMessage removes the source row synchronously; doing that inside this
+  // drop handler makes WebView2 skip dragend, which previously left the
+  // suppressor stuck forever.
+  suppressPostDropClicks();
+  endMailDrag();
+  const moveIds = ids;
+  const moveDest = destId;
+  setTimeout(() => {
+    if (moveIds.length === 1) void moveMessage(moveIds[0], moveDest);
+    else void bulkMove(moveIds, moveDest);
+  }, 0);
 });
 
 // Swallow the click that can follow a successful drop so it doesn't open the

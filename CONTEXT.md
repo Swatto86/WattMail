@@ -5,7 +5,7 @@
 > new milestone state, a decision made/reversed, or an open question resolved.
 > Keep newest progress entries at the top of the log.
 >
-> **Last updated:** 2026-08-25
+> **Last updated:** 2026-08-26
 
 ---
 
@@ -101,6 +101,19 @@ Entra app registration (public, not secret):
 ---
 
 ## Progress log
+
+### 2026-08-26 — Drag-drop no longer freezes the UI after a move (v0.13.1)
+
+- **Symptom:** dragging a message onto a folder moved it, then the app stopped
+  responding to clicks on the list and folder sidebar.
+- **Root cause:** `moveMessage` removes the drag-source row synchronously inside
+  the `drop` handler. WebView2 often skips `dragend` when the source is gone;
+  the post-drop click suppressor (`mailDragDidMove`) was only cleared from
+  `dragend`, so it stayed true and capture-phase handlers kept calling
+  `stopImmediatePropagation` on every list/folder click.
+- **Fix:** arm and clear the suppressor from `drop` on a short timer; tear down
+  drag chrome in `drop` before starting the move; defer the move to the next
+  macrotask so a live source can still receive `dragend` when the engine fires it.
 
 ### 2026-08-25 — Drag-and-drop folder moves (v0.13.0)
 
