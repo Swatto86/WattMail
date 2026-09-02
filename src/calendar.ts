@@ -17,6 +17,12 @@ import { invoke } from "@tauri-apps/api/core";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { sendNotification } from "@tauri-apps/plugin-notification";
 import { showConfirm, showTernary } from "./dialog";
+import {
+  EMAIL_FRAME_SANDBOX,
+  safeExternalHref,
+  sandboxedSrcdocHead,
+  wireEmailFrame,
+} from "./email-render";
 
 interface Attendee {
   name: string;
@@ -1249,19 +1255,20 @@ function paneColors(): { bg: string; fg: string; link: string } {
 function renderBodyIframe(container: HTMLElement, html: string): void {
   const iframe = document.createElement("iframe");
   iframe.className = "cal-body-frame";
-  // allow-same-origin (so we can auto-size + intercept links) but NOT
-  // allow-scripts, so no JS in the body can ever run.
-  iframe.setAttribute("sandbox", "allow-same-origin");
+  // Same sandbox + nonce shim as the mail reader (WebKitGTK drops parent-
+  // attached listeners on srcdoc without allow-scripts; CSP still blocks
+  // email JS). allow-same-origin is for auto-size + hit-testing.
+  iframe.setAttribute("sandbox", EMAIL_FRAME_SANDBOX);
   // Set the background EXPLICITLY, not `transparent`: a sandboxed srcdoc iframe
   // is painted on an opaque white layer by WebView2, so a transparent body left
   // the light-on-dark description text unreadable (grey on white). The pane's
   // own DaisyUI tokens (resolved to concrete rgb here — the iframe has no access
   // to them) make it sit seamlessly on the detail surface in either theme.
   const pane = paneColors();
-  iframe.srcdoc = `<!doctype html><html><head><meta charset="utf-8"><base target="_blank"><style>
-    html,body{margin:0;padding:0;background:${pane.bg};color:${pane.fg};font:13px/1.5 -apple-system,'Segoe UI',system-ui,sans-serif;word-wrap:break-word;overflow-wrap:anywhere}
-    a{color:${pane.link}} img{max-width:100%;height:auto} table{max-width:100%}
-  </style></head><body>${html}</body></html>`;
+  const css =
+    `html,body{margin:0;padding:0;background:${pane.bg};color:${pane.fg};font:13px/1.5 -apple-system,'Segoe UI',system-ui,sans-serif;word-wrap:break-word;overflow-wrap:anywhere}` +
+    `a{color:${pane.link}} img{max-width:100%;height:auto} table{max-width:100%}`;
+  iframe.srcdoc = `<!doctype html><html><head>${sandboxedSrcdocHead(css)}</head><body>${html}</body></html>`;
   iframe.addEventListener("load", () => {
     try {
       const doc = iframe.contentDocument;
@@ -1275,11 +1282,8 @@ function renderBodyIframe(container: HTMLElement, html: string): void {
       if (typeof ResizeObserver !== "undefined") {
         new ResizeObserver(resize).observe(doc.documentElement);
       }
-      doc.querySelectorAll<HTMLAnchorElement>("a[href]").forEach((a) => {
-        a.addEventListener("click", (e) => {
-          e.preventDefault();
-          openExternal(a.getAttribute("href"));
-        });
+      wireEmailFrame(iframe, {
+        onClick: ({ href }) => openExternal(safeExternalHref(href)),
       });
     } catch {
       /* cross-origin guard — ignore */

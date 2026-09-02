@@ -16,9 +16,9 @@ Microsoft Graph API** with OAuth 2.0. The transport sits behind a provider-agnos
 `MailProvider` contract; a generic **IMAP/SMTP** backend is in fact already built on
 branch `feature/imap-accounts` (parked off main — see the NOTE in the progress log).
 
-**Platform reality:** only **Windows** is shipped/proven (NSIS installer + signed
-auto-update). The code is cross-platform-capable (per-OS path + keychain abstraction)
-but macOS/Linux are compile-gated in CI only — never built into a bundle or run live.
+**Platform reality:** **Windows** (NSIS installer) and **Linux** (signed AppImage)
+are shipped with in-place auto-update. **macOS** remains compile-checked in CI
+only — not built or run live.
 
 **Provider status (v0.7.0):** **iCloud** = calendar-only over CalDAV, always
 offered (the user supplies their own app-specific password, so there is nothing
@@ -101,6 +101,32 @@ Entra app registration (public, not secret):
 ---
 
 ## Progress log
+
+### 2026-09-02 — Email button links actually open (WebKit + leftover chrome)
+
+- **Symptom:** styled confirmation / magic-link buttons still did nothing after
+  v0.13.2, especially on Linux (WebKitGTK). Plain `<a>` text links could work on
+  Chromium/WebView2 while the same mail was dead in the AppImage.
+- **Root cause:** two remaining holes, not just HTML5 splitting `<p><a><table>`:
+  1. WebKit bug 218086: a parent-attached `click` listener on a sandboxed
+     `srcdoc` document is treated as iframe script and dropped unless
+     `allow-scripts` is set. WattMail's reader used
+     `sandbox="allow-same-origin"` with no scripts, so `wireFrameLinks` never
+     ran on Linux. The v0.13.2 hit-test never got an event.
+  2. Hit-testing only looked inside `<td>`/`<th>`, missed padded `<div>`
+     buttons, treated `&nbsp;`-only anchors as non-empty, and the sanitizer
+     rewrite closed at the first `</p>` so a label paragraph inside the table
+     truncated the wrapper.
+- **Fix:** reader (and calendar body) iframe sandbox is now
+  `allow-same-origin allow-modals allow-scripts`. Email JS still cannot run:
+  ammonia strips `<script>`, and `wrapEmailHtml` injects a CSP
+  (`default-src 'none'; script-src 'nonce-…'`) plus a nonce shim that
+  `postMessage`s click coordinates to the parent, which hit-tests and calls
+  `openUrl`. Hit-test walks ancestors for a unique link whose text is the
+  container's label (div/td chrome) and treats nbsp-only `<a>` as empty.
+  Sanitizer `</p>` match is depth-aware. `scripts/test-email-links.mjs`
+  covers the recovery cases + wrapper CSP/shim.
+- **Release:** v0.14.1 (Windows NSIS + Linux AppImage via `release.yml`).
 
 ### 2026-09-02 — Linux/Omarchy first-class: AppImage auto-update, ksni tray, autostart
 

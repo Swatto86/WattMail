@@ -12,10 +12,10 @@ import { openUrl } from "@tauri-apps/plugin-opener";
 import { save } from "@tauri-apps/plugin-dialog";
 import {
   adaptPlainEmail,
-  enhanceEmailButtons,
-  hrefFromEmailEvent,
+  EMAIL_FRAME_SANDBOX,
   readThemeColors,
   safeExternalHref,
+  wireEmailFrame,
   wrapEmailHtml,
 } from "./email-render";
 import "./styles.css";
@@ -218,7 +218,7 @@ function renderMessage(msg: MessageView): void {
     <div id="reader-invite" class="reader-invite hidden"></div>
     <div id="reader-attachments" class="reader-attachments"></div>
     ${banner}
-    <iframe class="reader-frame reader-frame--win" sandbox="allow-same-origin allow-modals" referrerpolicy="no-referrer"></iframe>
+    <iframe class="reader-frame reader-frame--win" sandbox="${EMAIL_FRAME_SANDBOX}" referrerpolicy="no-referrer"></iframe>
   `;
   appEl.querySelector<HTMLButtonElement>("#load-images")?.addEventListener("click", () => {
     void loadAndRender(true);
@@ -236,6 +236,7 @@ function renderMessage(msg: MessageView): void {
   const adapt = !msg.designed && dark;
   const theme = readThemeColors();
   frame.classList.toggle("is-paper-card", !adapt);
+  wireFrameLinks(frame);
   frame.addEventListener("load", () => {
     wireFrameLinks(frame);
     if (adapt) adaptPlainEmail(frame, theme);
@@ -428,13 +429,11 @@ function renderInviteBar(bar: HTMLDivElement, invite: MeetingInviteInfo): void {
 
 // ---- Links inside the email body ----
 function wireFrameLinks(frame: HTMLIFrameElement): void {
-  const doc = frame.contentDocument;
-  if (!doc) return;
-  enhanceEmailButtons(doc);
-  doc.addEventListener("click", (ev) => {
-    ev.preventDefault();
-    const href = safeExternalHref(hrefFromEmailEvent(ev));
-    if (href) void openUrl(href);
+  wireEmailFrame(frame, {
+    onClick: ({ href }) => {
+      const url = safeExternalHref(href);
+      if (url) void openUrl(url);
+    },
   });
 }
 

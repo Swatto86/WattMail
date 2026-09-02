@@ -188,6 +188,43 @@ export type WrapOpts = { adapt: boolean; bg: RGB; fg: RGB };
 // conservative default that matches the author's light-background assumption.
 // Plain mail in dark mode renders on the theme surface (adaptPlainEmail then
 // repairs author text colours).
+// WebKitGTK (Linux Tauri) treats a parent-attached listener on a sandboxed
+// srcdoc document as iframe script and drops it unless `allow-scripts` is set
+// (WebKit bug 218086). Email JS still cannot run: ammonia strips `<script>`,
+// and wrapEmailHtml's CSP allows only a nonce shim that postMessages clicks
+// to the parent. `allow-same-origin` stays so the parent can hit-test and
+// adapt colours; `allow-modals` is for print().
+export const EMAIL_FRAME_SANDBOX = "allow-same-origin allow-modals allow-scripts";
+
+const FRAME_MSG = "wattmail-frame";
+
+function randomNonce(): string {
+  const bytes = new Uint8Array(16);
+  crypto.getRandomValues(bytes);
+  let out = "";
+  for (let i = 0; i < bytes.length; i++) out += bytes[i].toString(16).padStart(2, "0");
+  return out;
+}
+
+function cspAndClickShim(): string {
+  const nonce = randomNonce();
+  const csp =
+    `default-src 'none'; img-src data:; style-src 'unsafe-inline'; ` +
+    `script-src 'nonce-${nonce}'; base-uri 'none'; form-action 'none'; object-src 'none'`;
+  // Capture-phase preventDefault so a javascript: href cannot run even with
+  // allow-scripts. Coordinates are iframe-viewport; the parent hit-tests.
+  const shim =
+    `<script nonce="${nonce}">(function(){` +
+    `function s(k,e){try{e.preventDefault()}catch(_){}` +
+    `parent.postMessage({t:"${FRAME_MSG}",kind:k,x:e.clientX,y:e.clientY},"*")}` +
+    `document.addEventListener("click",function(e){s("click",e)},true);` +
+    `document.addEventListener("contextmenu",function(e){s("contextmenu",e)},true);` +
+    `document.addEventListener("keydown",function(e){` +
+    `if(e.key==="Escape")parent.postMessage({t:"${FRAME_MSG}",kind:"escape"},"*")});` +
+    `})();</script>`;
+  return `<meta http-equiv="Content-Security-Policy" content="${csp}" />${shim}`;
+}
+
 export function wrapEmailHtml(inner: string, opts: WrapOpts): string {
   const bg = opts.adapt ? rgbToCss(opts.bg) : "#ffffff";
   const fg = opts.adapt ? rgbToCss(opts.fg) : "#1a1a1a";
@@ -197,6 +234,7 @@ export function wrapEmailHtml(inner: string, opts: WrapOpts): string {
     : "border-left: 3px solid #cbd5e1; color: #475569;";
   return `<!doctype html><html><head><meta charset="utf-8" />
 <meta name="referrer" content="no-referrer" />
+${cspAndClickShim()}
 <style>
   html, body { margin: 0; }
   body {
@@ -206,11 +244,17 @@ export function wrapEmailHtml(inner: string, opts: WrapOpts): string {
     word-wrap: break-word; overflow-wrap: anywhere;
   }
   a { color: ${link}; cursor: pointer; }
+  td:has(> a[href]), th:has(> a[href]) { cursor: pointer; }
   img { max-width: 100%; height: auto; }
   table { max-width: 100%; }
   pre { white-space: pre-wrap; }
   blockquote { margin: 0 0 0 12px; padding-left: 12px; ${quote} }
 </style></head><body>${inner}</body></html>`;
+}
+
+/** Head extras (CSP + click shim) for other sandboxed srcdoc frames (calendar). */
+export function sandboxedSrcdocHead(extraCss: string): string {
+  return `<meta charset="utf-8" /><meta name="referrer" content="no-referrer" />${cspAndClickShim()}<style>${extraCss}</style>`;
 }
 
 // ---- Reading-pane link hits ----
@@ -231,11 +275,14 @@ function eventElement(target: EventTarget | null): Element | null {
   return node.parentElement;
 }
 
+function visibleText(el: Element): string {
+  return (el.textContent ?? "").replace(/\u00a0/g, " ").replace(/\s+/g, " ").trim();
+}
+
 function isVisiblyEmptyAnchor(a: Element): boolean {
-  if ((a.textContent ?? "").trim()) return false;
+  if (visibleText(a)) return false;
   for (let i = 0; i < a.children.length; i++) {
     const child = a.children[i];
-    if ((child.textContent ?? "").trim()) return false;
     if (child.tagName === "IMG" || child.tagName === "SVG") return false;
   }
   return true;
@@ -261,21 +308,58 @@ function hrefFromCollapsedPrecedingAnchor(block: Element): string | null {
       break;
     }
     const anchors = sib.querySelectorAll("a[href]");
-    const emptyWrapper = !(sib.textContent ?? "").trim() && anchors.length === 1 && isVisiblyEmptyAnchor(anchors[0]);
+    const emptyWrapper =
+      !visibleText(sib) && anchors.length === 1 && isVisiblyEmptyAnchor(anchors[0]);
     if (emptyWrapper) {
       const href = hrefAttr(anchors[0]);
       if (href) return href;
     }
-    if ((sib.textContent ?? "").trim()) break;
+    if (visibleText(sib)) break;
     sib = sib.previousElementSibling;
   }
   return null;
+}
+
+function isButtonLike(el: Element): boolean {
+  const tag = el.tagName;
+  if (tag === "TD" || tag === "TH") return true;
+  const html = el as HTMLElement;
+  if (html.getAttribute?.("bgcolor")) return true;
+  const style = `${html.getAttribute?.("style") ?? ""};${html.style?.cssText ?? ""}`.toLowerCase();
+  const hasBg = style.includes("background");
+  const hasPad = style.includes("padding");
+  const hasRadius = style.includes("border-radius");
+  const inlineBlock = style.includes("display:inline-block") || style.includes("display:block");
+  return (hasBg && (hasPad || hasRadius || inlineBlock)) || (hasPad && hasRadius);
+}
+
+function uniqueHrefAnchor(el: Element): Element | null {
+  const links = el.querySelectorAll("a[href]");
+  let found: Element | null = null;
+  for (let i = 0; i < links.length; i++) {
+    if (!hrefAttr(links[i])) continue;
+    if (found) return null;
+    found = links[i];
+  }
+  return found;
 }
 
 /** Raw href of the email link the user clicked or right-clicked, if any. */
 export function hrefFromEmailEvent(ev: Event): string | null {
   const el = eventElement(ev.target);
   if (!el) return null;
+
+  if (typeof ev.composedPath === "function") {
+    const path = ev.composedPath();
+    for (let i = 0; i < path.length; i++) {
+      const node = path[i] as Node;
+      if (!node || node.nodeType !== ELEMENT_NODE) continue;
+      const item = node as Element;
+      if (item.tagName !== "A" && item.tagName !== "AREA") continue;
+      const href = hrefAttr(item);
+      if (href && (item.tagName === "AREA" || !isVisiblyEmptyAnchor(item))) return href;
+    }
+  }
 
   const direct = el.closest("a");
   const fromDirect = hrefAttr(direct);
@@ -286,26 +370,36 @@ export function hrefFromEmailEvent(ev: Event): string | null {
     if (href) return href;
   }
 
-  const cell = el.closest("td, th");
-  if (cell) {
-    const links = cell.querySelectorAll("a[href]");
-    const real = Array.from(links).filter((a) => !isVisiblyEmptyAnchor(a));
-    const pick = real.length === 1 ? real[0] : links.length === 1 ? links[0] : null;
-    const href = hrefAttr(pick);
-    if (href) return href;
-  }
-
-  let block: Element | null = el.closest("table") ?? el.closest("div");
+  let node: Element | null = el;
   const body = el.ownerDocument?.body ?? null;
-  while (block && block !== body) {
-    const href = hrefFromCollapsedPrecedingAnchor(block);
-    if (href) return href;
-    const parent = block.parentElement;
-    if (!parent || parent === body) break;
-    block = parent.closest("table") ?? parent.closest("div");
+  while (node && node !== body) {
+    const unique = uniqueHrefAnchor(node);
+    if (unique) {
+      const href = hrefAttr(unique);
+      if (href) {
+        const nodeText = visibleText(node);
+        const linkText = visibleText(unique);
+        // Standalone button: the container's text IS the label (padding/chrome
+        // around a single link). Extra prose in the same cell must not count.
+        if (linkText && nodeText === linkText) return href;
+        // Outlook padding-on-td with an empty (or &nbsp;) <a> plus sibling label.
+        if (isButtonLike(node) && isVisiblyEmptyAnchor(unique) && nodeText) return href;
+      }
+    }
+    const collapsed = hrefFromCollapsedPrecedingAnchor(node);
+    if (collapsed) return collapsed;
+    if (node.querySelectorAll("a[href]").length > 1) break;
+    node = node.parentElement;
   }
 
   return fromDirect;
+}
+
+/** Hit-test an iframe-viewport point onto the same recovery path as a click. */
+export function hrefFromEmailPoint(doc: Document, x: number, y: number): string | null {
+  const hit = doc.elementFromPoint(x, y);
+  if (!hit) return null;
+  return hrefFromEmailEvent({ target: hit } as unknown as Event);
 }
 
 /** http(s) URL the reading pane may open in the system browser. */
@@ -317,13 +411,82 @@ export function safeExternalHref(raw: string | null | undefined): string | null 
   return null;
 }
 
-/** Cursor hint on table-cell buttons whose <a> only wraps the label. */
+/** Cursor hint on button chrome whose <a> only wraps the label. */
 export function enhanceEmailButtons(doc: Document): void {
-  const cells = doc.querySelectorAll("td, th");
+  const cells = doc.querySelectorAll("td, th, div, p, span, center");
   for (let i = 0; i < cells.length; i++) {
     const cell = cells[i];
-    const links = cell.querySelectorAll("a[href]");
-    const real = Array.from(links).filter((a) => !isVisiblyEmptyAnchor(a) && hrefAttr(a));
-    if (real.length === 1) (cell as HTMLElement).style.cursor = "pointer";
+    const unique = uniqueHrefAnchor(cell);
+    if (!unique || !hrefAttr(unique)) continue;
+    const nodeText = visibleText(cell);
+    const linkText = visibleText(unique);
+    const empty = isVisiblyEmptyAnchor(unique);
+    if ((linkText && nodeText === linkText) || (empty && isButtonLike(cell) && nodeText)) {
+      (cell as HTMLElement).style.cursor = "pointer";
+    }
   }
+}
+
+export type EmailFrameClick = {
+  href: string | null;
+  clientX: number;
+  clientY: number;
+  selected: string;
+};
+
+export type EmailFrameHandlers = {
+  onClick: (ev: EmailFrameClick) => void;
+  onContextMenu?: (ev: EmailFrameClick) => void;
+  onEscape?: () => void;
+};
+
+type FrameMsg =
+  | { kind: "click" | "contextmenu"; x: number; y: number }
+  | { kind: "escape" };
+
+function parseEmailFrameMessage(e: MessageEvent, frame: HTMLIFrameElement): FrameMsg | null {
+  if (e.source !== frame.contentWindow) return null;
+  const d = e.data as { t?: unknown; kind?: unknown; x?: unknown; y?: unknown } | null;
+  if (!d || d.t !== FRAME_MSG) return null;
+  if (d.kind === "escape") return { kind: "escape" };
+  if ((d.kind === "click" || d.kind === "contextmenu") && typeof d.x === "number" && typeof d.y === "number") {
+    return { kind: d.kind, x: d.x, y: d.y };
+  }
+  return null;
+}
+
+/** Bind the srcdoc click shim to parent handlers. One binding per iframe. */
+const bridgeAborts = new WeakMap<HTMLIFrameElement, AbortController>();
+
+export function wireEmailFrame(frame: HTMLIFrameElement, handlers: EmailFrameHandlers): void {
+  bridgeAborts.get(frame)?.abort();
+  const ac = new AbortController();
+  bridgeAborts.set(frame, ac);
+  const { signal } = ac;
+  const doc = frame.contentDocument;
+  if (doc) {
+    try {
+      enhanceEmailButtons(doc);
+    } catch {
+      /* WebKit can throw if the document is mid-replace */
+    }
+  }
+  window.addEventListener(
+    "message",
+    (e: MessageEvent) => {
+      const msg = parseEmailFrameMessage(e, frame);
+      if (!msg) return;
+      if (msg.kind === "escape") {
+        handlers.onEscape?.();
+        return;
+      }
+      const live = frame.contentDocument;
+      const href = live ? hrefFromEmailPoint(live, msg.x, msg.y) : null;
+      const selected = frame.contentWindow?.getSelection()?.toString() ?? "";
+      const payload: EmailFrameClick = { href, clientX: msg.x, clientY: msg.y, selected };
+      if (msg.kind === "click") handlers.onClick(payload);
+      else handlers.onContextMenu?.(payload);
+    },
+    { signal },
+  );
 }

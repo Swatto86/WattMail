@@ -3,8 +3,8 @@
 //! Email HTML is hostile by default. Everything produced here is safe to drop
 //! into a sandboxed frame: scripts, event handlers, `<style>`, and all
 //! remote-loading elements (remote images, media, stylesheets, CSS `url(...)`)
-//! are removed. Links keep their href for display but are inert inside the
-//! frame's `sandbox`.
+//! are removed. Links keep their href for display but cannot navigate the
+//! frame; the parent opens http(s) targets in the system browser.
 //!
 //! Inline `style` attributes are **kept but sanitized** to an allowlist of safe
 //! properties (colours, borders, padding, alignment, …) with any `url(...)`,
@@ -14,7 +14,9 @@
 //!
 //! A pre-pass rewrites invalid `<p><a href>…<table>/<div>…</a></p>` button
 //! markup (HTML5 would otherwise close the paragraph — and the link — before
-//! the block, leaving a visible unclickable button).
+//! the block, leaving a visible unclickable button). Matching `</p>` is
+//! depth-aware so a label paragraph inside the table does not truncate the
+//! rewrite.
 
 use std::borrow::Cow;
 
@@ -252,6 +254,48 @@ fn contains_block_button_tag(lower: &str) -> bool {
         .any(|tag| contains_tag_open(lower, tag))
 }
 
+fn is_real_p_open(lower: &str, at: usize) -> bool {
+    lower[at..].starts_with("<p")
+        && lower
+            .as_bytes()
+            .get(at + 2)
+            .copied()
+            .is_none_or(|b| matches!(b, b'>' | b'/' | b' ' | b'\t' | b'\n' | b'\r'))
+}
+
+/// Index of the `</p>` that matches the paragraph whose inner HTML starts at
+/// `open_end`. Tracks nesting so a label `<p>` inside a table button does not
+/// steal the wrapper's close (the naive first-`</p>` match would rewrite a
+/// truncated slice and HTML5 would still eject the button from the `<a>`).
+fn find_matching_p_close(lower: &str, open_end: usize) -> Option<usize> {
+    let mut depth = 1;
+    let mut i = open_end;
+    while i < lower.len() {
+        let rel = lower[i..].find('<')?;
+        i += rel;
+        if lower[i..].starts_with("</p>") {
+            depth -= 1;
+            if depth == 0 {
+                return Some(i);
+            }
+            i += 4;
+            continue;
+        }
+        if is_real_p_open(lower, i) {
+            let gt = lower[i..].find('>')?;
+            let tag_end = i + gt + 1;
+            let self_close = lower.as_bytes().get(tag_end.saturating_sub(2)) == Some(&b'/');
+            if !self_close {
+                depth += 1;
+            }
+            i = tag_end;
+            continue;
+        }
+        i += 1;
+    }
+    None
+}
+
 /// Rename `<p>` wrappers that contain both an `<a>` and a block-level tag to
 /// `<div>`, keeping attributes. Those paragraphs are already invalid HTML;
 /// leaving them as `<p>` makes the parser eject the button from the link.
@@ -272,13 +316,9 @@ fn rewrite_paragraphs_that_wrap_block_links(html: &str) -> String {
             break;
         };
         let p_start = pos + rel;
-        let after_p = p_start + 2;
-        let next = lower.as_bytes().get(after_p).copied();
-        // `<pre>`/`<param>`/`<picture>` also start with `<p` — only a real
-        // paragraph tag continues here.
-        if !next.is_none_or(|b| matches!(b, b'>' | b'/' | b' ' | b'\t' | b'\n' | b'\r')) {
-            out.push_str(&html[pos..after_p]);
-            pos = after_p;
+        if !is_real_p_open(&lower, p_start) {
+            out.push_str(&html[pos..p_start + 2]);
+            pos = p_start + 2;
             continue;
         }
         let Some(gt) = html[p_start..].find('>') else {
@@ -291,11 +331,10 @@ fn rewrite_paragraphs_that_wrap_block_links(html: &str) -> String {
             pos = open_end;
             continue;
         }
-        let Some(close_rel) = lower[open_end..].find("</p>") else {
+        let Some(inner_end) = find_matching_p_close(&lower, open_end) else {
             out.push_str(&html[pos..]);
             break;
         };
-        let inner_end = open_end + close_rel;
         let close_end = inner_end + 4;
         let inner_lower = &lower[open_end..inner_end];
         if contains_tag_open(inner_lower, "<a") && contains_block_button_tag(inner_lower) {
@@ -661,6 +700,17 @@ mod tests {
             r##"<a href="https://claude.ai/magic-link/abc" target="_blank" style="line-height:100%;text-decoration:none;display:inline-block;max-width:100%;mso-padding-alt:0px;background:#191919;border-radius:8px;color:#ffffff;font-size:14px;font-weight:600;text-align:center;padding:12px 24px 12px 24px"><span><!--[if mso]><i style="letter-spacing: 24px;mso-font-width:-100%;mso-text-raise:18" hidden>&nbsp;</i><![endif]--></span><span style="max-width:100%;display:inline-block;line-height:120%;text-decoration:none;text-transform:none;mso-padding-alt:0px;mso-text-raise:9px">Sign in</span><span><!--[if mso]><i style="letter-spacing: 24px;mso-font-width:-100%" hidden>&nbsp;</i><![endif]--></span></a>"##,
             "https://claude.ai/magic-link/abc",
             "Sign in",
+        );
+    }
+
+    #[test]
+    fn nested_paragraph_inside_table_button_stays_inside_the_anchor() {
+        // Labels wrapped in their own <p> used to make the rewrite close at the
+        // inner </p>, leaving the table outside the <a>.
+        assert_link_wraps(
+            r##"<p align="center"><a href="https://example.com/confirm"><table><tr><td bgcolor="#f97316"><p style="color:#ffffff;">Confirm Email</p></td></tr></table></a></p>"##,
+            "https://example.com/confirm",
+            "Confirm Email",
         );
     }
 

@@ -26,10 +26,10 @@ import {
 import { showConfirm, showPrompt, isDialogOpen } from "./dialog";
 import {
   adaptPlainEmail,
-  enhanceEmailButtons,
-  hrefFromEmailEvent,
+  EMAIL_FRAME_SANDBOX,
   readThemeColors,
   safeExternalHref,
+  wireEmailFrame,
   wrapEmailHtml,
 } from "./email-render";
 import "./styles.css";
@@ -1630,7 +1630,7 @@ function renderReader(msg: MessageView): void {
     <div id="reader-invite" class="reader-invite hidden"></div>
     <div id="reader-attachments" class="reader-attachments"></div>
     ${banner}
-    <iframe class="reader-frame" sandbox="allow-same-origin allow-modals" referrerpolicy="no-referrer"></iframe>
+    <iframe class="reader-frame" sandbox="${EMAIL_FRAME_SANDBOX}" referrerpolicy="no-referrer"></iframe>
   `;
   readerEl
     .querySelector<HTMLButtonElement>("#load-images")
@@ -1661,6 +1661,7 @@ function renderReader(msg: MessageView): void {
   const adapt = !msg.designed && dark;
   const theme = readThemeColors();
   frame.classList.toggle("is-paper-card", !adapt);
+  wireFrameLinks(frame);
   frame.addEventListener("load", () => {
     wireFrameLinks(frame);
     if (adapt) adaptPlainEmail(frame, theme);
@@ -1801,45 +1802,31 @@ function reRenderOpenMessage(): void {
   void probeMeetingInvite(lastMessage.id);
 }
 
-// Intercept clicks inside the (script-disabled, same-origin) email frame so links
-// open in the system browser — where the user can see the real destination —
-// instead of navigating the frame. Also intercept right-click on links to offer
-// a "Copy link address" context menu.
+// Intercept clicks inside the email frame so links open in the system browser
+// instead of navigating the frame. The iframe document itself cannot run
+// parent-attached listeners on WebKitGTK; wrapEmailHtml injects a nonce shim
+// that postMessages coordinates here (see EMAIL_FRAME_SANDBOX).
 function wireFrameLinks(frame: HTMLIFrameElement): void {
-  const doc = frame.contentDocument;
-  if (!doc) return;
-  enhanceEmailButtons(doc);
-  doc.addEventListener("click", (ev) => {
-    ev.preventDefault();
-    // A click inside the iframe never reaches the parent document, so dismiss
-    // the floating menus here — otherwise the link menu would stay open when the
-    // user clicks body text inside the message.
-    linkCtxMenu.classList.add("hidden");
-    hideEditMenu();
-    const href = safeExternalHref(hrefFromEmailEvent(ev));
-    if (href) void openUrl(href);
-  });
-  // Escape inside the iframe also can't reach the parent — dismiss here too.
-  doc.addEventListener("keydown", (ev) => {
-    if (ev.key === "Escape") {
+  wireEmailFrame(frame, {
+    onClick: ({ href }) => {
       linkCtxMenu.classList.add("hidden");
       hideEditMenu();
-    }
-  });
-  doc.addEventListener("contextmenu", (ev) => {
-    // Never show the webview's native menu inside the reading pane either.
-    ev.preventDefault();
-    const href = hrefFromEmailEvent(ev);
-    if (href) {
-      showLinkContextMenu(ev.clientX, ev.clientY, href, frame);
-      return;
-    }
-    // Off a link: offer Copy for any selected body text. The selection lives in
-    // the iframe's own window; map the click point into the parent viewport.
-    const selected = frame.contentWindow?.getSelection()?.toString() ?? "";
-    if (!selected) return;
-    const rect = frame.getBoundingClientRect();
-    showEditMenu(rect.left + ev.clientX, rect.top + ev.clientY, null, selected);
+      const url = safeExternalHref(href);
+      if (url) void openUrl(url);
+    },
+    onContextMenu: ({ href, clientX, clientY, selected }) => {
+      if (href) {
+        showLinkContextMenu(clientX, clientY, href, frame);
+        return;
+      }
+      if (!selected) return;
+      const rect = frame.getBoundingClientRect();
+      showEditMenu(rect.left + clientX, rect.top + clientY, null, selected);
+    },
+    onEscape: () => {
+      linkCtxMenu.classList.add("hidden");
+      hideEditMenu();
+    },
   });
 }
 
