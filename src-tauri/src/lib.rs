@@ -7,12 +7,18 @@ mod accounts;
 mod commands;
 mod paths;
 mod settings;
+#[cfg(target_os = "linux")]
+mod tray_linux;
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::RwLock;
 
+// Tauri's native tray is used only on macOS/Windows; Linux uses ksni (see
+// `tray_linux`) because Tauri tray click events are unsupported there.
+#[cfg(not(target_os = "linux"))]
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
+#[cfg(not(target_os = "linux"))]
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{AppHandle, Emitter, Manager, WindowEvent};
 
@@ -88,6 +94,9 @@ pub fn run() {
         .manage(NotificationState::default())
         .manage(MessageWindows::default())
         .setup(move |app| {
+            #[cfg(target_os = "linux")]
+            tray_linux::spawn(app.handle().clone());
+            #[cfg(not(target_os = "linux"))]
             build_tray(app.handle())?;
             // Safety net: if the frontend never reveals the window (e.g. a script
             // error), show it anyway — unless we were autostarted into the tray.
@@ -214,7 +223,9 @@ pub fn run() {
         .expect("error while running WattMail");
 }
 
-/// Build the system-tray icon with a Show / Settings / Quit menu.
+/// Build the system-tray icon with a Show / Settings / Quit menu (macOS/Windows;
+/// Linux uses `tray_linux`).
+#[cfg(not(target_os = "linux"))]
 fn build_tray(app: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
     let show = MenuItem::with_id(app, "show", "Show WattMail", true, None::<&str>)?;
     let settings = MenuItem::with_id(app, "settings", "Settings…", true, None::<&str>)?;
@@ -293,10 +304,6 @@ pub(crate) fn play_notify_sound() {}
 /// includes the signed-in account email when available (read from the cached
 /// account state).
 pub(crate) fn update_tray(app: &AppHandle, unread: u32) {
-    let Some(tray) = app.tray_by_id("main") else {
-        return;
-    };
-
     // Try to read the cached account email for a richer tooltip. This is
     // best-effort — if the store isn't available the tooltip falls back to the
     // count-only form.
@@ -308,11 +315,21 @@ pub(crate) fn update_tray(app: &AppHandle, unread: u32) {
         (n, Some(email)) => format!("WattMail — {email} — {n} unread emails"),
         (n, None) => format!("WattMail — {n} unread emails"),
     };
-    let _ = tray.set_tooltip(Some(tooltip));
-    if unread > 0 {
-        let _ = tray.set_icon(Some(tauri::include_image!("icons/tray-unread.png")));
-    } else if let Some(icon) = app.default_window_icon().cloned() {
-        let _ = tray.set_icon(Some(icon));
+
+    #[cfg(target_os = "linux")]
+    tray_linux::update(unread, tooltip);
+
+    #[cfg(not(target_os = "linux"))]
+    {
+        let Some(tray) = app.tray_by_id("main") else {
+            return;
+        };
+        let _ = tray.set_tooltip(Some(tooltip));
+        if unread > 0 {
+            let _ = tray.set_icon(Some(tauri::include_image!("icons/tray-unread.png")));
+        } else if let Some(icon) = app.default_window_icon().cloned() {
+            let _ = tray.set_icon(Some(icon));
+        }
     }
 }
 

@@ -29,3 +29,11 @@ dirs = "6"
 wattmail-domain = { workspace = true }
 wattmail-application = { workspace = true }
 wattmail-infrastructure = { workspace = true }
+
+# Linux tray: Tauri's tray-icon click events are unsupported on Linux
+# (libappindicator limitation), so on Linux we register a StatusNotifierItem
+# directly via ksni to get real left-click-to-open on Wayland bars (waybar on
+# Omarchy/Hyprland). png decodes the bundled tray icons into ARGB32 pixmaps.
+[target.'cfg(target_os = "linux")'.dependencies]
+ksni = { version = "0.3", features = ["blocking"] }
+png = "0.17"
