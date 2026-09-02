@@ -102,6 +102,40 @@ Entra app registration (public, not secret):
 
 ## Progress log
 
+### 2026-09-02 — Linux/Omarchy first-class: AppImage auto-update, ksni tray, autostart
+
+- **Goal:** make Omarchy (Arch + Hyprland/waybar) a first-class target. Three gaps
+  fixed: no Linux auto-update, tray didn't open the app on click, autostart unclear.
+- **Auto-update (packaging + CI):** added `appimage` to `bundle.targets`
+  (`src-tauri/tauri.conf.json`; Tauri filters targets per-platform, so Windows still
+  builds only NSIS and bare `tauri build` is unchanged there). `release.yml` is now a
+  serialized matrix: `release-windows` creates the release + NSIS + `latest.json`
+  (`windows-x86_64`); `release-linux` (runs `needs: release-windows` to avoid the
+  parallel `latest.json` read-merge-upload race) builds the signed AppImage and
+  merges `linux-x86_64`; a final `checksums` job writes `SHA256SUMS`. Updater endpoint
+  (`releases/latest/download/latest.json`) and pubkey unchanged; the AppImage is signed
+  with the same minisign key via `TAURI_SIGNING_PRIVATE_KEY`.
+- **Tray (`src-tauri/src/tray_linux.rs`, new):** Tauri's tray click events are
+  unsupported on Linux (libappindicator — `on_tray_icon_event` never fires). On Linux we
+  now register a StatusNotifierItem via **ksni** (`[target.'cfg(target_os="linux")']`
+  deps: `ksni` blocking, `png`) and route SNI `Activate` (waybar primary click) to
+  `show_main`; right-click keeps the Show / Settings / Quit menu. `spawn()` uses
+  `assume_sni_available(true)` so autostart-into-tray before waybar is up still works.
+  `lib.rs` branches: `tray_linux::spawn/update` on Linux, `build_tray` (Tauri) on
+  macOS/Windows; tray/menu imports and `build_tray` are `cfg(not(target_os="linux"))`.
+  Icons decoded from the bundled RGBA PNGs to ARGB32.
+- **Autostart:** `tauri-plugin-autostart` 2.5.1 already uses `$APPIMAGE` (via
+  `app.env().appimage`) for the `.desktop` `Exec`, so shipping the AppImage is what makes
+  it correct/stable. Verified live: running the AppImage sets `APPIMAGE`, and toggling
+  "Start at login" writes `~/.config/autostart/WattMail.desktop` with
+  `Exec=<appimage> --hidden` (not the ephemeral mount). Omarchy's uwsm session activates
+  the XDG-autostart systemd target, so the entry runs at login. UI label
+  "Start with Windows" → "Start at login".
+- **Verified on this Linux VM:** `npm run build`, `cargo fmt`/`clippy -D warnings`,
+  `cargo test --workspace` (203 pass); debug AppImage built and launched; autostart
+  `.desktop` path confirmed. Tray click-to-open needs a real SNI host (waybar) to verify
+  visually — code path runs without a watcher (no crash) thanks to `assume_sni_available`.
+
 ### 2026-09-02 — Graphical email button links are clickable (v0.13.2)
 
 - **Symptom:** confirmation / magic-link mail (Firecrawl, Claude.ai, …) rendered

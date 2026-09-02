@@ -7,9 +7,11 @@ Tauri**. Privacy and security are first-class: email is sanitized and rendered i
 a sandboxed frame, remote images are proxied, and the local cache is encrypted at
 rest.
 
-**Windows** is the shipped, proven target (NSIS installer + signed auto-update).
-The code is cross-platform-capable (paths and the keychain backend are abstracted
-per-OS) but macOS and Linux are only compile-checked in CI — not built or run live.
+**Windows** is the primary shipped target (NSIS installer + signed auto-update).
+**Linux** is a first-class target too: a signed **AppImage** with in-place
+auto-update, a StatusNotifierItem tray that opens the app on a primary click
+(works on Wayland bars such as waybar on **Omarchy**/Hyprland), and login
+autostart. **macOS** remains compile-checked in CI only — not built or run live.
 
 > Status: **v0.13.2** — functional and actively developed. See [`CONTEXT.md`](CONTEXT.md)
 > for the live progress log, architecture decisions, and roadmap.
@@ -59,8 +61,9 @@ per-OS) but macOS and Linux are only compile-checked in CI — not built or run 
   webview); the cache is AES-256-GCM encrypted at rest.
 - **Auto-update** — checks the latest GitHub release on launch and installs signed
   (minisign) updates in place.
-- **Start with Windows** — optionally launches hidden into the system tray at login,
-  syncing in the background.
+- **Start at login** — optionally launches hidden into the system tray at login,
+  syncing in the background (Windows Run key; Linux XDG autostart, honored by
+  Omarchy/Hyprland's uwsm-managed session; macOS launch agent).
 - Light / dark / system themes, system-tray, sort, resizable panes.
 
 ## Security & privacy model
@@ -128,8 +131,12 @@ cargo test --workspace                     # pure-logic + adapter tests
 ### Build an installer
 
 ```sh
-npm run tauri build    # NSIS installer under target/release/bundle/
+npm run tauri build                        # Windows: NSIS installer under target/release/bundle/
+npm run tauri build -- --bundles appimage  # Linux: signed AppImage (auto-updatable)
 ```
+
+Auto-update artifacts (`latest.json` + signatures) are produced when
+`TAURI_SIGNING_PRIVATE_KEY` is set; CI does this per-platform on tag push.
 
 ## Additional provider state
 
