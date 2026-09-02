@@ -1348,7 +1348,7 @@ pub async fn open_attachment(
     let (stem, _ext) = safe_attachment_name(&att.name);
     let path = unique_attachment_path(&dir, &stem, ".pdf");
     std::fs::write(&path, bytes).map_err(|e| e.to_string())?;
-    tauri_plugin_opener::open_path(&path, None::<&str>).map_err(|e| e.to_string())
+    crate::external_open::open_path(&path)
 }
 
 #[tauri::command]

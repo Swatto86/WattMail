@@ -8,7 +8,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { emit, listen } from "@tauri-apps/api/event";
-import { openUrl } from "@tauri-apps/plugin-opener";
+import { openExternalUrl } from "./external";
 import { save } from "@tauri-apps/plugin-dialog";
 import {
   adaptPlainEmail,
@@ -435,7 +435,7 @@ function wireFrameLinks(frame: HTMLIFrameElement): void {
   doc.addEventListener("click", (ev) => {
     ev.preventDefault();
     const href = safeExternalHref(hrefFromEmailEvent(ev));
-    if (href) void openUrl(href);
+    if (href) openExternalUrl(href);
   });
 }
 

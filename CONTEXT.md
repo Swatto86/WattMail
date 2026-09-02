@@ -102,6 +102,31 @@ Entra app registration (public, not secret):
 
 ## Progress log
 
+### 2026-09-02 — AppImage poisoned the browser's environment (v0.14.3)
+
+- **Symptom:** identical to the v0.14.2 bug — clicking a link in an email did nothing — which
+  is why one fix looked like it had failed. Two independent causes, one symptom.
+- **Root cause:** the AppImage's `AppRun` exports `LD_LIBRARY_PATH` (plus GTK/GIO/Qt lookup
+  paths) pointing at the bundled Ubuntu 22.04 libraries, and **every child process inherits
+  them**. The click handler fired correctly after v0.14.2 and the app asked the desktop to
+  open the browser; Chromium then loaded the AppImage's older libbrotli and died before
+  drawing a window: `undefined symbol: BrotliDecoderAttachDictionary`.
+- **Fix:** `src-tauri/src/external_open.rs` strips the injected variables from anything handed
+  to the desktop and prunes `$APPDIR` entries from `PATH`/`XDG_DATA_DIRS`. Per-spawn, never by
+  clearing our own environment — WebKit's network and web processes are children too and do
+  need the bundled libraries. Also fixes the same latent bug for opening PDF attachments, and
+  re-checks the URL scheme in Rust because these hrefs come from email HTML.
+- **Verification lesson (the important part).** v0.14.2 was verified with the raw binary in a
+  clean shell. That is not how the shipped app runs, and this bug lives *entirely* in the
+  packaging environment, so the check could not have caught it. Verifying a desktop change
+  means reproducing the packaging environment, not just the code. This one was confirmed by
+  putting only the AppImage's libbrotli on `LD_LIBRARY_PATH` with `APPDIR`/`APPIMAGE` set —
+  enough to kill any uncleaned browser spawn while leaving the app runnable — and clicking a
+  real link.
+- **Known gap:** a local AppImage cannot be built on Arch (see the gotcha below), so there is
+  still no local artifact that is byte-for-byte what users get. An AppImage smoke test in CI
+  is the real answer.
+
 ### 2026-09-02 — Reading-pane links were dead on Linux (v0.14.2)
 
 - **Symptom:** clicking any link in an email did nothing on the Linux build.
@@ -2510,6 +2535,10 @@ pending (needs a signed-in window).
   gdk-pixbuf2 2.44 no longer ships `/usr/lib/gdk-pixbuf-2.0/2.10.0`. CI is unaffected
   (Ubuntu still has the old layout), so the published AppImage is fine. For local testing,
   run `target/release/wattmail-desktop` directly — it is the same binary the AppImage wraps.
+- **Never hand a URL or file to the desktop with our own environment.** Inside an AppImage
+  every child inherits `AppRun`'s bundled `LD_LIBRARY_PATH`, which stops the user's browser
+  from starting at all. Everything external goes through `src-tauri/src/external_open.rs`;
+  do not call `tauri_plugin_opener` directly from a command or from the frontend.
 - **Release profile** lives at the workspace root (`[profile.release]`); member-crate
   profiles are ignored.
 - **`panic = "abort"`** in release — no test relies on unwinding.

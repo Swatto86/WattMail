@@ -2,7 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { listen, emit } from "@tauri-apps/api/event";
 import { getVersion } from "@tauri-apps/api/app";
-import { openUrl } from "@tauri-apps/plugin-opener";
+import { openExternalUrl } from "./external";
 import { open, save } from "@tauri-apps/plugin-dialog";
 import { check, type Update } from "@tauri-apps/plugin-updater";
 import { relaunch } from "@tauri-apps/plugin-process";
@@ -1818,7 +1818,7 @@ function wireFrameLinks(frame: HTMLIFrameElement): void {
     linkCtxMenu.classList.add("hidden");
     hideEditMenu();
     const href = safeExternalHref(hrefFromEmailEvent(ev));
-    if (href) void openUrl(href);
+    if (href) openExternalUrl(href);
   });
   // Escape inside the iframe also can't reach the parent — dismiss here too.
   doc.addEventListener("keydown", (ev) => {
@@ -3408,7 +3408,7 @@ aboutCloseBtn.addEventListener("click", closeAbout);
 aboutUpdatesBtn.addEventListener("click", () => void aboutCheckUpdates());
 aboutRepo.addEventListener("click", (e) => {
   e.preventDefault();
-  void openUrl(REPO_URL);
+  openExternalUrl(REPO_URL);
 });
 aboutOverlay.addEventListener("click", (e) => {
   if (e.target === aboutOverlay) closeAbout();

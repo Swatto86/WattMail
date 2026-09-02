@@ -14,7 +14,7 @@
 // date-only and are never run through zone maths.
 
 import { invoke } from "@tauri-apps/api/core";
-import { openUrl } from "@tauri-apps/plugin-opener";
+import { openExternalUrl } from "./external";
 import { sendNotification } from "@tauri-apps/plugin-notification";
 import { showConfirm, showTernary } from "./dialog";
 import { EMAIL_FRAME_SANDBOX } from "./email-render";
@@ -367,7 +367,7 @@ function statusLabel(s: string): string {
 // from the meeting organizer (untrusted), so a crafted file:/ms-*: scheme must
 // never reach the OS shell opener.
 function openExternal(url: string | null | undefined): void {
-  if (url && /^https?:\/\//i.test(url)) void openUrl(url);
+  if (url && /^https?:\/\//i.test(url)) openExternalUrl(url);
 }
 
 function statusClass(s: string): string {

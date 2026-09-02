@@ -5,6 +5,7 @@
 
 mod accounts;
 mod commands;
+mod external_open;
 mod paths;
 mod settings;
 #[cfg(target_os = "linux")]
@@ -148,6 +149,7 @@ pub fn run() {
             _ => {}
         })
         .invoke_handler(tauri::generate_handler![
+            external_open::open_external,
             commands::is_signed_in,
             commands::list_accounts,
             commands::add_account,
