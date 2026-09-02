@@ -2503,6 +2503,13 @@ pending (needs a signed-in window).
   on Windows, `dirs`-backed elsewhere), alongside `settings.json`. `rusqlite` uses the **bundled**
   SQLite (compiled from source via the MSVC toolchain), so there's no system SQLite dependency to
   ship.
+- **Local AppImage build on Arch/Omarchy is blocked upstream.** `npx tauri build --config
+  src-tauri/tauri.local-appimage.json` (unsigned, no updater artifacts) gets as far as
+  linuxdeploy and then fails: its bundled `strip` cannot read Arch's `.relr.dyn` sections
+  (`NO_STRIP=true` works around that one), and its GTK plugin then aborts because
+  gdk-pixbuf2 2.44 no longer ships `/usr/lib/gdk-pixbuf-2.0/2.10.0`. CI is unaffected
+  (Ubuntu still has the old layout), so the published AppImage is fine. For local testing,
+  run `target/release/wattmail-desktop` directly — it is the same binary the AppImage wraps.
 - **Release profile** lives at the workspace root (`[profile.release]`); member-crate
   profiles are ignored.
 - **`panic = "abort"`** in release — no test relies on unwinding.
