@@ -13,7 +13,7 @@ auto-update, a StatusNotifierItem tray that opens the app on a primary click
 (works on Wayland bars such as waybar on **Omarchy**/Hyprland), and login
 autostart. **macOS** remains compile-checked in CI only — not built or run live.
 
-> Status: **v0.13.2** — functional and actively developed. See [`CONTEXT.md`](CONTEXT.md)
+> Status: **v0.14.0** — functional and actively developed. See [`CONTEXT.md`](CONTEXT.md)
 > for the live progress log, architecture decisions, and roadmap.
 
 ## Features
