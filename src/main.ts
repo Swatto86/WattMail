@@ -485,7 +485,7 @@ appRoot.innerHTML = /* html */ `
         <input type="checkbox" id="set-tray" class="toggle toggle-sm toggle-primary" />
       </label>
       <label class="settings-row">
-        <span>Start with Windows<br /><span class="hint">Launch hidden in the system tray at sign-in</span></span>
+        <span>Start at login<br /><span class="hint">Launch hidden in the system tray at sign-in</span></span>
         <input type="checkbox" id="set-autostart" class="toggle toggle-sm toggle-primary" />
       </label>
       <label class="settings-row">
