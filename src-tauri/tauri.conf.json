@@ -33,7 +33,7 @@
   "bundle": {
     "active": true,
     "createUpdaterArtifacts": true,
-    "targets": ["nsis"],
+    "targets": ["nsis", "appimage"],
     "publisher": "Swatto",
     "copyright": "© 2026 Swatto",
     "license": "MIT",

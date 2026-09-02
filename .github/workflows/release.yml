@@ -5,7 +5,10 @@ on:
     tags: ["v*"]
 
 jobs:
-  release:
+  # Windows is the primary shipped target. This job creates the GitHub release,
+  # builds the NSIS installer + signed updater artifacts, writes the initial
+  # latest.json (windows-x86_64), and uploads the portable exe.
+  release-windows:
     runs-on: windows-latest
     permissions:
       contents: write
@@ -35,6 +38,7 @@ jobs:
           releaseBody: Automated build of WattMail ${{ github.ref_name }}.
           releaseDraft: false
           prerelease: false
+          args: --bundles nsis
 
       - name: Stage and upload portable exe
         shell: pwsh
@@ -51,9 +55,73 @@ jobs:
           Write-Host "Uploading $dest ($([math]::Round($exe.Length/1MB,1)) MB)"
           gh release upload $env:GITHUB_REF_NAME $dest --clobber --repo $env:GITHUB_REPOSITORY
 
-          New-Item -ItemType Directory -Path release-assets | Out-Null
-          gh release download $env:GITHUB_REF_NAME --dir release-assets --repo $env:GITHUB_REPOSITORY
-          Get-ChildItem release-assets -File | Sort-Object Name | ForEach-Object {
-            "$((Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant())  $($_.Name)"
-          } | Set-Content SHA256SUMS.txt -Encoding ascii
-          gh release upload $env:GITHUB_REF_NAME SHA256SUMS.txt --clobber --repo $env:GITHUB_REPOSITORY
+  # Linux (Omarchy/Arch and other distros) ships as a signed AppImage, which the
+  # Tauri updater can install in place. Runs AFTER the Windows job so its
+  # tauri-action merges the linux-x86_64 entry into the existing latest.json
+  # instead of racing it (parallel matrix legs clobber that shared file).
+  release-linux:
+    needs: release-windows
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@1.96.0
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install Linux system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libgtk-3-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            libxdo-dev \
+            libsoup-3.0-dev \
+            patchelf
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      # Builds the AppImage + .AppImage.sig and merges linux-x86_64 into the
+      # release's latest.json (createUpdaterArtifacts is set in tauri.conf.json).
+      - uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ""
+        with:
+          tagName: ${{ github.ref_name }}
+          releaseName: WattMail ${{ github.ref_name }}
+          releaseDraft: false
+          prerelease: false
+          args: --bundles appimage
+
+  # Single-writer checksum step: runs after both platform builds so the
+  # SHA256SUMS covers every published asset (installer, portable exe, AppImage,
+  # latest.json, signatures).
+  checksums:
+    needs: [release-windows, release-linux]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Generate and upload SHA256SUMS
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          mkdir release-assets
+          gh release download "$GITHUB_REF_NAME" --dir release-assets --repo "$GITHUB_REPOSITORY" --pattern '*' --clobber
+          # Exclude a previous SHA256SUMS from the hash set, then hash the rest.
+          rm -f release-assets/SHA256SUMS.txt
+          ( cd release-assets && sha256sum $(ls -1 | sort) > ../SHA256SUMS.txt )
+          gh release upload "$GITHUB_REF_NAME" SHA256SUMS.txt --clobber --repo "$GITHUB_REPOSITORY"
