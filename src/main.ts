@@ -24,7 +24,14 @@ import {
   startEventReminders,
 } from "./calendar";
 import { showConfirm, showPrompt, isDialogOpen } from "./dialog";
-import { adaptPlainEmail, readThemeColors, wrapEmailHtml } from "./email-render";
+import {
+  adaptPlainEmail,
+  enhanceEmailButtons,
+  hrefFromEmailEvent,
+  readThemeColors,
+  safeExternalHref,
+  wrapEmailHtml,
+} from "./email-render";
 import "./styles.css";
 
 // ---- Backend DTOs (mirror src-tauri/src/commands.rs) ----
@@ -1801,6 +1808,7 @@ function reRenderOpenMessage(): void {
 function wireFrameLinks(frame: HTMLIFrameElement): void {
   const doc = frame.contentDocument;
   if (!doc) return;
+  enhanceEmailButtons(doc);
   doc.addEventListener("click", (ev) => {
     ev.preventDefault();
     // A click inside the iframe never reaches the parent document, so dismiss
@@ -1808,9 +1816,8 @@ function wireFrameLinks(frame: HTMLIFrameElement): void {
     // user clicks body text inside the message.
     linkCtxMenu.classList.add("hidden");
     hideEditMenu();
-    const anchor = (ev.target as HTMLElement | null)?.closest?.("a");
-    const href = anchor?.getAttribute("href") ?? "";
-    if (/^https?:\/\//i.test(href)) void openUrl(href);
+    const href = safeExternalHref(hrefFromEmailEvent(ev));
+    if (href) void openUrl(href);
   });
   // Escape inside the iframe also can't reach the parent — dismiss here too.
   doc.addEventListener("keydown", (ev) => {
@@ -1822,8 +1829,7 @@ function wireFrameLinks(frame: HTMLIFrameElement): void {
   doc.addEventListener("contextmenu", (ev) => {
     // Never show the webview's native menu inside the reading pane either.
     ev.preventDefault();
-    const anchor = (ev.target as HTMLElement | null)?.closest?.("a");
-    const href = anchor?.getAttribute("href") ?? "";
+    const href = hrefFromEmailEvent(ev);
     if (href) {
       showLinkContextMenu(ev.clientX, ev.clientY, href, frame);
       return;

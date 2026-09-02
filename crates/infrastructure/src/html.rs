@@ -11,6 +11,10 @@
 //! `expression`, `@import`, or `javascript:` rejected — so styled mail (tables,
 //! coloured ticks) renders with fidelity without reopening a remote-content
 //! vector. Images are stripped by default; `allow_images` keeps them.
+//!
+//! A pre-pass rewrites invalid `<p><a href>…<table>/<div>…</a></p>` button
+//! markup (HTML5 would otherwise close the paragraph — and the link — before
+//! the block, leaving a visible unclickable button).
 
 use std::borrow::Cow;
 
@@ -154,7 +158,12 @@ pub fn sanitize_email(content: &str, is_html: bool, allow_images: bool) -> Sanit
     // reads; it can never reintroduce blocked content.
     let is_designed = has_own_background(content);
 
-    let html = builder.clean(content).to_string();
+    // HTML5 closes `<p>` before a nested `<table>`/`<div>`/heading, which
+    // splits `<p><a href><table>…button…</table></a></p>` into an empty link
+    // plus an unlinked visual. Rename those invalid paragraphs first so the
+    // `<a>` still wraps the button after parsing.
+    let rewritten = rewrite_paragraphs_that_wrap_block_links(content);
+    let html = builder.clean(&rewritten).to_string();
 
     Sanitized {
         html,
@@ -198,6 +207,109 @@ fn is_safe_css_value(value: &str) -> bool {
         && !lower.contains("javascript:")
         && !lower.contains("@import")
         && !lower.contains("/*")
+}
+
+/// Tags that close an open `<p>` in HTML5 and are used as "bulletproof" email
+/// button chrome. Detected as real start tags (so `<div` matches `<div>` /
+/// `<div class=…>` but not `<divine>`).
+const BLOCK_BUTTON_TAGS: &[&str] = &[
+    "<table",
+    "<div",
+    "<h1",
+    "<h2",
+    "<h3",
+    "<h4",
+    "<h5",
+    "<h6",
+    "<ul",
+    "<ol",
+    "<pre",
+    "<blockquote",
+    "<center",
+    "<section",
+    "<article",
+    "<header",
+    "<footer",
+];
+
+/// True when `lower` (already ASCII-lowercased) contains a real start tag
+/// whose name is `tag` (`tag` includes the leading `<`, e.g. `"<table"`).
+fn contains_tag_open(lower: &str, tag: &str) -> bool {
+    let mut rest = lower;
+    while let Some(i) = rest.find(tag) {
+        let after = rest.as_bytes().get(i + tag.len()).copied();
+        if after.is_none_or(|b| matches!(b, b'>' | b'/' | b' ' | b'\t' | b'\n' | b'\r')) {
+            return true;
+        }
+        rest = &rest[i + tag.len()..];
+    }
+    false
+}
+
+fn contains_block_button_tag(lower: &str) -> bool {
+    BLOCK_BUTTON_TAGS
+        .iter()
+        .any(|tag| contains_tag_open(lower, tag))
+}
+
+/// Rename `<p>` wrappers that contain both an `<a>` and a block-level tag to
+/// `<div>`, keeping attributes. Those paragraphs are already invalid HTML;
+/// leaving them as `<p>` makes the parser eject the button from the link.
+fn rewrite_paragraphs_that_wrap_block_links(html: &str) -> String {
+    let lower = html.to_ascii_lowercase();
+    if !contains_tag_open(&lower, "<p")
+        || !contains_tag_open(&lower, "<a")
+        || !contains_block_button_tag(&lower)
+    {
+        return html.to_string();
+    }
+
+    let mut out = String::with_capacity(html.len() + 8);
+    let mut pos = 0;
+    while pos < html.len() {
+        let Some(rel) = lower[pos..].find("<p") else {
+            out.push_str(&html[pos..]);
+            break;
+        };
+        let p_start = pos + rel;
+        let after_p = p_start + 2;
+        let next = lower.as_bytes().get(after_p).copied();
+        // `<pre>`/`<param>`/`<picture>` also start with `<p` — only a real
+        // paragraph tag continues here.
+        if !next.is_none_or(|b| matches!(b, b'>' | b'/' | b' ' | b'\t' | b'\n' | b'\r')) {
+            out.push_str(&html[pos..after_p]);
+            pos = after_p;
+            continue;
+        }
+        let Some(gt) = html[p_start..].find('>') else {
+            out.push_str(&html[pos..]);
+            break;
+        };
+        let open_end = p_start + gt + 1;
+        if html.as_bytes().get(open_end.saturating_sub(2)) == Some(&b'/') {
+            out.push_str(&html[pos..open_end]);
+            pos = open_end;
+            continue;
+        }
+        let Some(close_rel) = lower[open_end..].find("</p>") else {
+            out.push_str(&html[pos..]);
+            break;
+        };
+        let inner_end = open_end + close_rel;
+        let close_end = inner_end + 4;
+        let inner_lower = &lower[open_end..inner_end];
+        if contains_tag_open(inner_lower, "<a") && contains_block_button_tag(inner_lower) {
+            out.push_str(&html[pos..p_start]);
+            out.push_str("<div");
+            out.push_str(&html[p_start + 2..open_end]);
+            out.push_str(&html[open_end..inner_end]);
+            out.push_str("</div>");
+        } else {
+            out.push_str(&html[pos..close_end]);
+        }
+        pos = close_end;
+    }
+    out
 }
 
 /// Escape plain text into HTML, preserving line breaks.
@@ -490,5 +602,91 @@ mod tests {
             false,
         );
         assert!(!s.html.contains("data:text/html"));
+    }
+
+    fn assert_link_wraps(html: &str, url: &str, label: &str) {
+        let out = sanitize_email(html, true, false).html;
+        let href_at = out
+            .find(&format!("href=\"{url}\""))
+            .unwrap_or_else(|| panic!("href lost: {out}"));
+        let label_at = out
+            .find(label)
+            .unwrap_or_else(|| panic!("label lost: {out}"));
+        let a_close = out[href_at..]
+            .find("</a>")
+            .map(|i| href_at + i)
+            .unwrap_or_else(|| panic!("no closing </a>: {out}"));
+        assert!(
+            label_at < a_close,
+            "button label is not inside the <a> (HTML5 split the link): {out}"
+        );
+    }
+
+    #[test]
+    fn styled_anchor_button_keeps_href_and_padding() {
+        let s = sanitize_email(
+            r##"<a href="https://example.com/confirm" style="display:inline-block;background-color:#f97316;color:#ffffff;padding:12px 24px;border-radius:6px;text-decoration:none;">Confirm Email</a>"##,
+            true,
+            false,
+        );
+        assert!(s.html.contains("href=\"https://example.com/confirm\""));
+        assert!(s.html.contains("display:inline-block"));
+        assert!(s.html.contains("padding:12px 24px"));
+        assert!(s.html.contains("Confirm Email"));
+    }
+
+    #[test]
+    fn paragraph_wrapped_table_button_stays_inside_the_anchor() {
+        // Outlook-style bulletproof button nested in a <p> — without the
+        // pre-pass, HTML5 closes the <p> (and the <a>) before <table>.
+        assert_link_wraps(
+            r##"<p align="center"><a href="https://example.com/confirm"><table><tr><td bgcolor="#f97316" style="padding:12px 24px;color:#ffffff;">Confirm Email</td></tr></table></a></p>"##,
+            "https://example.com/confirm",
+            "Confirm Email",
+        );
+    }
+
+    #[test]
+    fn paragraph_wrapped_div_button_stays_inside_the_anchor() {
+        assert_link_wraps(
+            r##"<p><a href="https://example.com/x"><div style="background-color:#f97316;padding:12px 24px;color:#ffffff;">Confirm Email</div></a></p>"##,
+            "https://example.com/x",
+            "Confirm Email",
+        );
+    }
+
+    #[test]
+    fn react_email_button_keeps_href_and_label() {
+        assert_link_wraps(
+            r##"<a href="https://claude.ai/magic-link/abc" target="_blank" style="line-height:100%;text-decoration:none;display:inline-block;max-width:100%;mso-padding-alt:0px;background:#191919;border-radius:8px;color:#ffffff;font-size:14px;font-weight:600;text-align:center;padding:12px 24px 12px 24px"><span><!--[if mso]><i style="letter-spacing: 24px;mso-font-width:-100%;mso-text-raise:18" hidden>&nbsp;</i><![endif]--></span><span style="max-width:100%;display:inline-block;line-height:120%;text-decoration:none;text-transform:none;mso-padding-alt:0px;mso-text-raise:9px">Sign in</span><span><!--[if mso]><i style="letter-spacing: 24px;mso-font-width:-100%" hidden>&nbsp;</i><![endif]--></span></a>"##,
+            "https://claude.ai/magic-link/abc",
+            "Sign in",
+        );
+    }
+
+    #[test]
+    fn ordinary_paragraph_with_a_text_link_is_not_rewritten() {
+        let s = sanitize_email(
+            r#"<p>Click <a href="https://example.com/x">here</a> please.</p>"#,
+            true,
+            false,
+        );
+        assert!(s.html.contains("<p>"), "plain paragraph became: {}", s.html);
+        assert!(
+            !s.html.contains("<div"),
+            "plain paragraph was rewritten: {}",
+            s.html
+        );
+    }
+
+    #[test]
+    fn pre_tag_is_not_mistaken_for_a_paragraph() {
+        let s = sanitize_email(
+            r#"<pre>p &lt; a <a href="https://example.com/x">link</a></pre>"#,
+            true,
+            false,
+        );
+        assert!(s.html.contains("<pre>"), "pre lost: {}", s.html);
+        assert!(s.html.contains("href=\"https://example.com/x\""));
     }
 }

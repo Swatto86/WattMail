@@ -10,7 +10,14 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { emit, listen } from "@tauri-apps/api/event";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { save } from "@tauri-apps/plugin-dialog";
-import { adaptPlainEmail, readThemeColors, wrapEmailHtml } from "./email-render";
+import {
+  adaptPlainEmail,
+  enhanceEmailButtons,
+  hrefFromEmailEvent,
+  readThemeColors,
+  safeExternalHref,
+  wrapEmailHtml,
+} from "./email-render";
 import "./styles.css";
 
 // ---- Backend DTOs (mirror src-tauri/src/commands.rs) ----
@@ -423,11 +430,11 @@ function renderInviteBar(bar: HTMLDivElement, invite: MeetingInviteInfo): void {
 function wireFrameLinks(frame: HTMLIFrameElement): void {
   const doc = frame.contentDocument;
   if (!doc) return;
+  enhanceEmailButtons(doc);
   doc.addEventListener("click", (ev) => {
     ev.preventDefault();
-    const anchor = (ev.target as HTMLElement | null)?.closest?.("a");
-    const href = anchor?.getAttribute("href") ?? "";
-    if (/^https?:\/\//i.test(href)) void openUrl(href);
+    const href = safeExternalHref(hrefFromEmailEvent(ev));
+    if (href) void openUrl(href);
   });
 }
 

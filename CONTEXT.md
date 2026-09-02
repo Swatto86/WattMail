@@ -5,7 +5,7 @@
 > new milestone state, a decision made/reversed, or an open question resolved.
 > Keep newest progress entries at the top of the log.
 >
-> **Last updated:** 2026-08-26
+> **Last updated:** 2026-09-02
 
 ---
 
@@ -101,6 +101,25 @@ Entra app registration (public, not secret):
 ---
 
 ## Progress log
+
+### 2026-09-02 — Graphical email button links are clickable (v0.13.2)
+
+- **Symptom:** confirmation / magic-link mail (Firecrawl, Claude.ai, …) rendered
+  a styled "Confirm Email" / "Sign in" button that did nothing when clicked.
+  Plain text links in the same message still opened.
+- **Root cause:** two common "bulletproof button" shapes never reached
+  `closest("a")` in the sandboxed reader:
+  1. `<p><a href><table>…</table></a></p>` — HTML5 closes `<p>` (and the `<a>`)
+     before a nested `<table>`/`<div>`, so ammonia emitted an empty link plus an
+     unlinked visual.
+  2. Padded `<td bgcolor>` whose `<a>` only wraps the label — clicks on the
+     coloured chrome miss the anchor.
+- **Fix:** sanitizer pre-pass renames those invalid `<p>` wrappers to `<div>`
+  (attributes kept) so the `<a>` still wraps the button. The reader click /
+  context-menu path (`hrefFromEmailEvent` in `src/email-render.ts`) also recovers
+  the href from a one-link table cell and from a collapsed empty `<a>` sitting
+  immediately before the visual — so already-cached bodies work without a
+  re-fetch. Same wiring in the pop-out message window.
 
 ### 2026-08-26 — Drag-drop no longer freezes the UI after a move (v0.13.1)
 

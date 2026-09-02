@@ -205,10 +205,125 @@ export function wrapEmailHtml(inner: string, opts: WrapOpts): string {
     font-size: 14px; line-height: 1.55; color: ${fg}; background: ${bg};
     word-wrap: break-word; overflow-wrap: anywhere;
   }
-  a { color: ${link}; }
+  a { color: ${link}; cursor: pointer; }
   img { max-width: 100%; height: auto; }
   table { max-width: 100%; }
   pre { white-space: pre-wrap; }
   blockquote { margin: 0 0 0 12px; padding-left: 12px; ${quote} }
 </style></head><body>${inner}</body></html>`;
+}
+
+// ---- Reading-pane link hits ----
+// Email "buttons" are often a padded <td> whose <a> only wraps the label, or a
+// <p><a href><table>…</table></a></p> that HTML5 splits into an empty <a> plus
+// an unlinked visual. The click/contextmenu handlers must recover the href from
+// that chrome, not only from event.target.closest("a").
+//
+// Do not use `instanceof Element` here: the target lives in the iframe's realm,
+// so a parent-window instanceof check is always false.
+
+const ELEMENT_NODE = 1;
+
+function eventElement(target: EventTarget | null): Element | null {
+  if (!target || typeof (target as Node).nodeType !== "number") return null;
+  const node = target as Node;
+  if (node.nodeType === ELEMENT_NODE) return node as Element;
+  return node.parentElement;
+}
+
+function isVisiblyEmptyAnchor(a: Element): boolean {
+  if ((a.textContent ?? "").trim()) return false;
+  for (let i = 0; i < a.children.length; i++) {
+    const child = a.children[i];
+    if ((child.textContent ?? "").trim()) return false;
+    if (child.tagName === "IMG" || child.tagName === "SVG") return false;
+  }
+  return true;
+}
+
+function hrefAttr(el: Element | null | undefined): string | null {
+  if (!el) return null;
+  const href = (el.getAttribute("href") ?? "").trim();
+  if (!href) return null;
+  const lower = href.toLowerCase();
+  if (lower.startsWith("javascript:") || lower.startsWith("data:") || lower.startsWith("vbscript:")) {
+    return null;
+  }
+  return href;
+}
+
+function hrefFromCollapsedPrecedingAnchor(block: Element): string | null {
+  let sib: Element | null = block.previousElementSibling;
+  for (let hops = 0; sib && hops < 3; hops++) {
+    if (sib.tagName === "A") {
+      const href = hrefAttr(sib);
+      if (href && isVisiblyEmptyAnchor(sib)) return href;
+      break;
+    }
+    const anchors = sib.querySelectorAll("a[href]");
+    const emptyWrapper = !(sib.textContent ?? "").trim() && anchors.length === 1 && isVisiblyEmptyAnchor(anchors[0]);
+    if (emptyWrapper) {
+      const href = hrefAttr(anchors[0]);
+      if (href) return href;
+    }
+    if ((sib.textContent ?? "").trim()) break;
+    sib = sib.previousElementSibling;
+  }
+  return null;
+}
+
+/** Raw href of the email link the user clicked or right-clicked, if any. */
+export function hrefFromEmailEvent(ev: Event): string | null {
+  const el = eventElement(ev.target);
+  if (!el) return null;
+
+  const direct = el.closest("a");
+  const fromDirect = hrefAttr(direct);
+  if (fromDirect && direct && !isVisiblyEmptyAnchor(direct)) return fromDirect;
+
+  if (el.tagName === "AREA") {
+    const href = hrefAttr(el);
+    if (href) return href;
+  }
+
+  const cell = el.closest("td, th");
+  if (cell) {
+    const links = cell.querySelectorAll("a[href]");
+    const real = Array.from(links).filter((a) => !isVisiblyEmptyAnchor(a));
+    const pick = real.length === 1 ? real[0] : links.length === 1 ? links[0] : null;
+    const href = hrefAttr(pick);
+    if (href) return href;
+  }
+
+  let block: Element | null = el.closest("table") ?? el.closest("div");
+  const body = el.ownerDocument?.body ?? null;
+  while (block && block !== body) {
+    const href = hrefFromCollapsedPrecedingAnchor(block);
+    if (href) return href;
+    const parent = block.parentElement;
+    if (!parent || parent === body) break;
+    block = parent.closest("table") ?? parent.closest("div");
+  }
+
+  return fromDirect;
+}
+
+/** http(s) URL the reading pane may open in the system browser. */
+export function safeExternalHref(raw: string | null | undefined): string | null {
+  if (!raw) return null;
+  const href = raw.trim();
+  if (/^https?:\/\//i.test(href)) return href;
+  if (href.startsWith("//") && href.length > 2) return `https:${href}`;
+  return null;
+}
+
+/** Cursor hint on table-cell buttons whose <a> only wraps the label. */
+export function enhanceEmailButtons(doc: Document): void {
+  const cells = doc.querySelectorAll("td, th");
+  for (let i = 0; i < cells.length; i++) {
+    const cell = cells[i];
+    const links = cell.querySelectorAll("a[href]");
+    const real = Array.from(links).filter((a) => !isVisiblyEmptyAnchor(a) && hrefAttr(a));
+    if (real.length === 1) (cell as HTMLElement).style.cursor = "pointer";
+  }
 }
