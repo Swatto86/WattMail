@@ -16,6 +16,12 @@ cargo fmt --all -- --check
 cargo clippy --all-targets -- -D warnings
 cargo test --workspace
 
+# Reader-frame click contract, checked in the real Linux webview. Unit tests
+# cannot see this: WebKitGTK drops parent-attached listeners on a sandboxed
+# frame without `allow-scripts`, which once made every email link unclickable
+# while the suite stayed green. Skips loudly without WebKitGTK or a display.
+python3 scripts/test-reader-frame.py
+
 # The three files that carry the version must agree.
 #
 # `src-tauri/Cargo.toml` decides what the binary reports, `tauri.conf.json`

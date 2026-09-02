@@ -12,6 +12,7 @@ import { openUrl } from "@tauri-apps/plugin-opener";
 import { save } from "@tauri-apps/plugin-dialog";
 import {
   adaptPlainEmail,
+  EMAIL_FRAME_SANDBOX,
   enhanceEmailButtons,
   hrefFromEmailEvent,
   readThemeColors,
@@ -218,7 +219,7 @@ function renderMessage(msg: MessageView): void {
     <div id="reader-invite" class="reader-invite hidden"></div>
     <div id="reader-attachments" class="reader-attachments"></div>
     ${banner}
-    <iframe class="reader-frame reader-frame--win" sandbox="allow-same-origin allow-modals" referrerpolicy="no-referrer"></iframe>
+    <iframe class="reader-frame reader-frame--win" sandbox="${EMAIL_FRAME_SANDBOX}" referrerpolicy="no-referrer"></iframe>
   `;
   appEl.querySelector<HTMLButtonElement>("#load-images")?.addEventListener("click", () => {
     void loadAndRender(true);

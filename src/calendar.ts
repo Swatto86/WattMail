@@ -17,6 +17,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { sendNotification } from "@tauri-apps/plugin-notification";
 import { showConfirm, showTernary } from "./dialog";
+import { EMAIL_FRAME_SANDBOX } from "./email-render";
 
 interface Attendee {
   name: string;
@@ -1249,9 +1250,11 @@ function paneColors(): { bg: string; fg: string; link: string } {
 function renderBodyIframe(container: HTMLElement, html: string): void {
   const iframe = document.createElement("iframe");
   iframe.className = "cal-body-frame";
-  // allow-same-origin (so we can auto-size + intercept links) but NOT
-  // allow-scripts, so no JS in the body can ever run.
-  iframe.setAttribute("sandbox", "allow-same-origin");
+  // allow-same-origin so we can auto-size and intercept links. `allow-scripts`
+  // is in EMAIL_FRAME_SANDBOX because WebKitGTK will not fire the parent's
+  // click listeners on a script-disabled frame; the body still cannot run JS
+  // (server-sanitized, and the app CSP the srcdoc inherits blocks scripts).
+  iframe.setAttribute("sandbox", EMAIL_FRAME_SANDBOX);
   // Set the background EXPLICITLY, not `transparent`: a sandboxed srcdoc iframe
   // is painted on an opaque white layer by WebView2, so a transparent body left
   // the light-on-dark description text unreadable (grey on white). The pane's

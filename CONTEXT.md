@@ -102,6 +102,26 @@ Entra app registration (public, not secret):
 
 ## Progress log
 
+### 2026-09-02 — Reading-pane links were dead on Linux (v0.14.2)
+
+- **Symptom:** clicking any link in an email did nothing on the Linux build.
+- **Root cause:** the reader iframe is sandboxed `allow-same-origin allow-modals` and the
+  link handling is attached from the parent document. WebKitGTK does not fire parent-attached
+  listeners on a sandboxed frame that lacks `allow-scripts`, so `wireFrameLinks` was a no-op in
+  the AppImage. Reproduced directly against webkit2gtk-4.1: `parentListenerFired: false`.
+- **Fix:** one shared `EMAIL_FRAME_SANDBOX` constant that adds `allow-scripts`, used by the
+  reading pane (`main.ts`), the pop-out message window (`message.ts`) and the calendar event
+  description frame (`calendar.ts`) — the last had the same defect and the same dead links.
+- **Not a security loosening:** verified against a hostile body in the real engine — inline
+  `<script>`, inline `onclick` and `javascript:` hrefs all stay inert, the sandbox attribute
+  survives, and the frame does not navigate. The app's inherited CSP is what blocks email JS;
+  the sandbox flag was never what did it.
+- **Regression cover:** `scripts/test-reader-frame.py`, wired into `scripts/verify.sh`. It runs
+  the real webview because no unit test can observe this. Mutation-tested both ways.
+- **v0.14.1 is withdrawn.** It shipped from an unmerged branch and did not fix the bug: it
+  replaced the parent listeners with an in-frame nonce shim, but a srcdoc document inherits the
+  parent CSP, so `default-src 'self'` blocked the shim and nothing ran at all. Branch deleted.
+
 ### 2026-09-02 — Linux/Omarchy first-class: AppImage auto-update, ksni tray, autostart
 
 - **Goal:** make Omarchy (Arch + Hyprland/waybar) a first-class target. Three gaps
@@ -2469,9 +2489,16 @@ pending (needs a signed-in window).
 - **CSP includes `ws://localhost:* http://localhost:*`** for Vite HMR in dev (matches
   AllTheThings). Harmless in production (nothing at localhost there).
 - **CSP `img-src` allows `https:`/`http:`** so opted-in remote email images load in the
-  sandboxed frame. Email content is otherwise isolated: `sandbox="allow-same-origin"`
-  (no `allow-scripts`) disables email JS while letting the parent intercept link clicks
-  and open them externally via the opener plugin.
+  sandboxed frame. Email content is otherwise isolated.
+- **Reader frames MUST keep `allow-scripts` (`EMAIL_FRAME_SANDBOX` in `src/email-render.ts`).**
+  Counter-intuitive and load-bearing: WebKitGTK treats a listener the *parent* attaches to a
+  script-disabled sandboxed document as script belonging to that frame and never fires it, so
+  without `allow-scripts` every link in the reading pane, the pop-out window and calendar
+  descriptions is silently dead on Linux — with no error anywhere. Email JS still cannot run:
+  ammonia strips `<script>`/handlers, and the srcdoc document inherits the app CSP
+  (`default-src 'self'`), which blocks inline scripts, inline handlers and `javascript:` hrefs
+  regardless of the sandbox flags. Proven both ways in the real engine by
+  `scripts/test-reader-frame.py` (part of `scripts/verify.sh`); do not "tighten" this back.
 - **Local cache** is `cache.db` in `paths::data_dir()` (cross-platform; `%LOCALAPPDATA%\WattMail`
   on Windows, `dirs`-backed elsewhere), alongside `settings.json`. `rusqlite` uses the **bundled**
   SQLite (compiled from source via the MSVC toolchain), so there's no system SQLite dependency to

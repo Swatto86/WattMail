@@ -3,8 +3,9 @@
 //! Email HTML is hostile by default. Everything produced here is safe to drop
 //! into a sandboxed frame: scripts, event handlers, `<style>`, and all
 //! remote-loading elements (remote images, media, stylesheets, CSS `url(...)`)
-//! are removed. Links keep their href for display but are inert inside the
-//! frame's `sandbox`.
+//! are removed. Links keep their href for display but cannot navigate the
+//! frame: the reading pane intercepts the click and opens http(s) targets in
+//! the system browser.
 //!
 //! Inline `style` attributes are **kept but sanitized** to an allowlist of safe
 //! properties (colours, borders, padding, alignment, …) with any `url(...)`,

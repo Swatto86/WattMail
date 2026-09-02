@@ -188,6 +188,22 @@ export type WrapOpts = { adapt: boolean; bg: RGB; fg: RGB };
 // conservative default that matches the author's light-background assumption.
 // Plain mail in dark mode renders on the theme surface (adaptPlainEmail then
 // repairs author text colours).
+// Sandbox for the reader frames. `allow-scripts` is required for a reason that
+// is not about running email JS: WebKitGTK (the Linux Tauri webview) treats a
+// listener the parent attaches to a script-disabled sandboxed document as
+// script belonging to that frame and never fires it, so every click handler in
+// the reading pane was silently dead on Linux. With `allow-scripts` the parent
+// listeners fire again.
+//
+// Email script still cannot run. Ammonia strips `<script>` and event handlers
+// during sanitization, and the srcdoc document inherits the app's own CSP
+// (`default-src 'self'`, see tauri.conf.json), which blocks inline scripts,
+// inline event handlers and `javascript:` hrefs inside the frame regardless of
+// the sandbox flags. `allow-same-origin` is what lets the parent hit-test and
+// adapt colours; `allow-modals` is for print(). Verified against WebKitGTK by
+// scripts/test-reader-frame.py.
+export const EMAIL_FRAME_SANDBOX = "allow-same-origin allow-modals allow-scripts";
+
 export function wrapEmailHtml(inner: string, opts: WrapOpts): string {
   const bg = opts.adapt ? rgbToCss(opts.bg) : "#ffffff";
   const fg = opts.adapt ? rgbToCss(opts.fg) : "#1a1a1a";

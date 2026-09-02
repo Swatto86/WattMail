@@ -26,6 +26,7 @@ import {
 import { showConfirm, showPrompt, isDialogOpen } from "./dialog";
 import {
   adaptPlainEmail,
+  EMAIL_FRAME_SANDBOX,
   enhanceEmailButtons,
   hrefFromEmailEvent,
   readThemeColors,
@@ -1630,7 +1631,7 @@ function renderReader(msg: MessageView): void {
     <div id="reader-invite" class="reader-invite hidden"></div>
     <div id="reader-attachments" class="reader-attachments"></div>
     ${banner}
-    <iframe class="reader-frame" sandbox="allow-same-origin allow-modals" referrerpolicy="no-referrer"></iframe>
+    <iframe class="reader-frame" sandbox="${EMAIL_FRAME_SANDBOX}" referrerpolicy="no-referrer"></iframe>
   `;
   readerEl
     .querySelector<HTMLButtonElement>("#load-images")
