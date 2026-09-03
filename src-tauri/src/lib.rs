@@ -6,6 +6,7 @@
 mod accounts;
 mod commands;
 mod external_open;
+mod notify;
 mod paths;
 mod settings;
 #[cfg(target_os = "linux")]
@@ -196,6 +197,7 @@ pub fn run() {
             commands::set_close_to_tray,
             commands::set_unread,
             commands::play_new_mail_sound,
+            commands::show_desktop_notification,
             commands::started_hidden,
             commands::get_notification_setting,
             commands::set_notification_setting,
@@ -282,73 +284,6 @@ pub(crate) fn quit_with_flush(app: &AppHandle) {
         std::thread::sleep(std::time::Duration::from_secs(10));
         handle.exit(0);
     });
-}
-
-/// Play the system notification sound (respects the user's sound scheme).
-#[cfg(windows)]
-pub(crate) fn play_notify_sound() {
-    // user32!MessageBeep(MB_ICONASTERISK) — plays the "Asterisk" scheme sound,
-    // asynchronously. Declared inline to avoid a windows-sys dependency.
-    #[link(name = "user32")]
-    extern "system" {
-        fn MessageBeep(utype: u32) -> i32;
-    }
-    const MB_ICONASTERISK: u32 = 0x0000_0040;
-    unsafe {
-        MessageBeep(MB_ICONASTERISK);
-    }
-}
-
-#[cfg(not(windows))]
-pub(crate) fn play_notify_sound() {
-    // Best-effort: use system sound tooling when available.
-    // This is executed on demand by a Tauri command, so it must never fail
-    // loudly (audio is a "nice to have").
-    #[cfg(target_os = "linux")]
-    {
-        std::thread::spawn(|| {
-            fn try_cmd(prog: &str, args: &[&str]) -> bool {
-                std::process::Command::new(prog)
-                    .args(args)
-                    .status()
-                    .map(|s| s.success())
-                    .unwrap_or(false)
-            }
-
-            // canberra-gtk-play respects the freedesktop sound theme settings
-            // (user sound scheme), so prefer it when present.
-            if try_cmd("canberra-gtk-play", &["-i", "message-new-email"]) {
-                return;
-            }
-            if try_cmd("canberra-gtk-play", &["-i", "mail-notification"]) {
-                return;
-            }
-            if try_cmd("canberra-gtk-play", &["-i", "bell"]) {
-                return;
-            }
-
-            // Fallback: play a common freedesktop sound file via paplay.
-            let fallback = "/usr/share/sounds/freedesktop/stereo/alarm-clock-elapsed.oga";
-            if std::path::Path::new(fallback).exists() && try_cmd("paplay", &[fallback]) {
-                return;
-            }
-            let fallback2 = "/usr/share/sounds/freedesktop/stereo/bell.oga";
-            if std::path::Path::new(fallback2).exists() && try_cmd("paplay", &[fallback2]) {
-                return;
-            }
-        });
-    }
-
-    #[cfg(target_os = "macos")]
-    {
-        std::thread::spawn(|| {
-            let path = "/System/Library/Sounds/Ping.aiff";
-            if !std::path::Path::new(path).exists() {
-                return;
-            }
-            let _ = std::process::Command::new("afplay").arg(path).status();
-        });
-    }
 }
 
 /// Update the tray icon + tooltip to reflect the inbox unread count. The tooltip

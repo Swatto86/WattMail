@@ -5,7 +5,7 @@
 > new milestone state, a decision made/reversed, or an open question resolved.
 > Keep newest progress entries at the top of the log.
 >
-> **Last updated:** 2026-09-02
+> **Last updated:** 2026-09-03
 
 ---
 
@@ -101,6 +101,20 @@ Entra app registration (public, not secret):
 ---
 
 ## Progress log
+
+### 2026-09-03 — New-mail OS notification aborted the app (Linux)
+
+- **Symptom:** WattMail (installed AppImage) crashed on new mail at 17:56:55 BST
+  (PID 172863). Same SIGABRT on `tokio-rt-worker` as the tray bug.
+- **Evidence:** core panic text `Cannot start a runtime from within a runtime`;
+  `plugin:notification|notify` in the process; user reproduced on mail arrival.
+  Not OOM (12 GiB available).
+- **Root cause:** `sendNotification` → `tauri-plugin-notification` `notify` (async
+  command that calls blocking `show()`) → `notify-rust` `zbus::block_on` on the
+  Tokio worker. v0.14.4 only moved *tray* `block_on` off-worker.
+- **Fix:** `show_desktop_notification` command runs `NotificationExt::show` on a
+  `std::thread`. New mail and calendar reminders use it via `src/desktop-notify.ts`.
+  Sound already spawned its own thread.
 
 ### 2026-09-03 — Linux tray aborted after sync (v0.14.4)
 

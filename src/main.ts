@@ -11,7 +11,8 @@ import {
   disable as disableAutostart,
   isEnabled as isAutostartEnabled,
 } from "@tauri-apps/plugin-autostart";
-import { isPermissionGranted, requestPermission, sendNotification } from "@tauri-apps/plugin-notification";
+import { isPermissionGranted, requestPermission } from "@tauri-apps/plugin-notification";
+import { showDesktopNotification } from "./desktop-notify";
 import {
   IANA_ZONE,
   initCalendar,
@@ -2942,7 +2943,7 @@ async function checkNewMail(inboxFolderId: string): Promise<void> {
     });
 
     void invoke("play_new_mail_sound").catch(() => {});
-    await sendNotification({ title: "WattMail", body });
+    showDesktopNotification("WattMail", body);
   } catch {
     /* notifications are best-effort — don't disrupt the sync */
   }

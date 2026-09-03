@@ -1378,7 +1378,14 @@ pub fn set_unread(app: tauri::AppHandle, count: u32) {
 /// Play the native new-mail sound.
 #[tauri::command]
 pub fn play_new_mail_sound() {
-    crate::play_notify_sound();
+    crate::notify::play_notify_sound();
+}
+
+/// Show an OS desktop notification. Runs off the Tokio worker — Linux
+/// notify-rust uses `zbus::block_on`, which panics if called from one.
+#[tauri::command]
+pub fn show_desktop_notification(app: tauri::AppHandle, title: String, body: String) {
+    crate::notify::show_desktop_notification(app, title, body);
 }
 
 /// Open a message in its own OS window (double-click / Enter / context menu).

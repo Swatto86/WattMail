@@ -15,7 +15,7 @@
 
 import { invoke } from "@tauri-apps/api/core";
 import { openExternalUrl } from "./external";
-import { sendNotification } from "@tauri-apps/plugin-notification";
+import { showDesktopNotification } from "./desktop-notify";
 import { showConfirm, showTernary } from "./dialog";
 import { EMAIL_FRAME_SANDBOX } from "./email-render";
 
@@ -1833,7 +1833,7 @@ function checkReminders(): void {
       : new Date(start).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });
     const where = ev.location ? ` · ${ev.location}` : "";
     try {
-      void sendNotification({ title: "Upcoming event", body: `${ev.subject} · ${when}${where}` });
+      showDesktopNotification("Upcoming event", `${ev.subject} · ${when}${where}`);
     } catch {
       /* best-effort */
     }
