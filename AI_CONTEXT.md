@@ -33,10 +33,7 @@ Auth: `AuthService::access_token` refreshes via keyring-backed refresh token.
 
 ## Recent Context & Decisions
 
-- 2026-09-03: v0.14.5 — Linux OS toasts call `notify-rust` on a std thread.
-  The plugin's `NotificationExt::show` `spawn`s back onto Tokio, so wrapping
-  it was a no-op (18:17 abort on the "fixed" binary). Frontend replaces the
-  plugin `window.Notification` polyfill.
+- 2026-09-03: v0.14.6 — tray primary-click toggles the window (hide if shown).
 - 2026-09-03: v0.14.4 — tray updates must not call ksni blocking API on Tokio
   workers (Omarchy SIGABRT). Dedicated `wattmail-tray` thread.
 - 2026-09-03: Add in-window new-mail popout and Linux/macOS notification

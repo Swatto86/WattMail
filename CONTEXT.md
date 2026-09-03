@@ -102,6 +102,12 @@ Entra app registration (public, not secret):
 
 ## Progress log
 
+### 2026-09-03 — Tray click toggles the window (v0.14.6)
+
+- Left-click / Linux SNI `Activate` hides the main window when it is shown and
+  restores it when it is not (minimized counts as not shown). Tray menu
+  "Show WattMail" still always shows.
+
 ### 2026-09-03 — Plugin toast still aborted (v0.14.5)
 
 - **Symptom:** Downloads binary (`wattmail-newmail-fix.sh`) still SIGABRT on

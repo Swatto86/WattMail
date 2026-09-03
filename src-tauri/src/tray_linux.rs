@@ -5,8 +5,8 @@
 //! never fires), so a left/double click can't open the window. On the Wayland
 //! status bars used by Omarchy/Hyprland (waybar) a primary click instead sends
 //! the SNI `Activate` request, so here we register our own StatusNotifierItem and
-//! route `Activate` to showing the window — giving real click-to-open — while a
-//! right click still opens the Show / Settings / Quit menu.
+//! route `Activate` to toggling the window (hide if shown, show if hidden) —
+//! while a right click still opens the Show / Settings / Quit menu.
 //!
 //! All ksni **blocking** API calls run on a dedicated `std::thread`. ksni's
 //! `Handle::update` / `spawn` use an internal `Runtime::block_on`; calling that
@@ -25,7 +25,7 @@ use std::thread;
 
 use tauri::{AppHandle, Emitter};
 
-use crate::{quit_with_flush, show_main};
+use crate::{quit_with_flush, show_main, toggle_main};
 
 /// Commands for the dedicated tray thread. Only that thread may call ksni's
 /// blocking `spawn` / `Handle::update`.
@@ -85,11 +85,10 @@ impl Tray for WattmailTray {
         "WattMail".into()
     }
 
-    /// Primary activation (waybar/most bars map a left click to this) — bring the
-    /// window to the foreground. This is the behaviour Tauri's Linux tray can't
-    /// provide and the reason this module exists.
+    /// Primary activation (waybar/most bars map a left click to this) — toggle
+    /// the window. Show/Settings in the menu still always bring it forward.
     fn activate(&mut self, _x: i32, _y: i32) {
-        show_main(&self.app);
+        toggle_main(&self.app);
     }
 
     fn icon_pixmap(&self) -> Vec<Icon> {
