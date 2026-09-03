@@ -27,15 +27,16 @@ calendar. Tauri v2 shell; tokens and cache keys live in the OS keychain.
 
 Frontend sync → `set_unread` → `update_tray` → (Linux) channel → ksni update.
 New mail / reminders → `show_desktop_notification` → dedicated thread →
-notify-rust (never on a Tokio worker).
+Linux `notify-rust` directly (never `NotificationExt::show`, which spawns
+back onto Tokio). Other OSes still use the plugin builder.
 Auth: `AuthService::access_token` refreshes via keyring-backed refresh token.
 
 ## Recent Context & Decisions
 
-- 2026-09-03: New-mail OS toast used `plugin:notification|notify` →
-  notify-rust `zbus::block_on` on a Tokio worker → SIGABRT (same nested-runtime
-  panic as the tray). `show_desktop_notification` offloads to a std thread;
-  calendar reminders use the same path.
+- 2026-09-03: v0.14.5 — Linux OS toasts call `notify-rust` on a std thread.
+  The plugin's `NotificationExt::show` `spawn`s back onto Tokio, so wrapping
+  it was a no-op (18:17 abort on the "fixed" binary). Frontend replaces the
+  plugin `window.Notification` polyfill.
 - 2026-09-03: v0.14.4 — tray updates must not call ksni blocking API on Tokio
   workers (Omarchy SIGABRT). Dedicated `wattmail-tray` thread.
 - 2026-09-03: Add in-window new-mail popout and Linux/macOS notification

@@ -1,6 +1,6 @@
 [package]
 name = "wattmail-desktop"
-version = "0.14.4"
+version = "0.14.5"
 description = "WattMail desktop client"
 edition.workspace = true
 license.workspace = true
@@ -37,6 +37,9 @@ wattmail-infrastructure = { workspace = true }
 [target.'cfg(target_os = "linux")'.dependencies]
 ksni = { version = "0.3", features = ["blocking"] }
 png = "0.17"
+# Called directly on a std::thread. The notification plugin's show() spawns
+# onto Tokio, where notify-rust's zbus::block_on aborts the process.
+notify-rust = "4.18"
 
 [dev-dependencies]
 tokio = { workspace = true }

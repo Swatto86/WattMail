@@ -102,6 +102,18 @@ Entra app registration (public, not secret):
 
 ## Progress log
 
+### 2026-09-03 — Plugin toast still aborted (v0.14.5)
+
+- **Symptom:** Downloads binary (`wattmail-newmail-fix.sh`) still SIGABRT on
+  new mail / Test toast. Same `Cannot start a runtime from within a runtime`
+  on `tokio-rt-worker`.
+- **Root cause:** `tauri-plugin-notification` `NotificationExt::show` does
+  `tauri::async_runtime::spawn { notification.show() }`. Putting that call on
+  a `std::thread` does not move the `zbus::block_on` off Tokio.
+- **Fix:** Linux calls `notify-rust` directly on a plain thread. Frontend
+  replaces the plugin's `window.Notification` polyfill (it still maps to
+  `plugin:notification|notify`).
+
 ### 2026-09-03 — New-mail OS notification aborted the app (Linux)
 
 - **Symptom:** WattMail (installed AppImage) crashed on new mail at 17:56:55 BST

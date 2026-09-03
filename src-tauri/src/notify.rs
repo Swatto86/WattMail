@@ -1,20 +1,47 @@
 //! Desktop alerts and the new-mail sound.
 //!
-//! Linux `notify-rust` (via `tauri-plugin-notification`) calls `zbus::block_on`
-//! to talk to the session bus. Tauri command handlers run on Tokio workers, so
-//! showing a notification there panics: "Cannot start a runtime from within a
-//! runtime" — SIGABRT with `panic = "abort"`. Same class of bug as the ksni
-//! tray (`tray_linux`). All blocking notify/sound work runs on a plain
-//! `std::thread`.
+//! Linux `notify-rust` calls `zbus::block_on` to talk to the session bus.
+//! Tauri command handlers run on Tokio workers, so showing a notification
+//! there panics: "Cannot start a runtime from within a runtime" — SIGABRT
+//! with `panic = "abort"`. Same class of bug as the ksni tray (`tray_linux`).
+//!
+//! `tauri-plugin-notification`'s `NotificationExt::show` does **not** run
+//! on the calling thread: it `tauri::async_runtime::spawn`s the actual
+//! `notify-rust` call back onto a Tokio worker. Wrapping that in
+//! `std::thread::spawn` is therefore a no-op on Linux. The Linux path
+//! calls `notify-rust` itself on a plain thread.
 
 use tauri::AppHandle;
+#[cfg(not(target_os = "linux"))]
 use tauri_plugin_notification::NotificationExt;
 
 /// Show an OS notification off the Tokio worker that handled the IPC call.
 pub fn show_desktop_notification(app: AppHandle, title: String, body: String) {
-    std::thread::spawn(move || {
-        let _ = app.notification().builder().title(title).body(body).show();
-    });
+    #[cfg(target_os = "linux")]
+    {
+        drop(app);
+        std::thread::spawn(move || show_linux(title, body));
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        std::thread::spawn(move || show_other(app, title, body));
+    }
+}
+
+/// Talk to the session bus here. Do not call `NotificationExt::show` —
+/// that re-dispatches onto Tokio (see module docs).
+#[cfg(target_os = "linux")]
+fn show_linux(title: String, body: String) {
+    let _ = notify_rust::Notification::new()
+        .appname("WattMail")
+        .summary(&title)
+        .body(&body)
+        .show();
+}
+
+#[cfg(not(target_os = "linux"))]
+fn show_other(app: AppHandle, title: String, body: String) {
+    let _ = app.notification().builder().title(title).body(body).show();
 }
 
 /// Play the system notification sound (respects the user's sound scheme).
@@ -104,7 +131,7 @@ mod tests {
     }
 
     /// The fix: the same `block_on` is safe on a plain `std::thread`, even when
-    /// the request originated on a Tokio worker (as `sendNotification` does).
+    /// the request originated on a Tokio worker.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn block_on_on_dedicated_thread_from_tokio_worker_is_safe() {
         let (tx, rx) = std::sync::mpsc::channel::<()>();
@@ -129,6 +156,38 @@ mod tests {
     }
 
     #[test]
+    fn linux_toast_must_not_use_plugin_show() {
+        let src = include_str!("notify.rs");
+        let prod = src
+            .split("#[cfg(test)]")
+            .next()
+            .expect("production code before tests");
+        assert!(
+            prod.contains("pub fn show_desktop_notification"),
+            "scan must see the real toast entry point before asserting absences"
+        );
+        assert!(
+            prod.contains("fn show_linux("),
+            "Linux toast path must be a named function so this check can see it"
+        );
+        let start = prod
+            .find("fn show_linux(")
+            .expect("show_linux present (asserted above)");
+        let func = prod[start..]
+            .split("\nfn ")
+            .next()
+            .expect("show_linux body");
+        assert!(
+            func.contains("notify_rust::Notification"),
+            "Linux must talk to the session bus itself, not via the plugin"
+        );
+        assert!(
+            !func.contains("notification().builder"),
+            "NotificationExt::show re-dispatches onto Tokio and aborts on Linux"
+        );
+    }
+
+    #[test]
     fn frontend_does_not_call_plugin_notify_directly() {
         let helper = include_str!("../../src/desktop-notify.ts");
         let main = include_str!("../../src/main.ts");
@@ -136,6 +195,14 @@ mod tests {
         assert!(
             helper.contains(r#"invoke("show_desktop_notification""#),
             "desktop-notify.ts must invoke the off-thread command"
+        );
+        assert!(
+            helper.contains("window.Notification"),
+            "desktop-notify.ts must replace the plugin Notification polyfill"
+        );
+        assert!(
+            !helper.contains(r#"invoke("plugin:notification"#),
+            "desktop-notify.ts must not invoke the plugin notify command"
         );
         assert!(
             main.contains("showDesktopNotification"),

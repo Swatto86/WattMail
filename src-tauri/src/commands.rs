@@ -1381,8 +1381,9 @@ pub fn play_new_mail_sound() {
     crate::notify::play_notify_sound();
 }
 
-/// Show an OS desktop notification. Runs off the Tokio worker — Linux
-/// notify-rust uses `zbus::block_on`, which panics if called from one.
+/// Show an OS desktop notification. Linux talks to the session bus on a
+/// dedicated thread — the notification plugin's `show()` re-dispatches onto
+/// Tokio, where `zbus::block_on` aborts the process.
 #[tauri::command]
 pub fn show_desktop_notification(app: tauri::AppHandle, title: String, body: String) {
     crate::notify::show_desktop_notification(app, title, body);
