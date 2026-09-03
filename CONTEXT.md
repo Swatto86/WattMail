@@ -102,6 +102,22 @@ Entra app registration (public, not secret):
 
 ## Progress log
 
+### 2026-09-03 — Linux tray aborted after sync (v0.14.4)
+
+- **Symptom:** WattMail on Omarchy died with SIGABRT after a while (also ~35s after
+  launch). Coredumps all showed `tokio-rt-worker` panicking.
+- **Root cause:** Linux tray uses ksni's **blocking** API. `Handle::update` calls
+  `Runtime::block_on` on a private current-thread runtime. Tauri runs
+  `set_unread` → `tray_linux::update` on a Tokio worker; nested `block_on` panics
+  with "Cannot start a runtime from within a runtime" and aborts the process.
+  Not OOM; not Omarchy itself.
+- **Fix:** `src-tauri/src/tray_linux.rs` owns a dedicated `wattmail-tray`
+  `std::thread` that alone calls ksni `spawn` / `Handle::update`. Command handlers
+  only `send` on an `mpsc` channel.
+- **Regression:** unit tests that (1) reproduce the nested-`block_on` panic on a
+  Tokio worker and (2) prove the dedicated-thread pattern is safe when driven
+  from a worker.
+
 ### 2026-09-02 — AppImage poisoned the browser's environment (v0.14.3)
 
 - **Symptom:** identical to the v0.14.2 bug — clicking a link in an email did nothing — which

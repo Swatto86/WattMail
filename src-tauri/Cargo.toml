@@ -1,6 +1,6 @@
 [package]
 name = "wattmail-desktop"
-version = "0.14.3"
+version = "0.14.4"
 description = "WattMail desktop client"
 edition.workspace = true
 license.workspace = true
@@ -37,3 +37,6 @@ wattmail-infrastructure = { workspace = true }
 [target.'cfg(target_os = "linux")'.dependencies]
 ksni = { version = "0.3", features = ["blocking"] }
 png = "0.17"
+
+[dev-dependencies]
+tokio = { workspace = true }

@@ -8,21 +8,32 @@
 //! route `Activate` to showing the window — giving real click-to-open — while a
 //! right click still opens the Show / Settings / Quit menu.
 //!
+//! All ksni **blocking** API calls run on a dedicated `std::thread`. ksni's
+//! `Handle::update` / `spawn` use an internal `Runtime::block_on`; calling that
+//! from a Tokio worker (Tauri command handlers) panics with "Cannot start a
+//! runtime from within a runtime" and aborts the process.
+//!
 //! macOS and Windows keep Tauri's native tray (see `build_tray` in `lib.rs`),
 //! where click routing works correctly.
 
-use ksni::blocking::{Handle, TrayMethods};
+use ksni::blocking::TrayMethods;
 use ksni::menu::StandardItem;
 use ksni::{Icon, MenuItem, ToolTip, Tray};
+use std::sync::mpsc::{self, Sender};
 use std::sync::OnceLock;
+use std::thread;
 
 use tauri::{AppHandle, Emitter};
 
 use crate::{quit_with_flush, show_main};
 
-/// Live handle to the running tray, used by `update` to refresh the icon and
-/// tooltip as the unread count changes.
-static HANDLE: OnceLock<Handle<WattmailTray>> = OnceLock::new();
+/// Commands for the dedicated tray thread. Only that thread may call ksni's
+/// blocking `spawn` / `Handle::update`.
+enum TrayCmd {
+    Update { unread: u32, tooltip: String },
+}
+
+static CMD_TX: OnceLock<Sender<TrayCmd>> = OnceLock::new();
 
 /// Decode a bundled 8-bit RGBA PNG into a single ARGB32 ksni icon. Returns
 /// `None` for any unexpected format so a bad asset degrades to "no pixmap"
@@ -124,29 +135,118 @@ impl Tray for WattmailTray {
     }
 }
 
-/// Register the StatusNotifierItem. `assume_sni_available(true)` tolerates the
-/// watcher not being up yet (e.g. autostarted into the tray before waybar has
-/// started): the tray appears once the watcher comes online instead of failing.
+/// Register the StatusNotifierItem on a dedicated thread. `assume_sni_available(true)`
+/// tolerates the watcher not being up yet (e.g. autostarted into the tray before
+/// waybar has started): the tray appears once the watcher comes online instead of
+/// failing.
 pub fn spawn(app: AppHandle) {
+    let (tx, rx) = mpsc::channel();
+    if CMD_TX.set(tx).is_err() {
+        return;
+    }
+    if let Err(e) = thread::Builder::new()
+        .name("wattmail-tray".into())
+        .spawn(move || run_tray_thread(app, rx))
+    {
+        eprintln!("WattMail: failed to start Linux tray thread: {e}");
+    }
+}
+
+fn run_tray_thread(app: AppHandle, rx: mpsc::Receiver<TrayCmd>) {
     let tray = WattmailTray {
         app,
         unread: 0,
         tooltip: "WattMail".into(),
     };
-    match tray.assume_sni_available(true).spawn() {
-        Ok(handle) => {
-            let _ = HANDLE.set(handle);
+    let handle = match tray.assume_sni_available(true).spawn() {
+        Ok(handle) => handle,
+        Err(e) => {
+            eprintln!("WattMail: failed to register Linux tray: {e}");
+            return;
         }
-        Err(e) => eprintln!("WattMail: failed to register Linux tray: {e}"),
+    };
+    while let Ok(cmd) = rx.recv() {
+        match cmd {
+            TrayCmd::Update { unread, tooltip } => {
+                handle.update(move |t: &mut WattmailTray| {
+                    t.unread = unread;
+                    t.tooltip = tooltip;
+                });
+            }
+        }
     }
 }
 
-/// Refresh the tray icon (idle vs unread) and tooltip.
+/// Refresh the tray icon (idle vs unread) and tooltip. Safe to call from any
+/// Tauri command thread — work is forwarded to the tray thread.
 pub fn update(unread: u32, tooltip: String) {
-    if let Some(handle) = HANDLE.get() {
-        handle.update(move |t: &mut WattmailTray| {
-            t.unread = unread;
-            t.tooltip = tooltip;
+    if let Some(tx) = CMD_TX.get() {
+        let _ = tx.send(TrayCmd::Update { unread, tooltip });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::mpsc;
+    use std::thread;
+
+    /// The failure mode observed on Omarchy: ksni's blocking API calls
+    /// `Runtime::block_on` on a private current-thread runtime. Doing that on a
+    /// Tokio worker panics (and with abort-on-panic, kills WattMail).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn ksni_style_block_on_panics_inside_tokio_worker() {
+        let panicked = tokio::spawn(async {
+            std::panic::catch_unwind(|| {
+                let rt = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .expect("current-thread runtime");
+                rt.block_on(async {});
+            })
+            .is_err()
+        })
+        .await
+        .expect("join");
+        assert!(
+            panicked,
+            "nested Runtime::block_on must panic inside a Tokio worker"
+        );
+    }
+
+    /// The fix pattern: the same `block_on` is safe when confined to a plain
+    /// `std::thread` that is not driving Tokio, even when the request originates
+    /// on a Tokio worker (as `set_unread` / tray updates do).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn block_on_on_dedicated_thread_from_tokio_worker_is_safe() {
+        let (tx, rx) = mpsc::channel::<()>();
+        let (done_tx, done_rx) = mpsc::channel::<()>();
+        thread::spawn(move || {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("current-thread runtime");
+            while rx.recv().is_ok() {
+                rt.block_on(async {});
+                let _ = done_tx.send(());
+            }
         });
+
+        tokio::spawn(async move {
+            tx.send(()).expect("tray thread alive");
+            done_rx.recv().expect("block_on completed");
+        })
+        .await
+        .expect("join");
+    }
+
+    /// `update` before `spawn` is a no-op and must not touch ksni / panic.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn update_without_spawn_is_noop() {
+        tokio::spawn(async {
+            update(3, "WattMail — 3 unread emails".into());
+        })
+        .await
+        .expect("join");
     }
 }
