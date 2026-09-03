@@ -2111,3 +2111,63 @@ body.is-dragging-mail .folder.folder-drop-forbidden:hover {
 .about-link:hover {
   text-decoration: underline;
 }
+
+/* ---- New mail popout (Outlook-like) ---- */
+.new-mail-popout {
+  position: fixed;
+  top: 14px;
+  right: 16px;
+  z-index: 70; /* above the existing overlays (z-index 60) */
+  width: 360px;
+  max-width: calc(100vw - 32px);
+  background: oklch(var(--b1));
+  color: oklch(var(--bc));
+  border: 1px solid oklch(var(--bc) / 0.14);
+  border-radius: 12px;
+  box-shadow: 0 16px 48px rgba(0, 0, 0, 0.5);
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  opacity: 0;
+  transform: translateY(-8px);
+  pointer-events: none;
+  transition: opacity 160ms ease, transform 160ms ease;
+}
+
+.new-mail-popout.is-visible {
+  opacity: 1;
+  transform: translateY(0);
+  pointer-events: auto;
+}
+
+.new-mail-popout-text {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.new-mail-popout-title {
+  font-weight: 650;
+  font-size: 13px;
+}
+
+.new-mail-popout-from {
+  font-size: 12px;
+  opacity: 0.7;
+}
+
+.new-mail-popout-subject {
+  font-size: 13px;
+  font-weight: 600;
+  overflow: hidden;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+}
+
+.new-mail-popout-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}

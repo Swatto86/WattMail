@@ -31,5 +31,7 @@ Auth: `AuthService::access_token` refreshes via keyring-backed refresh token.
 
 - 2026-09-03: v0.14.4 — tray updates must not call ksni blocking API on Tokio
   workers (Omarchy SIGABRT). Dedicated `wattmail-tray` thread.
+- 2026-09-03: Add in-window new-mail popout and Linux/macOS notification
+  sound (best-effort via freedesktop/macOS system sounds).
 - 2026-09-02: v0.14.3 — strip AppImage env when spawning browser/attachments.
 - Living progress log: `CONTEXT.md`.

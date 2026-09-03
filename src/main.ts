@@ -2825,6 +2825,82 @@ async function selectFolder(id: string): Promise<void> {
 // folder isn't the Inbox) and ask the backend for messages newer than the
 // last-notified watermark, so new mail is announced no matter which folder is
 // open. The backend seeds its watermark silently on the first check per account.
+const NEW_MAIL_POPOUT_TIMEOUT_MS = 8000;
+let newMailPopoutEl: HTMLDivElement | null = null;
+let newMailPopoutHideTimer: number | null = null;
+
+function dismissNewMailPopout(): void {
+  if (!newMailPopoutEl) return;
+  newMailPopoutEl.classList.remove("is-visible");
+  if (newMailPopoutHideTimer) window.clearTimeout(newMailPopoutHideTimer);
+  newMailPopoutHideTimer = null;
+}
+
+function ensureNewMailPopoutEl(): HTMLDivElement {
+  if (newMailPopoutEl) return newMailPopoutEl;
+  newMailPopoutEl = document.createElement("div");
+  newMailPopoutEl.id = "new-mail-popout";
+  newMailPopoutEl.className = "new-mail-popout";
+  newMailPopoutEl.setAttribute("role", "status");
+  newMailPopoutEl.setAttribute("aria-live", "polite");
+  newMailPopoutEl.innerHTML = `
+    <div class="new-mail-popout-text">
+      <div class="new-mail-popout-title" data-nmp-title></div>
+      <div class="new-mail-popout-from" data-nmp-from></div>
+      <div class="new-mail-popout-subject" data-nmp-subject></div>
+    </div>
+    <div class="new-mail-popout-actions">
+      <button class="btn btn-xs btn-primary" type="button" data-nmp-open>Open</button>
+      <button class="btn btn-xs" type="button" data-nmp-dismiss>Dismiss</button>
+    </div>
+  `;
+  document.body.appendChild(newMailPopoutEl);
+
+  const openBtn = newMailPopoutEl.querySelector<HTMLButtonElement>("[data-nmp-open]")!;
+  const dismissBtn = newMailPopoutEl.querySelector<HTMLButtonElement>("[data-nmp-dismiss]")!;
+
+  openBtn.addEventListener("click", () => {
+    const id = newMailPopoutEl?.dataset.nmpMessageId;
+    const subj = newMailPopoutEl?.dataset.nmpSubject ?? "";
+    dismissNewMailPopout();
+    if (id) openMessageWindow(id, subj);
+  });
+  dismissBtn.addEventListener("click", () => {
+    dismissNewMailPopout();
+  });
+
+  return newMailPopoutEl;
+}
+
+function showNewMailPopout(opts: {
+  count: number;
+  newestId: string;
+  newestFrom: string;
+  newestSubject: string;
+}): void {
+  const el = ensureNewMailPopoutEl();
+
+  if (newMailPopoutHideTimer) window.clearTimeout(newMailPopoutHideTimer);
+  newMailPopoutHideTimer = null;
+
+  el.dataset.nmpMessageId = opts.newestId;
+  el.dataset.nmpSubject = opts.newestSubject;
+
+  const titleEl = el.querySelector<HTMLElement>("[data-nmp-title]")!;
+  const fromEl = el.querySelector<HTMLElement>("[data-nmp-from]")!;
+  const subjEl = el.querySelector<HTMLElement>("[data-nmp-subject]")!;
+
+  titleEl.textContent = opts.count === 1 ? "New email" : `${opts.count} new emails`;
+  fromEl.textContent = opts.newestFrom ? `From ${opts.newestFrom}` : "";
+  fromEl.hidden = !opts.newestFrom;
+  subjEl.textContent = opts.newestSubject;
+
+  el.classList.add("is-visible");
+  newMailPopoutHideTimer = window.setTimeout(() => {
+    dismissNewMailPopout();
+  }, NEW_MAIL_POPOUT_TIMEOUT_MS);
+}
+
 async function checkInboxForNewMail(): Promise<void> {
   const inboxFolder = folders.find((f) => f.role === "inbox");
   if (!inboxFolder) return;
@@ -2856,6 +2932,15 @@ async function checkNewMail(inboxFolderId: string): Promise<void> {
     });
     if (!batch) return;
     const body = batch.count === 1 ? batch.newestSubject : `${batch.count} new messages`;
+
+    const newestMessage = inbox.messages.find((m) => m.id === batch.newestId);
+    showNewMailPopout({
+      count: batch.count,
+      newestId: batch.newestId,
+      newestFrom: newestMessage?.from ?? "",
+      newestSubject: batch.newestSubject,
+    });
+
     void invoke("play_new_mail_sound").catch(() => {});
     await sendNotification({ title: "WattMail", body });
   } catch {

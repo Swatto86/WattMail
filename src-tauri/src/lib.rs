@@ -300,7 +300,56 @@ pub(crate) fn play_notify_sound() {
 }
 
 #[cfg(not(windows))]
-pub(crate) fn play_notify_sound() {}
+pub(crate) fn play_notify_sound() {
+    // Best-effort: use system sound tooling when available.
+    // This is executed on demand by a Tauri command, so it must never fail
+    // loudly (audio is a "nice to have").
+    #[cfg(target_os = "linux")]
+    {
+        std::thread::spawn(|| {
+            fn try_cmd(prog: &str, args: &[&str]) -> bool {
+                std::process::Command::new(prog)
+                    .args(args)
+                    .status()
+                    .map(|s| s.success())
+                    .unwrap_or(false)
+            }
+
+            // canberra-gtk-play respects the freedesktop sound theme settings
+            // (user sound scheme), so prefer it when present.
+            if try_cmd("canberra-gtk-play", &["-i", "message-new-email"]) {
+                return;
+            }
+            if try_cmd("canberra-gtk-play", &["-i", "mail-notification"]) {
+                return;
+            }
+            if try_cmd("canberra-gtk-play", &["-i", "bell"]) {
+                return;
+            }
+
+            // Fallback: play a common freedesktop sound file via paplay.
+            let fallback = "/usr/share/sounds/freedesktop/stereo/alarm-clock-elapsed.oga";
+            if std::path::Path::new(fallback).exists() && try_cmd("paplay", &[fallback]) {
+                return;
+            }
+            let fallback2 = "/usr/share/sounds/freedesktop/stereo/bell.oga";
+            if std::path::Path::new(fallback2).exists() && try_cmd("paplay", &[fallback2]) {
+                return;
+            }
+        });
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        std::thread::spawn(|| {
+            let path = "/System/Library/Sounds/Ping.aiff";
+            if !std::path::Path::new(path).exists() {
+                return;
+            }
+            let _ = std::process::Command::new("afplay").arg(path).status();
+        });
+    }
+}
 
 /// Update the tray icon + tooltip to reflect the inbox unread count. The tooltip
 /// includes the signed-in account email when available (read from the cached
