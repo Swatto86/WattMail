@@ -5,7 +5,7 @@
 > new milestone state, a decision made/reversed, or an open question resolved.
 > Keep newest progress entries at the top of the log.
 >
-> **Last updated:** 2026-09-03
+> **Last updated:** 2026-09-04
 
 ---
 
@@ -101,6 +101,15 @@ Entra app registration (public, not secret):
 ---
 
 ## Progress log
+
+### 2026-09-04 — Tray open crashed on NVIDIA/Hyprland (v0.14.7)
+
+Single-clicking the tray after `--hidden` autostart exited with Wayland
+protocol error 71; WebKitWebProcess SIGSEGV'd in nvidia-egl (SkiaGPUWorker).
+Root cause: WebKit DMA-BUF + Hyprland acquire-point rule (same class as
+tauri#10702 / WebKit #280210), not the ksni/Tokio abort. Fix: call
+`webkit2gtk-nvidia-quirk` before GTK init so Hyprland gets
+`WEBKIT_DISABLE_DMABUF_RENDERER=1`.
 
 ### 2026-09-03 — Tray click toggles the window (v0.14.6)
 

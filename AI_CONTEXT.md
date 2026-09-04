@@ -12,11 +12,15 @@ calendar. Tauri v2 shell; tokens and cache keys live in the OS keychain.
 - Frontend: Vite + TypeScript + Tailwind/DaisyUI (vanilla TS)
 - Linux tray: ksni StatusNotifierItem (`src-tauri/src/tray_linux.rs`) on a
   dedicated thread so ksni’s blocking `block_on` never runs on Tokio workers
+- Linux WebKit/NVIDIA: `src-tauri/src/linux_webkit.rs` applies
+  `webkit2gtk-nvidia-quirk` before GTK init (Hyprland → DMABUF off)
 - Packaging: Windows NSIS + portable exe; Linux signed AppImage (tag-driven CI)
 
 ## Component Map
 
 - `src-tauri/src/lib.rs` — composition, tray branch (Linux ksni vs native)
+- `src-tauri/src/linux_webkit.rs` — NVIDIA/Hyprland WebKit env quirks at boot
+- `src-tauri/src/window_ops.rs` — show / toggle main window (tray Activate)
 - `src-tauri/src/notify.rs` — OS notifications + new-mail sound off Tokio
   workers (`zbus::block_on` / `canberra` / `MessageBeep`)
 - `src-tauri/src/commands.rs` — IPC; `set_unread` → `update_tray`
@@ -33,6 +37,9 @@ Auth: `AuthService::access_token` refreshes via keyring-backed refresh token.
 
 ## Recent Context & Decisions
 
+- 2026-09-04: v0.14.7 — Linux NVIDIA/Hyprland: apply `webkit2gtk-nvidia-quirk`
+  before GTK init (`WEBKIT_DISABLE_DMABUF_RENDERER`) so tray Activate / show
+  after `--hidden` does not die with Wayland protocol error 71.
 - 2026-09-03: v0.14.6 — tray primary-click toggles the window (hide if shown).
 - 2026-09-03: v0.14.4 — tray updates must not call ksni blocking API on Tokio
   workers (Omarchy SIGABRT). Dedicated `wattmail-tray` thread.

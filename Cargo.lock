@@ -5480,7 +5480,7 @@ dependencies = [
 
 [[package]]
 name = "wattmail-desktop"
-version = "0.14.6"
+version = "0.14.7"
 dependencies = [
  "base64 0.22.1",
  "dirs 6.0.0",
@@ -5502,6 +5502,7 @@ dependencies = [
  "wattmail-application",
  "wattmail-domain",
  "wattmail-infrastructure",
+ "webkit2gtk-nvidia-quirk",
 ]
 
 [[package]]
@@ -5605,6 +5606,12 @@ dependencies = [
  "soup3",
  "webkit2gtk-sys",
 ]
+
+[[package]]
+name = "webkit2gtk-nvidia-quirk"
+version = "2.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "95abc82d49b4bed3e3189452c88ec88e37ad4cc5b98ed9ff7c8b34c471b577b4"
 
 [[package]]
 name = "webkit2gtk-sys"

@@ -6,11 +6,14 @@
 mod accounts;
 mod commands;
 mod external_open;
+#[cfg(target_os = "linux")]
+pub mod linux_webkit;
 mod notify;
 mod paths;
 mod settings;
 #[cfg(target_os = "linux")]
 mod tray_linux;
+mod window_ops;
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -26,6 +29,7 @@ use tauri::{AppHandle, Emitter, Manager, WindowEvent};
 
 use accounts::AccountManager;
 use settings::SettingsState;
+pub(crate) use window_ops::{show_main, toggle_main};
 
 /// CLI flag the autostart entry passes so a login-launched instance stays in the
 /// tray instead of showing its window. Manual launches omit it and show normally.
@@ -38,7 +42,7 @@ pub(crate) struct StartHidden(pub bool);
 /// Set once the user explicitly closes the window to the tray, so the startup
 /// safety-net (which re-shows a window the frontend failed to reveal) doesn't
 /// pop the window back up against that explicit action.
-static USER_HID_WINDOW: AtomicBool = AtomicBool::new(false);
+pub(crate) static USER_HID_WINDOW: AtomicBool = AtomicBool::new(false);
 
 /// In-memory state for desktop new-mail notifications: per account, the most
 /// recent `receivedDateTime` we have already notified about, so we only fire on
@@ -69,6 +73,10 @@ pub(crate) struct MessageWindows(pub RwLock<HashMap<String, MessageTarget>>);
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // Must run before Builder: WebKit reads these env vars at first init.
+    #[cfg(target_os = "linux")]
+    linux_webkit::apply_session_quirks();
+
     let accounts = AccountManager::load();
     let loaded = settings::load();
     let start_hidden = std::env::args().any(|arg| arg == HIDDEN_FLAG);
@@ -323,75 +331,4 @@ pub(crate) fn update_tray(app: &AppHandle, unread: u32) {
 /// tray tooltip.
 fn cached_account_email(app: &AppHandle) -> Option<String> {
     app.state::<AccountManager>().active_cached_email()
-}
-
-/// Bring the main window to the foreground.
-fn show_main(app: &AppHandle) {
-    if let Some(window) = app.get_webview_window("main") {
-        let _ = window.show();
-        let _ = window.unminimize();
-        let _ = window.set_focus();
-    }
-}
-
-/// Primary tray click: hide when the window is shown, show when it is not.
-/// Minimized counts as not shown so a tray click restores rather than hiding.
-fn tray_click_hides(visible: bool, minimized: bool) -> bool {
-    visible && !minimized
-}
-
-/// Toggle the main window from a tray primary-click (Linux SNI Activate or
-/// Windows/macOS left-click). The tray menu's "Show WattMail" still always shows.
-pub(crate) fn toggle_main(app: &AppHandle) {
-    let Some(window) = app.get_webview_window("main") else {
-        return;
-    };
-    let visible = window.is_visible().unwrap_or(false);
-    let minimized = window.is_minimized().unwrap_or(false);
-    if tray_click_hides(visible, minimized) {
-        USER_HID_WINDOW.store(true, Ordering::SeqCst);
-        let _ = window.hide();
-    } else {
-        show_main(app);
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::tray_click_hides;
-
-    #[test]
-    fn tray_click_hides_when_the_window_is_shown() {
-        assert!(
-            tray_click_hides(true, false),
-            "shown window must hide on tray click"
-        );
-        assert!(
-            !tray_click_hides(false, false),
-            "hidden window must show on tray click"
-        );
-        assert!(
-            !tray_click_hides(true, true),
-            "minimized window must restore, not hide"
-        );
-        assert!(!tray_click_hides(false, true), "hidden+minimized must show");
-    }
-
-    #[test]
-    fn tray_primary_click_is_wired_to_toggle() {
-        let lib = include_str!("lib.rs");
-        assert!(
-            lib.contains("toggle_main(tray.app_handle())"),
-            "Windows/macOS left-click must toggle, not only show"
-        );
-        let linux = include_str!("tray_linux.rs");
-        assert!(
-            linux.contains("fn activate("),
-            "scan must see Linux Activate before asserting the toggle"
-        );
-        assert!(
-            linux.contains("toggle_main(&self.app)"),
-            "Linux SNI Activate must toggle, not only show"
-        );
-    }
 }
