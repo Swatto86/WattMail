@@ -35,6 +35,24 @@ url = "2"
 open = "5"
 ammonia = "4"
 
+# Dev / iteration — keep workspace crates unoptimized for fast rebuilds;
+# lightly optimize deps once; slim debuginfo. Release profile below is unchanged.
+[profile.dev]
+incremental = true
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+opt-level = 1
+debug = false
+
+[profile.dev.build-override]
+opt-level = 3
+
+# Full symbols when debugging: cargo build --profile debugging
+[profile.debugging]
+inherits = "dev"
+debug = true
+
 # Release profile lives at the workspace root (member profiles are ignored).
 # Tuned for a small, fast binary — the AllTheThings recipe.
 [profile.release]

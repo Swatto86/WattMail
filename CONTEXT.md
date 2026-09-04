@@ -102,6 +102,15 @@ Entra app registration (public, not secret):
 
 ## Progress log
 
+### 2026-09-04 — Compile-speed defaults (dev profile, fastcheck, CI)
+
+Workspace `[profile.dev]` with incremental, line-tables-only debuginfo, dep
+`opt-level = 1`, and `build-override` opt 3; `[profile.debugging]` for full
+symbols. `scripts/fastcheck.sh` for iteration (`-p` = check only). CI: sccache
+on Rust jobs; Windows verify uses `tauri build --debug --no-bundle` instead of
+full installer packaging. Release LTO unchanged. Linux `mold` linker is
+host-local (`~/.cargo/config.toml`), not committed (mixed Windows/Linux CI).
+
 ### 2026-09-04 — Tray open crashed on NVIDIA/Hyprland (v0.14.7)
 
 Single-clicking the tray after `--hidden` autostart exited with Wayland

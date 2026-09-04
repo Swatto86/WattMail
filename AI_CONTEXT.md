@@ -15,6 +15,10 @@ calendar. Tauri v2 shell; tokens and cache keys live in the OS keychain.
 - Linux WebKit/NVIDIA: `src-tauri/src/linux_webkit.rs` applies
   `webkit2gtk-nvidia-quirk` before GTK init (Hyprland → DMABUF off)
 - Packaging: Windows NSIS + portable exe; Linux signed AppImage (tag-driven CI)
+- Compile speed: workspace `[profile.dev]` (line-tables, dep opt-level 1,
+  build-override 3); `scripts/fastcheck.sh`; CI uses sccache + debug
+  `tauri build --debug --no-bundle` (release LTO unchanged). Linux `mold`
+  is host-local (`~/.cargo/config.toml`), not committed.
 
 ## Component Map
 
@@ -26,6 +30,7 @@ calendar. Tauri v2 shell; tokens and cache keys live in the OS keychain.
 - `src-tauri/src/commands.rs` — IPC; `set_unread` → `update_tray`
 - `crates/infrastructure/` — Graph, OAuth, keyring token store, SQLite cache
 - `scripts/verify.sh` — full gate (fmt/clippy/test + reader-frame webview check)
+- `scripts/fastcheck.sh` — iteration gate (`-p <crate>` = check only)
 
 ## Data Flow
 
@@ -37,6 +42,9 @@ Auth: `AuthService::access_token` refreshes via keyring-backed refresh token.
 
 ## Recent Context & Decisions
 
+- 2026-09-04: Compile-speed defaults — proper `dev`/`debugging` profiles,
+  `fastcheck.sh`, CI sccache, PR CI debug compile (no packaging). Release
+  LTO left alone; Linux mold is host-local.
 - 2026-09-04: v0.14.7 — Linux NVIDIA/Hyprland: apply `webkit2gtk-nvidia-quirk`
   before GTK init (`WEBKIT_DISABLE_DMABUF_RENDERER`) so tray Activate / show
   after `--hidden` does not die with Wayland protocol error 71.

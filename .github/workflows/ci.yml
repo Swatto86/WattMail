@@ -10,6 +10,11 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
+env:
+  RUSTC_WRAPPER: sccache
+  SCCACHE_GHA_ENABLED: "true"
+  CARGO_INCREMENTAL: "0"
+
 jobs:
   verify:
     runs-on: windows-latest
@@ -26,6 +31,8 @@ jobs:
         with:
           components: rustfmt, clippy
 
+      - uses: mozilla-actions/sccache-action@v0.0.10
+
       - uses: Swatinem/rust-cache@v2
 
       - name: Install frontend dependencies
@@ -40,21 +47,12 @@ jobs:
         run: cargo fmt --all --check
 
       - name: Clippy
-        run: cargo clippy --all-targets -- -D warnings
+        run: cargo clippy --locked --all-targets -- -D warnings
 
-      # Full bundle (runs beforeBuildCommand + release build + installer), so a
-      # broken bundle can't ship green. Skipped on release commits (marked
-      # "[release]"), where release.yml does the full build + publish — no point
-      # paying for it twice. fmt/clippy/frontend above still run.
-      - name: Tauri build
-        if: ${{ !contains(github.event.head_commit.message, '[release]') }}
-        # `createUpdaterArtifacts: true` makes the bundler sign the installer, so
-        # the signing key must be present or the build fails after producing the
-        # bundle ("public key found, but no private key"). Mirror release.yml.
-        env:
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ""
-        run: npm run tauri build
+      # Debug compile of the real app — not installer packaging. Packaging,
+      # signing, and updater artifacts belong to the tag-driven release.yml.
+      - name: Tauri debug build
+        run: npx tauri build --debug --no-bundle
 
   # WattMail ships Windows-first, but the codebase is cross-platform. This job
   # compiles the macOS/Linux code paths — the `cfg(not(windows))` branches and
@@ -78,6 +76,8 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.96.0
         with:
           components: rustfmt, clippy
+
+      - uses: mozilla-actions/sccache-action@v0.0.10
 
       - uses: Swatinem/rust-cache@v2
 
@@ -108,4 +108,4 @@ jobs:
         run: cargo fmt --all --check
 
       - name: Clippy
-        run: cargo clippy --all-targets -- -D warnings
+        run: cargo clippy --locked --all-targets -- -D warnings
