@@ -35,6 +35,8 @@ calendar. Tauri v2 shell; tokens and cache keys live in the OS keychain.
 ## Data Flow
 
 Frontend sync → `set_unread` → `update_tray` → (Linux) channel → ksni update.
+Boot → `checkForUpdates` → if newer signed release: banner + `downloadAndInstall`
+→ `relaunch`. About check still shows Install/Later without forcing restart.
 New mail / reminders → `show_desktop_notification` → dedicated thread →
 Linux `notify-rust` directly (never `NotificationExt::show`, which spawns
 back onto Tokio). Other OSes still use the plugin builder.
@@ -42,6 +44,8 @@ Auth: `AuthService::access_token` refreshes via keyring-backed refresh token.
 
 ## Recent Context & Decisions
 
+- 2026-09-04: v0.14.8 — launch auto-downloads and installs updates (relaunch);
+  About "Check for updates" still uses the banner + Install for a mid-session opt-in.
 - 2026-09-04: Compile-speed defaults — proper `dev`/`debugging` profiles,
   `fastcheck.sh`, CI sccache, PR CI debug compile (no packaging). Release
   LTO left alone; Linux mold is host-local.

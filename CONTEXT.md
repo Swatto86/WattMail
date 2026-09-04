@@ -102,6 +102,13 @@ Entra app registration (public, not secret):
 
 ## Progress log
 
+### 2026-09-04 — Auto-install updates on launch (v0.14.8)
+
+Launch still calls `check()`; when a newer signed release exists it now
+downloads, installs, and relaunches without waiting for the banner button.
+About → Check for updates still shows the banner with Install / Later so a
+mid-session check does not force an immediate restart.
+
 ### 2026-09-04 — Compile-speed defaults (dev profile, fastcheck, CI)
 
 Workspace `[profile.dev]` with incremental, line-tables-only debuginfo, dep

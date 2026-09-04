@@ -3464,9 +3464,9 @@ function closeAbout(): void {
   aboutOverlay.classList.add("hidden");
 }
 
-// Explicit "check for updates" from the About dialog: unlike the silent
-// launch check, it always reports a result. A found update reuses the existing
-// banner + install flow.
+// Explicit "check for updates" from the About dialog: always reports a result.
+// A found update reuses the banner; Install stays manual here so a mid-session
+// check does not force an immediate restart the way the launch check does.
 async function aboutCheckUpdates(): Promise<void> {
   aboutUpdatesBtn.disabled = true;
   aboutMsg.textContent = "Checking for updates…";
@@ -3474,6 +3474,8 @@ async function aboutCheckUpdates(): Promise<void> {
     const update = await check();
     if (update) {
       pendingUpdate = update;
+      updateInstall.classList.remove("hidden");
+      updateLater.classList.remove("hidden");
       updateText.textContent = `WattMail ${update.version} is available.`;
       updateBanner.classList.remove("hidden");
       aboutMsg.textContent = `Version ${update.version} is available — close this dialog and use the update banner at the top to install it.`;
@@ -6591,13 +6593,18 @@ void listen("app-quit-flush", async () => {
 // ---- Updates ----
 let pendingUpdate: Update | null = null;
 
+/** Silent launch check: if a signed update exists, download it and restart. */
 async function checkForUpdates(): Promise<void> {
   try {
     const update = await check();
     if (!update) return;
     pendingUpdate = update;
-    updateText.textContent = `WattMail ${update.version} is available.`;
+    // Hide the opt-in buttons — launch installs without waiting for a click.
+    updateInstall.classList.add("hidden");
+    updateLater.classList.add("hidden");
     updateBanner.classList.remove("hidden");
+    updateText.textContent = `WattMail ${update.version} is available — downloading and restarting…`;
+    await installUpdate();
   } catch {
     /* offline, or no published update manifest yet — ignore */
   }
@@ -6606,13 +6613,18 @@ async function checkForUpdates(): Promise<void> {
 async function installUpdate(): Promise<void> {
   if (!pendingUpdate) return;
   updateInstall.disabled = true;
-  updateText.textContent = "Downloading update…";
+  if (!updateText.textContent?.includes("downloading")) {
+    updateText.textContent = "Downloading update…";
+  }
   try {
     await pendingUpdate.downloadAndInstall();
     await relaunch();
   } catch (e) {
     updateText.textContent = `Update failed: ${e}`;
     updateInstall.disabled = false;
+    // Restore buttons so the user can retry or dismiss after a failed auto-install.
+    updateInstall.classList.remove("hidden");
+    updateLater.classList.remove("hidden");
   }
 }
 

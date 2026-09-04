@@ -15,6 +15,9 @@ mod settings;
 mod tray_linux;
 mod window_ops;
 
+#[cfg(test)]
+mod frontend_wire;
+
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::RwLock;
