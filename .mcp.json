@@ -1,0 +1,10 @@
+{
+  "mcpServers": {
+    "agent-memory": {
+      "command": "node",
+      "args": [
+        "${HOME}/.agents/memory-mcp/server.mjs"
+      ]
+    }
+  }
+}
