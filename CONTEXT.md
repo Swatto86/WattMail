@@ -102,7 +102,7 @@ Entra app registration (public, not secret):
 
 ## Progress log
 
-### 2026-09-05 — Secrets vault: one keychain read per process; autostart guard
+### 2026-09-05 — Secrets vault: one keychain read per process; autostart guard (v0.15.0)
 
 - **Problem:** gnome-keyring-daemon 50.0 on swatarch aborts
   (`gkd_secret_service_get_pkcs11_session: assertion 'client' failed`) when two

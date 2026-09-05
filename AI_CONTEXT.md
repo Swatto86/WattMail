@@ -53,7 +53,7 @@ aborts on that).
 
 ## Recent Context & Decisions
 
-- 2026-09-05: Secrets vault — every refresh token / app-password in
+- 2026-09-05: v0.15.0 — Secrets vault: every refresh token / app-password in
   `<data dir>/secrets.bin` (AES-256-GCM, 0600), keyed off the existing
   `cache-key` keychain item via SHA-256 derivation; one keychain read per
   process; paced migration from the chunked entries; autostart toggle refuses
