@@ -136,11 +136,23 @@ struct TokenErrorResponse {
     error_description: String,
 }
 
+/// Hands the authorize URL to the user's browser. Injectable because the
+/// right way to launch a browser depends on the host process: inside an
+/// AppImage the child must be spawned with the bundled-library environment
+/// stripped (see the desktop crate's `external_open`), or the browser loads
+/// our libraries and dies before it draws a window.
+pub type BrowserOpener = Arc<dyn Fn(&str) -> Result<(), String> + Send + Sync>;
+
+fn default_browser_opener() -> BrowserOpener {
+    Arc::new(|url| open::that(url).map_err(|e| e.to_string()))
+}
+
 /// Coordinates the OAuth lifecycle: cached token → refresh → interactive.
 pub struct AuthService {
     config: OAuthConfig,
     http: reqwest::Client,
     store: TokenStore,
+    browser: BrowserOpener,
     /// Access token cached for this process; avoids refreshing on every call.
     cache: Mutex<Option<TokenSet>>,
     /// Serializes silent refreshes: two concurrent expired-token callers would
@@ -174,11 +186,18 @@ impl AuthService {
                 .build()
                 .map_err(AuthError::Http)?,
             store: TokenStore::new(vault, prefix),
+            browser: default_browser_opener(),
             cache: Mutex::new(None),
             refresh_lock: tokio::sync::Mutex::new(()),
             signed_out: AtomicBool::new(false),
             store_lock: Mutex::new(()),
         })
+    }
+
+    /// Use `opener` instead of the `open` crate to launch the sign-in browser.
+    pub fn with_browser_opener(mut self, opener: BrowserOpener) -> Self {
+        self.browser = opener;
+        self
     }
 
     /// Return a valid access token, refreshing silently when needed.
@@ -329,7 +348,7 @@ impl AuthService {
         let state = random_token();
 
         let authorize_url = self.build_authorize_url(&redirect_uri, &pkce.challenge, &state);
-        open::that(&authorize_url).map_err(AuthError::Browser)?;
+        (self.browser)(&authorize_url).map_err(|e| AuthError::Browser(io_other(e)))?;
         println!("Opened your browser to sign in. Waiting for the redirect…");
 
         // One waiter per listener; the first meaningful outcome (code, error,
@@ -577,6 +596,44 @@ mod tests {
         for server in &servers {
             server.unblock();
         }
+    }
+
+    /// The configured opener is what launches the browser, and its failure
+    /// ends the sign-in before any listener wait: a browser that cannot start
+    /// (the AppImage library-path case) surfaces as an error, not a hang.
+    #[tokio::test]
+    async fn interactive_login_uses_the_injected_browser_opener() {
+        let dir = crate::vault::test_support::TempDir::new("auth-opener");
+        let vault = Arc::new(SecretVault::with_key(
+            dir.path().join("secrets.bin"),
+            [4u8; 32],
+        ));
+        let seen: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+        let record = seen.clone();
+        let auth = AuthService::new(
+            OAuthConfig::office365("tenant", "client-123"),
+            vault,
+            "office365:test",
+        )
+        .expect("service")
+        .with_browser_opener(Arc::new(move |url| {
+            *record.lock().expect("lock") = Some(url.to_string());
+            Err("no browser here".to_string())
+        }));
+
+        let err = auth.interactive_login().await.expect_err("opener failed");
+        assert!(matches!(err, AuthError::Browser(_)), "{err}");
+        let url = seen
+            .lock()
+            .expect("lock")
+            .clone()
+            .expect("opener was called");
+        assert!(url.contains("client_id=client-123"), "{url}");
+        assert!(url.contains("code_challenge="), "{url}");
+        assert!(
+            url.contains("redirect_uri=http%3A%2F%2Flocalhost%3A"),
+            "{url}"
+        );
     }
 
     #[test]

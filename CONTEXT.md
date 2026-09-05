@@ -5,7 +5,7 @@
 > new milestone state, a decision made/reversed, or an open question resolved.
 > Keep newest progress entries at the top of the log.
 >
-> **Last updated:** 2026-09-05
+> **Last updated:** 2026-09-05 (bug sweep, v0.15.1)
 
 ---
 
@@ -101,6 +101,27 @@ Entra app registration (public, not secret):
 ---
 
 ## Progress log
+
+### 2026-09-05 — Bug sweep (v0.15.1)
+
+- **Sign-in browser inside the AppImage.** `AuthService` launched the
+  authorize URL with the `open` crate, whose child inherited AppRun's
+  `LD_LIBRARY_PATH` and friends — the same environment that made Chromium die
+  before drawing a window for email links (`external_open.rs`). The service
+  now takes an injectable `BrowserOpener`; the desktop crate passes
+  `external_open::open_url`, so Add account / re-authenticate open the browser
+  with the bundled-library variables stripped. Test: the injected opener is
+  what receives the authorize URL, and its failure ends the login.
+- **Sanitizer: CSS functions are allowlisted.** `image-set()` /
+  `-webkit-image-set()` take a bare string and load it like `url()`, so a
+  tracking pixel could ride through "remote content blocked". A declaration
+  now survives only when every `name(` is a colour/maths function (`rgb`,
+  `rgba`, `hsl`, `hsla`, `calc`, `min`, `max`, `clamp`, `var`).
+- **Updates while resident.** The signed manifest is re-checked every four
+  hours, not only at launch; the update is downloaded first and installed
+  only once no sync, open compose, autosave or undo-send window is in
+  flight, then the app relaunches.
+- Close-to-tray calls `prevent_close` before hiding.
 
 ### 2026-09-05 — Secrets vault: one keychain read per process; autostart guard (v0.15.0)
 

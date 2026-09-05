@@ -208,6 +208,31 @@ fn is_safe_css_value(value: &str) -> bool {
         && !lower.contains("javascript:")
         && !lower.contains("@import")
         && !lower.contains("/*")
+        && only_allowed_css_functions(&lower)
+}
+
+/// CSS functions a mail style may call. Every other function is dropped with
+/// its declaration: `image-set()` / `-webkit-image-set()` take a bare string
+/// and load it exactly like `url()`, and the rest (`element()`, `paint()`,
+/// `src()`, `cross-fade()`, …) either load or execute.
+const ALLOWED_CSS_FUNCTIONS: &[&str] = &[
+    "rgb", "rgba", "hsl", "hsla", "calc", "min", "max", "clamp", "var",
+];
+
+/// True when every `name(` in the (lowercased) value names an allowed function.
+fn only_allowed_css_functions(lower: &str) -> bool {
+    let mut rest = lower;
+    while let Some(paren) = rest.find('(') {
+        let before = &rest[..paren];
+        let name_start = before
+            .rfind(|c: char| !(c.is_ascii_alphanumeric() || c == '-' || c == '_'))
+            .map_or(0, |i| i + 1);
+        if !ALLOWED_CSS_FUNCTIONS.contains(&&before[name_start..]) {
+            return false;
+        }
+        rest = &rest[paren + 1..];
+    }
+    true
 }
 
 /// Tags that close an open `<p>` in HTML5 and are used as "bulletproof" email
@@ -479,6 +504,39 @@ mod tests {
             assert!(!out.contains('\\'), "escape survived: {out}");
             assert!(!out.contains("tracker.example"), "url survived: {out}");
         }
+    }
+
+    #[test]
+    fn image_set_and_other_loading_functions_cannot_smuggle_a_remote_fetch() {
+        // `image-set()` takes a bare string, so the `url(` check never sees it —
+        // yet WebKit fetches it exactly like a `url()`. The whole declaration
+        // must go, in blocked and allowed mode alike; colour functions stay.
+        for style in [
+            r#"background: -webkit-image-set("http://tracker.example/p.gif" 1x)"#,
+            r#"background-image: image-set("http://tracker.example/p.gif" 1x)"#,
+            "background: element(#x)",
+            "background: paint(worklet)",
+            r#"background: cross-fade("http://tracker.example/a.png" 50%, red)"#,
+        ] {
+            for allow_images in [false, true] {
+                let out =
+                    sanitize_email(&format!("<div style='{style}'>x</div>"), true, allow_images)
+                        .html;
+                assert!(!out.contains("tracker.example"), "url survived: {out}");
+                assert!(
+                    !out.contains("element(") && !out.contains("paint("),
+                    "{out}"
+                );
+            }
+        }
+        let kept = sanitize_email(
+            r#"<div style="color:rgb(1, 2, 3);background-color:rgba(0,0,0,0.5);width:calc(100% - 4px)">x</div>"#,
+            true,
+            false,
+        )
+        .html;
+        assert!(kept.contains("rgb(1, 2, 3)"), "{kept}");
+        assert!(kept.contains("calc(100% - 4px)"), "{kept}");
     }
 
     #[test]

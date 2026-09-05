@@ -10,7 +10,7 @@ mod secrets;
 pub mod store;
 mod vault;
 
-pub use auth::{AuthError, AuthService, OAuthConfig, TokenSet};
+pub use auth::{AuthError, AuthService, BrowserOpener, OAuthConfig, TokenSet};
 pub use graph::GraphClient;
 pub use provider::{
     build_calendar_provider, build_mail_provider, ProviderCredentials, ProviderKind,

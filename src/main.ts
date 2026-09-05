@@ -6588,9 +6588,24 @@ void listen("app-quit-flush", async () => {
 
 // ---- Updates ----
 let pendingUpdate: Update | null = null;
+/** Re-check the signed manifest this often while the app stays resident. */
+const UPDATE_CHECK_INTERVAL_MS = 4 * 60 * 60 * 1000;
 
-/** Silent launch check: if a signed update exists, download it and restart. */
+/** Work an update install must not interrupt: a folder sync, an open compose
+ * (or its autosave / undo-send window) — the relaunch would lose or cut it. */
+function appIsBusy(): boolean {
+  return (
+    syncing ||
+    !composeOverlay.classList.contains("hidden") ||
+    composeSaveSession !== null ||
+    undoSendCancel !== null
+  );
+}
+
+/** Silent check (launch, then every few hours): if a signed update exists,
+ * download it, wait for a quiet moment, install and restart. */
 async function checkForUpdates(): Promise<void> {
+  if (pendingUpdate) return; // already downloading / waiting to install
   try {
     const update = await check();
     if (!update) return;
@@ -6613,11 +6628,18 @@ async function installUpdate(): Promise<void> {
     updateText.textContent = "Downloading update…";
   }
   try {
-    await pendingUpdate.downloadAndInstall();
+    await pendingUpdate.download();
+    while (appIsBusy()) {
+      updateText.textContent = `WattMail ${pendingUpdate.version} downloaded — restarting once the current sync or message is done…`;
+      await new Promise((r) => setTimeout(r, 5_000));
+    }
+    updateText.textContent = `WattMail ${pendingUpdate.version} downloaded — installing and restarting…`;
+    await pendingUpdate.install();
     await relaunch();
   } catch (e) {
     updateText.textContent = `Update failed: ${e}`;
     updateInstall.disabled = false;
+    pendingUpdate = null; // let the next check start afresh
     // Restore buttons so the user can retry or dismiss after a failed auto-install.
     updateInstall.classList.remove("hidden");
     updateLater.classList.remove("hidden");
@@ -6663,6 +6685,7 @@ async function boot(): Promise<void> {
     showSignedOut();
   }
   void checkForUpdates();
+  setInterval(() => void checkForUpdates(), UPDATE_CHECK_INTERVAL_MS);
 }
 
 // Reveal the window once the shell is built — fast perceived startup, no flash

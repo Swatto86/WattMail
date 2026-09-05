@@ -151,9 +151,9 @@ pub fn run() {
                     .map(|s| s.close_to_tray)
                     .unwrap_or(true);
                 if close_to_tray {
+                    api.prevent_close();
                     USER_HID_WINDOW.store(true, Ordering::SeqCst);
                     let _ = window.hide();
-                    api.prevent_close();
                 } else {
                     // The X quits the app. Route through the same flush path as the
                     // tray Quit item so a mid-compose draft whose debounced autosave

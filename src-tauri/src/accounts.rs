@@ -19,8 +19,8 @@ use serde::{Deserialize, Serialize};
 
 use wattmail_infrastructure::auth::TokenStore;
 use wattmail_infrastructure::{
-    build_calendar_provider, build_mail_provider, AuthService, OAuthConfig, ProviderCredentials,
-    ProviderKind, SecretVault, SqliteStore,
+    build_calendar_provider, build_mail_provider, AuthService, BrowserOpener, OAuthConfig,
+    ProviderCredentials, ProviderKind, SecretVault, SqliteStore,
 };
 
 /// Id of the adopted pre-multi-account mailbox. Its credentials and cache stay at
@@ -359,7 +359,8 @@ impl AccountManager {
 
         // 1. Interactive login (no store writes happen here).
         let pending = AuthService::new(config, self.vault.clone(), PENDING_KEYRING_PREFIX)
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| e.to_string())?
+            .with_browser_opener(browser_opener());
         let tokens = pending
             .interactive_login()
             .await
@@ -687,7 +688,9 @@ fn open_account(vault: &Arc<SecretVault>, record: AccountRecord) -> Result<Manag
     let prefix = keyring_prefix(record.provider, &record.id);
     let auth = match oauth_config_for(record.provider) {
         Some(config) => Credentials::OAuth(Box::new(
-            AuthService::new(config, vault.clone(), prefix).map_err(|e| e.to_string())?,
+            AuthService::new(config, vault.clone(), prefix)
+                .map_err(|e| e.to_string())?
+                .with_browser_opener(browser_opener()),
         )),
         None => Credentials::Basic(TokenStore::new(vault.clone(), prefix)),
     };
@@ -698,6 +701,14 @@ fn open_account(vault: &Arc<SecretVault>, record: AccountRecord) -> Result<Manag
         auth,
         store,
     })
+}
+
+/// The sign-in browser is launched through `external_open`, which strips the
+/// AppImage's bundled-library environment from the child. The `open` crate's
+/// default inherits it, and on Arch that killed Chromium before it drew a
+/// window — an "Add account" click that did nothing.
+fn browser_opener() -> BrowserOpener {
+    Arc::new(crate::external_open::open_url)
 }
 
 /// Adopt a pre-multi-account install: present only when legacy (Office 365)
