@@ -1959,6 +1959,20 @@ pub fn started_hidden(flag: State<'_, crate::StartHidden>) -> bool {
     flag.0
 }
 
+/// Whether a start-at-login entry exists for WattMail.
+#[tauri::command]
+pub fn autostart_enabled(app: tauri::AppHandle) -> Result<bool, String> {
+    crate::autostart::is_enabled(&app)
+}
+
+/// Write or remove the start-at-login entry. Refused (with the reason) when
+/// this process is not the installed app, so the entry can never point at a
+/// debug build or a download.
+#[tauri::command]
+pub fn set_autostart(app: tauri::AppHandle, enabled: bool) -> Result<(), String> {
+    crate::autostart::set_enabled(&app, enabled)
+}
+
 #[cfg(test)]
 mod tests {
     use super::{

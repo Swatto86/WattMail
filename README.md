@@ -20,7 +20,7 @@ autostart. **macOS** remains compile-checked in CI only — not built or run liv
 
 - **Office 365 over Microsoft Graph** with OAuth 2.0 (public client + PKCE, no secret).
 - **Multiple accounts** — add and switch between several mailboxes from the toolbar,
-  each with its own keychain-isolated credentials and encrypted cache, so mail and
+  each with its own isolated credentials and encrypted cache, so mail and
   tokens never cross between accounts. **Office 365** is the only provider live in a
   default build; **Outlook.com / Hotmail** (consumer Graph) has provider code in
   `main` but is **gated off** behind a placeholder client ID — supply a real
@@ -68,8 +68,10 @@ autostart. **macOS** remains compile-checked in CI only — not built or run liv
 
 ## Security & privacy model
 
-- **OAuth** runs in the system browser; tokens live in the OS keychain (only the
-  refresh token, chunked to fit Windows Credential Manager), never in the webview.
+- **OAuth** runs in the system browser; only the refresh token is persisted, in an
+  AES-256-GCM encrypted vault file in WattMail's data directory (mode 0600 on
+  Linux), never in the webview. The vault's key is derived from the one 256-bit key
+  WattMail keeps in the OS keychain, which is read once per process.
 - **All networking happens in Rust** — the webview only does IPC, so the Content
   Security Policy stays locked (`img-src 'self' data:`, no remote origins).
 - **Email bodies** are sanitized with [`ammonia`](https://crates.io/crates/ammonia)
@@ -79,7 +81,7 @@ autostart. **macOS** remains compile-checked in CI only — not built or run liv
   as `data:` URLs — the webview never contacts a remote server. (A local fetch does
   not hide your IP; true IP-hiding would need a remote relay.)
 - **Cache at rest**: subjects, senders, recipients and previews are AES-256-GCM
-  encrypted; the key is stored in the OS keychain.
+  encrypted with that same keychain-held key.
 
 ## Architecture
 

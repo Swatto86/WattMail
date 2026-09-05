@@ -1,14 +1,15 @@
 //! Multi-account composition root.
 //!
 //! Owns every signed-in mailbox: each [`ManagedAccount`] bundles its own
-//! [`AuthService`] (refresh token in an OS-keychain namespace of its own) and its
-//! own [`SqliteStore`] (a per-account cache file), so accounts are fully isolated
-//! — switching never mixes one mailbox's mail or credentials with another's.
+//! [`AuthService`] (refresh token in a namespace of its own inside the shared
+//! secrets vault) and its own [`SqliteStore`] (a per-account cache file), so
+//! accounts are fully isolated — switching never mixes one mailbox's mail or
+//! credentials with another's.
 //!
 //! The account list and the active selection are persisted to `accounts.json` in
 //! the per-user data dir. A pre-multi-account install (single legacy mailbox) is
 //! adopted transparently on first launch under the id [`LEGACY_ID`], reusing its
-//! existing keyring entry and `cache.db` so no re-sign-in or migration is needed.
+//! existing credential namespace and `cache.db` so no re-sign-in is needed.
 
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
@@ -19,19 +20,20 @@ use serde::{Deserialize, Serialize};
 use wattmail_infrastructure::auth::TokenStore;
 use wattmail_infrastructure::{
     build_calendar_provider, build_mail_provider, AuthService, OAuthConfig, ProviderCredentials,
-    ProviderKind, SqliteStore,
+    ProviderKind, SecretVault, SqliteStore,
 };
 
 /// Id of the adopted pre-multi-account mailbox. Its credentials and cache stay at
 /// the original (un-namespaced) locations so the upgrade is seamless.
 const LEGACY_ID: &str = "default";
-/// The keyring account string the single-account version used for its refresh
-/// token. Reused verbatim for the adopted legacy (Office 365) account.
-const LEGACY_KEYRING_PREFIX: &str = "office365:refresh-token";
+/// The credential namespace (originally the keyring account string) the
+/// single-account version used for its refresh token. Reused verbatim for the
+/// adopted legacy (Office 365) account.
+pub(crate) const LEGACY_KEYRING_PREFIX: &str = "office365:refresh-token";
 /// The cache filename the single-account version used.
 const LEGACY_DB_FILE: &str = "cache.db";
-/// Throwaway keyring namespace for the interactive add-account login. The login
-/// never writes to the store, so this prefix is never actually persisted.
+/// Throwaway credential namespace for the interactive add-account login. The
+/// login never writes to the store, so this prefix is never actually persisted.
 const PENDING_KEYRING_PREFIX: &str = "auth:pending";
 
 // ---- Per-provider OAuth app credentials (public client identifiers) ----
@@ -97,8 +99,8 @@ fn provider_supports_rules(provider: ProviderKind) -> bool {
 ///
 /// Microsoft providers hold an [`AuthService`] that refreshes a short-lived
 /// OAuth access token; iCloud holds a non-expiring app-specific password in the
-/// same chunked keyring store. Separating them in the type is what stops a
-/// caller asking an iCloud account for a bearer token.
+/// same vault-backed store. Separating them in the type is what stops a caller
+/// asking an iCloud account for a bearer token.
 pub enum Credentials {
     // Boxed: an `AuthService` is an order of magnitude larger than a
     // `TokenStore`, and every account would otherwise pay for the bigger one.
@@ -107,7 +109,7 @@ pub enum Credentials {
 }
 
 impl Credentials {
-    /// Whether a usable credential is on disk (the keyring has an entry).
+    /// Whether a usable credential is on disk (the vault holds a secret).
     pub fn has_cached_credentials(&self) -> bool {
         match self {
             // `load_refresh_token` is the generic "read the stored secret" path;
@@ -147,8 +149,8 @@ pub struct AccountRecord {
 /// The on-disk shape of `accounts.json`.
 #[derive(Debug, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
-struct PersistedAccounts {
-    accounts: Vec<AccountRecord>,
+pub(crate) struct PersistedAccounts {
+    pub(crate) accounts: Vec<AccountRecord>,
     active_id: Option<String>,
 }
 
@@ -213,19 +215,22 @@ struct Inner {
 /// Tauri-managed registry of all signed-in accounts and the active selection.
 pub struct AccountManager {
     inner: RwLock<Inner>,
+    /// The one encrypted file every account's secret lives in.
+    vault: Arc<SecretVault>,
 }
 
 impl AccountManager {
     /// Build the registry from `accounts.json`, adopting a legacy single-account
-    /// install when present, and normalize the active selection.
-    pub fn load() -> Self {
+    /// install when present, and normalize the active selection. Secrets are
+    /// read from and written to `vault`.
+    pub fn load(vault: Arc<SecretVault>) -> Self {
         let persisted = read_persisted();
         let original_active = persisted.active_id.clone();
 
         let mut accounts: Vec<Arc<ManagedAccount>> = Vec::new();
         let mut all_loaded = true;
         for record in persisted.accounts {
-            match open_account(record) {
+            match open_account(&vault, record) {
                 Ok(account) => accounts.push(Arc::new(account)),
                 Err(e) => {
                     // A transient open failure (e.g. a briefly-locked cache DB)
@@ -239,7 +244,7 @@ impl AccountManager {
 
         let mut adopted = false;
         if accounts.is_empty() {
-            if let Some(account) = adopt_legacy() {
+            if let Some(account) = adopt_legacy(&vault) {
                 accounts.push(Arc::new(account));
                 adopted = true;
             }
@@ -257,6 +262,7 @@ impl AccountManager {
                 accounts,
                 active_id: active_id.clone(),
             }),
+            vault,
         };
         // Persist only when the durable list actually changed AND every account
         // loaded — so a transient failure never rewrites accounts.json without
@@ -334,7 +340,7 @@ impl AccountManager {
     ///
     /// Runs the browser login on a throwaway service against the provider's OAuth
     /// config, discovers the account identity from the provider, then persists the
-    /// tokens under that account's own keyring namespace. Re-signing into an
+    /// tokens under that account's own vault namespace. Re-signing into an
     /// account that already exists refreshes its credentials in place instead of
     /// duplicating it.
     pub async fn add_account(&self, provider: ProviderKind) -> Result<AccountSummary, String> {
@@ -352,8 +358,8 @@ impl AccountManager {
         };
 
         // 1. Interactive login (no store writes happen here).
-        let pending =
-            AuthService::new(config, PENDING_KEYRING_PREFIX).map_err(|e| e.to_string())?;
+        let pending = AuthService::new(config, self.vault.clone(), PENDING_KEYRING_PREFIX)
+            .map_err(|e| e.to_string())?;
         let tokens = pending
             .interactive_login()
             .await
@@ -395,7 +401,7 @@ impl AccountManager {
             email,
             display_name: profile.display_name,
         };
-        let account = open_account(record).map_err(|e| e.to_string())?;
+        let account = open_account(&self.vault, record).map_err(|e| e.to_string())?;
         let Credentials::OAuth(auth) = &account.auth else {
             return Err("expected an OAuth account".to_string());
         };
@@ -523,12 +529,15 @@ impl AccountManager {
         }
 
         // 3. Brand new account.
-        let account = open_account(AccountRecord {
-            id: id.clone(),
-            provider: ProviderKind::Icloud,
-            email: apple_id,
-            display_name: String::new(),
-        })?;
+        let account = open_account(
+            &self.vault,
+            AccountRecord {
+                id: id.clone(),
+                provider: ProviderKind::Icloud,
+                email: apple_id,
+                display_name: String::new(),
+            },
+        )?;
         let Credentials::Basic(store) = &account.auth else {
             return Err("expected a password-backed account".to_string());
         };
@@ -672,15 +681,15 @@ fn account_display_name(account: &ManagedAccount) -> String {
 }
 
 /// Open the credential store and cache for `record` (no network, no login). The
-/// OAuth config, keyring namespace, and cache file are all derived from the
+/// OAuth config, credential namespace, and cache file are all derived from the
 /// record's provider + id.
-fn open_account(record: AccountRecord) -> Result<ManagedAccount, String> {
+fn open_account(vault: &Arc<SecretVault>, record: AccountRecord) -> Result<ManagedAccount, String> {
     let prefix = keyring_prefix(record.provider, &record.id);
     let auth = match oauth_config_for(record.provider) {
         Some(config) => Credentials::OAuth(Box::new(
-            AuthService::new(config, prefix).map_err(|e| e.to_string())?,
+            AuthService::new(config, vault.clone(), prefix).map_err(|e| e.to_string())?,
         )),
-        None => Credentials::Basic(TokenStore::new(prefix).map_err(|e| e.to_string())?),
+        None => Credentials::Basic(TokenStore::new(vault.clone(), prefix)),
     };
     let store =
         SqliteStore::open(db_path(record.provider, &record.id)).map_err(|e| e.to_string())?;
@@ -693,13 +702,16 @@ fn open_account(record: AccountRecord) -> Result<ManagedAccount, String> {
 
 /// Adopt a pre-multi-account install: present only when legacy (Office 365)
 /// credentials exist. Identity is backfilled from the legacy cache when available.
-fn adopt_legacy() -> Option<ManagedAccount> {
-    let mut account = open_account(AccountRecord {
-        id: LEGACY_ID.to_string(),
-        provider: ProviderKind::Office365,
-        email: String::new(),
-        display_name: String::new(),
-    })
+fn adopt_legacy(vault: &Arc<SecretVault>) -> Option<ManagedAccount> {
+    let mut account = open_account(
+        vault,
+        AccountRecord {
+            id: LEGACY_ID.to_string(),
+            provider: ProviderKind::Office365,
+            email: String::new(),
+            display_name: String::new(),
+        },
+    )
     .ok()?;
 
     if !account.auth.has_cached_credentials() {
@@ -715,10 +727,12 @@ fn adopt_legacy() -> Option<ManagedAccount> {
     Some(account)
 }
 
-/// The keyring namespace for an account's refresh token. The adopted legacy
-/// Office 365 mailbox keeps the original un-namespaced prefix; everything else is
-/// namespaced by provider slug + id.
-fn keyring_prefix(provider: ProviderKind, id: &str) -> String {
+/// The credential namespace for an account's secret — historically its keyring
+/// entry prefix, now its key in the secrets vault (and the name the one-off
+/// keychain migration looks up). The adopted legacy Office 365 mailbox keeps the
+/// original un-namespaced prefix; everything else is namespaced by provider
+/// slug + id.
+pub(crate) fn keyring_prefix(provider: ProviderKind, id: &str) -> String {
     if provider == ProviderKind::Office365 && id == LEGACY_ID {
         LEGACY_KEYRING_PREFIX.to_string()
     } else if provider == ProviderKind::Icloud {
@@ -769,7 +783,7 @@ fn account_id_for(object_id: &str, email: &str) -> String {
     }
 }
 
-/// Reduce an id to characters safe for a filename / keyring entry.
+/// Reduce an id to characters safe for a filename / credential namespace.
 fn sanitize_id(raw: &str) -> String {
     raw.chars()
         .map(|c| {
@@ -786,7 +800,7 @@ fn accounts_path() -> PathBuf {
     crate::paths::data_dir().join("accounts.json")
 }
 
-fn read_persisted() -> PersistedAccounts {
+pub(crate) fn read_persisted() -> PersistedAccounts {
     std::fs::read(accounts_path())
         .ok()
         .and_then(|bytes| serde_json::from_slice(&bytes).ok())

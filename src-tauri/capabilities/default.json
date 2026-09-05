@@ -12,7 +12,6 @@
     "dialog:default",
     "updater:default",
     "process:default",
-    "autostart:default",
     "notification:default",
     "notification:allow-request-permission",
     "notification:allow-show",

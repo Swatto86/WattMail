@@ -6,14 +6,17 @@
 //! here so it can be swapped for the `oauth2` crate later without touching
 //! callers.
 
+pub mod legacy_keyring;
 mod pkce;
 mod token_store;
 
 pub use token_store::{TokenSet, TokenStore};
 
+use crate::secrets::SecretVault;
+use crate::vault::VaultError;
 use pkce::{random_token, Pkce};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 /// Static OAuth configuration for one identity provider. Provider-neutral: the
 /// endpoints, scopes, and any extra authorize parameters are explicit, so the
@@ -102,7 +105,7 @@ pub enum AuthError {
     #[error("identity provider error: {error}: {description}")]
     Provider { error: String, description: String },
     #[error("secure token store error: {0}")]
-    Store(#[from] keyring::Error),
+    Store(#[from] VaultError),
     /// The stored refresh token was rejected (revoked/expired) — the user must
     /// sign in again interactively. The message is prefixed `auth-required:` so
     /// the frontend can recognise it after the command layer stringifies it and
@@ -141,23 +144,27 @@ pub struct AuthService {
     /// Access token cached for this process; avoids refreshing on every call.
     cache: Mutex<Option<TokenSet>>,
     /// Serializes silent refreshes: two concurrent expired-token callers would
-    /// otherwise both redeem the same refresh token and interleave their
-    /// chunked keyring writes, persisting a corrupted blend of the two rotated
-    /// tokens and wedging the account until a manual re-sign-in.
+    /// otherwise both redeem the same refresh token and race their vault
+    /// writes, persisting whichever rotated token lost the race and wedging
+    /// the account until a manual re-sign-in.
     refresh_lock: tokio::sync::Mutex<()>,
     /// Set by [`sign_out`](Self::sign_out); makes [`remember`](Self::remember)
     /// a no-op so an in-flight refresh can't write a fresh token back into the
-    /// keyring entries a just-removed account already cleared.
+    /// vault slot a just-removed account already cleared.
     signed_out: AtomicBool,
     /// Mutual exclusion between `remember`'s check-then-save and `sign_out`'s
-    /// flag-then-clear, so their keyring writes can never interleave.
+    /// flag-then-clear, so their vault writes can never interleave.
     store_lock: Mutex<()>,
 }
 
 impl AuthService {
-    /// Create an auth service whose refresh token is persisted under the keyring
-    /// namespace `keyring_prefix`, so multiple accounts never collide.
-    pub fn new(config: OAuthConfig, keyring_prefix: impl Into<String>) -> Result<Self, AuthError> {
+    /// Create an auth service whose refresh token is persisted in `vault` under
+    /// the namespace `prefix`, so multiple accounts never collide.
+    pub fn new(
+        config: OAuthConfig,
+        vault: Arc<SecretVault>,
+        prefix: impl Into<String>,
+    ) -> Result<Self, AuthError> {
         Ok(Self {
             config,
             // Bounded so a black-holed token request can't hang a command forever.
@@ -166,7 +173,7 @@ impl AuthService {
                 .timeout(std::time::Duration::from_secs(30))
                 .build()
                 .map_err(AuthError::Http)?,
-            store: TokenStore::new(keyring_prefix)?,
+            store: TokenStore::new(vault, prefix),
             cache: Mutex::new(None),
             refresh_lock: tokio::sync::Mutex::new(()),
             signed_out: AtomicBool::new(false),
@@ -245,7 +252,7 @@ impl AuthService {
     }
 
     /// Cache the token set for this process and persist the (rotated) refresh
-    /// token to the OS keychain. A no-op after [`sign_out`](Self::sign_out):
+    /// token to the secrets vault. A no-op after [`sign_out`](Self::sign_out):
     /// an in-flight refresh finishing late must not resurrect credentials the
     /// account removal just erased.
     fn remember(&self, tokens: &TokenSet) -> Result<(), AuthError> {
@@ -264,7 +271,7 @@ impl AuthService {
     /// add-account flow, which runs [`interactive_login`](Self::interactive_login)
     /// on a throwaway service to obtain tokens, discovers the account identity,
     /// then hands the tokens to the real per-account service to store under its
-    /// own keyring namespace.
+    /// own vault namespace.
     pub fn remember_tokens(&self, tokens: &TokenSet) -> Result<(), AuthError> {
         self.remember(tokens)
     }

@@ -18,3 +18,9 @@ pub fn data_dir() -> PathBuf {
         .unwrap_or_else(std::env::temp_dir)
         .join("WattMail")
 }
+
+/// The encrypted secrets vault (every account's refresh token / password),
+/// sealed by the one key WattMail keeps in the OS keychain.
+pub fn secrets_path() -> PathBuf {
+    data_dir().join("secrets.bin")
+}

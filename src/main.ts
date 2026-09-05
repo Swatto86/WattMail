@@ -6,11 +6,6 @@ import { openExternalUrl } from "./external";
 import { open, save } from "@tauri-apps/plugin-dialog";
 import { check, type Update } from "@tauri-apps/plugin-updater";
 import { relaunch } from "@tauri-apps/plugin-process";
-import {
-  enable as enableAutostart,
-  disable as disableAutostart,
-  isEnabled as isAutostartEnabled,
-} from "@tauri-apps/plugin-autostart";
 import { isPermissionGranted, requestPermission } from "@tauri-apps/plugin-notification";
 import { showDesktopNotification } from "./desktop-notify";
 import {
@@ -3426,7 +3421,7 @@ function openSettings(): void {
   invoke<boolean>("get_close_to_tray")
     .then((v) => (setTray.checked = v))
     .catch(() => {});
-  isAutostartEnabled()
+  invoke<boolean>("autostart_enabled")
     .then((v) => (setAutostart.checked = v))
     .catch(() => {});
   invoke<boolean>("get_notification_setting")
@@ -6142,8 +6137,9 @@ setTray.addEventListener("change", () => {
 });
 setAutostart.addEventListener("change", () => {
   const want = setAutostart.checked;
-  const action = want ? enableAutostart() : disableAutostart();
-  action.catch((e) => {
+  // Routed through Rust so the toggle is refused when this process is not the
+  // installed app (a debug build must never become the login entry).
+  invoke("set_autostart", { enabled: want }).catch((e) => {
     settingsMsg.textContent = `Could not change autostart: ${e}`;
     setAutostart.checked = !want; // revert the toggle to the real state
   });

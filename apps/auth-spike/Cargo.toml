@@ -10,3 +10,4 @@ wattmail-application.workspace = true
 wattmail-infrastructure.workspace = true
 tokio.workspace = true
 anyhow.workspace = true
+dirs = "6"

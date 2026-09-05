@@ -3,7 +3,8 @@
 ## System Overview
 
 Personal desktop email client for Office 365 (Microsoft Graph) plus iCloud
-calendar. Tauri v2 shell; tokens and cache keys live in the OS keychain.
+calendar. Tauri v2 shell; secrets live in one encrypted vault file whose key
+is the single item WattMail keeps in the OS keychain (read once per process).
 
 ## Tech Stack & Architecture
 
@@ -28,7 +29,12 @@ calendar. Tauri v2 shell; tokens and cache keys live in the OS keychain.
 - `src-tauri/src/notify.rs` — OS notifications + new-mail sound off Tokio
   workers (`zbus::block_on` / `canberra` / `MessageBeep`)
 - `src-tauri/src/commands.rs` — IPC; `set_unread` → `update_tray`
-- `crates/infrastructure/` — Graph, OAuth, keyring token store, SQLite cache
+- `crates/infrastructure/` — Graph, OAuth, secrets vault (`vault.rs`,
+  `secrets.rs`, `crypto.rs` master key) + token store, SQLite cache
+- `src-tauri/src/migrate_keyring.rs` — one-off paced move of the old chunked
+  keychain entries into the vault
+- `src-tauri/src/autostart.rs` — refuses/repairs a login entry that would
+  point at a non-installed binary
 - `scripts/verify.sh` — full gate (fmt/clippy/test + reader-frame webview check)
 - `scripts/fastcheck.sh` — iteration gate (`-p <crate>` = check only)
 
@@ -40,10 +46,18 @@ Boot → `checkForUpdates` → if newer signed release: banner + `downloadAndIns
 New mail / reminders → `show_desktop_notification` → dedicated thread →
 Linux `notify-rust` directly (never `NotificationExt::show`, which spawns
 back onto Tokio). Other OSes still use the plugin builder.
-Auth: `AuthService::access_token` refreshes via keyring-backed refresh token.
+Auth: `AuthService::access_token` refreshes via the vault-backed refresh token.
+Keychain: exactly one read per process (`crypto::master_key`), one write on
+first run; never two Secret Service calls back to back (gnome-keyring 50.0
+aborts on that).
 
 ## Recent Context & Decisions
 
+- 2026-09-05: Secrets vault — every refresh token / app-password in
+  `<data dir>/secrets.bin` (AES-256-GCM, 0600), keyed off the existing
+  `cache-key` keychain item via SHA-256 derivation; one keychain read per
+  process; paced migration from the chunked entries; autostart toggle refuses
+  non-installed binaries and Linux start-up repairs a stale `.desktop` Exec.
 - 2026-09-04: v0.14.8 — launch auto-downloads and installs updates (relaunch);
   About "Check for updates" still uses the banner + Install for a mid-session opt-in.
 - 2026-09-04: Compile-speed defaults — proper `dev`/`debugging` profiles,

@@ -4,10 +4,12 @@
 //! the window, tray, and settings. No domain logic lives here.
 
 mod accounts;
+mod autostart;
 mod commands;
 mod external_open;
 #[cfg(target_os = "linux")]
 pub mod linux_webkit;
+mod migrate_keyring;
 mod notify;
 mod paths;
 mod settings;
@@ -20,7 +22,7 @@ mod frontend_wire;
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::RwLock;
+use std::sync::{Arc, RwLock};
 
 // Tauri's native tray is used only on macOS/Windows; Linux uses ksni (see
 // `tray_linux`) because Tauri tray click events are unsupported there.
@@ -80,7 +82,15 @@ pub fn run() {
     #[cfg(target_os = "linux")]
     linux_webkit::apply_session_quirks();
 
-    let accounts = AccountManager::load();
+    // Every secret lives in one encrypted file; the OS keychain holds only its
+    // key and is read once per process (see `crates/infrastructure/src/vault.rs`).
+    // The one-off migration from the old per-account keychain entries must
+    // finish before the accounts open, since they now read from the vault.
+    let vault = Arc::new(wattmail_infrastructure::SecretVault::new(
+        paths::secrets_path(),
+    ));
+    migrate_keyring::run(&vault);
+    let accounts = AccountManager::load(vault);
     let loaded = settings::load();
     let start_hidden = std::env::args().any(|arg| arg == HIDDEN_FLAG);
 
@@ -107,6 +117,7 @@ pub fn run() {
         .manage(NotificationState::default())
         .manage(MessageWindows::default())
         .setup(move |app| {
+            autostart::repair_login_entry(app.handle());
             #[cfg(target_os = "linux")]
             tray_linux::spawn(app.handle().clone());
             #[cfg(not(target_os = "linux"))]
@@ -210,6 +221,8 @@ pub fn run() {
             commands::play_new_mail_sound,
             commands::show_desktop_notification,
             commands::started_hidden,
+            commands::autostart_enabled,
+            commands::set_autostart,
             commands::get_notification_setting,
             commands::set_notification_setting,
             commands::get_signature,

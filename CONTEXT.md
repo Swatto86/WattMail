@@ -5,7 +5,7 @@
 > new milestone state, a decision made/reversed, or an open question resolved.
 > Keep newest progress entries at the top of the log.
 >
-> **Last updated:** 2026-09-04
+> **Last updated:** 2026-09-05
 
 ---
 
@@ -47,9 +47,9 @@ test-then-release" describe the *prior* policy, now retired.
 | Frontend | Vite 6 + TypeScript + Tailwind 3 + **DaisyUI 4** (vanilla TS, no framework — fast startup) |
 | Themes | DaisyUI `business` = dark, `corporate` = light, `system` = follow OS |
 | Mail API | Microsoft Graph (REST) via `reqwest` |
-| Auth | `oauth2`-style public-client + PKCE done with raw form-posts; tokens in OS keychain (`keyring`) |
+| Auth | `oauth2`-style public-client + PKCE done with raw form-posts; refresh tokens in the encrypted secrets vault (`secrets.bin`), whose key is the one `keyring` item |
 | MIME export | provider raw-MIME endpoint (Graph `GET /me/messages/{id}/$value`); `mail-builder`/`mail-parser` reserved for backends that can't serve raw MIME (e.g. parked IMAP) |
-| Local cache | Encrypted SQLite (`rusqlite`); AES-256-GCM content, key in OS keychain |
+| Local cache | Encrypted SQLite (`rusqlite`); AES-256-GCM content, key in OS keychain (`cache-key`, read once per process; also seals the vault) |
 
 Stack and patterns deliberately mirror Swatto's **AllTheThings**
 (github.com/Swatto86/AllTheThings) for a proven fast-startup Tauri setup.
@@ -69,7 +69,7 @@ WattMail/
 │  ├─ domain/                 # EmailAddress, MessageSummary, MailProvider trait — no I/O
 │  ├─ application/            # inbox_preview() use-case over the trait
 │  └─ infrastructure/         # Graph client, iCloud CalDAV client (icloud/),
-│                             # OAuth/PKCE flow, chunked keyring token store
+│                             # OAuth/PKCE flow, encrypted secrets vault + token store
 └─ apps/auth-spike/           # console proof of the OAuth + Graph round-trip
 ```
 
@@ -101,6 +101,63 @@ Entra app registration (public, not secret):
 ---
 
 ## Progress log
+
+### 2026-09-05 — Secrets vault: one keychain read per process; autostart guard
+
+- **Problem:** gnome-keyring-daemon 50.0 on swatarch aborts
+  (`gkd_secret_service_get_pkcs11_session: assertion 'client' failed`) when two
+  Secret Service operations from short-lived connections follow each other —
+  exactly what the keyring crate's `sync-secret-service` backend does per call.
+  WattMail's chunked `TokenStore` read meta + N chunks back to back at every
+  launch (plus `cache-key` per account), so it tripped this on every start.
+  Correlated crashes: WattMail launch 09-03, WattDrive sign-in and launch 09-05.
+- **Design (mirrors WattDrive `vault.rs` / `session_store.rs` / `migrate_keyring.rs`):**
+  `crates/infrastructure/src/vault.rs` — AES-256-GCM file, 12-byte nonce
+  prefix, temp-file + rename, mode 0600 on Unix. `secrets.rs` (`SecretVault`)
+  holds a `BTreeMap<namespace, secret>` for every account (refresh tokens and
+  iCloud app-passwords), keyed by the strings that used to prefix the keychain
+  entries, writes serialised by a mutex; removing the last secret deletes the
+  file. `crypto.rs` now owns the process-wide **master key**: the existing
+  `cache-key` item is read at most once per process (cached on success only,
+  one retry after 1.2 s on a keychain hiccup, 400 ms gap between the first-run
+  read and create). The cache cipher uses it directly (existing caches stay
+  readable); the vault key is `SHA-256("WattMail secrets vault v1" || master)`
+  so the two never share raw key bytes while the keychain still holds one item.
+  `TokenStore::new(vault, prefix)` / `AuthService::new(config, vault, prefix)`;
+  `AccountManager::load(vault)`; the vault is built in `lib.rs` from
+  `paths::secrets_path()` (`<data dir>/secrets.bin`). No more chunking.
+- **Migration (`src-tauri/src/migrate_keyring.rs`):** runs only while no vault
+  file exists. Candidate namespaces = the legacy `office365:refresh-token` plus
+  `keyring_prefix()` of every `accounts.json` record. `auth::legacy_keyring`
+  reads the old meta + chunks (both generations and the original layout) with a
+  `Pacer` spacing keychain calls ≥400 ms; one vault write; the old entries
+  (meta, live chunks, and the same index range in the other two layouts) are
+  deleted afterwards on a background thread at the same pacing. A crash inside
+  that window leaves only unreadable orphans. Fresh installs with nothing to
+  migrate cost one paced probe per launch until an account is added.
+- **Autostart guard (`src-tauri/src/autostart.rs`):** the plugin writes the
+  running executable into the login entry, so enabling it under a debug build
+  from Downloads pinned `~/.config/autostart/WattMail.desktop` to
+  `Exec=/home/swatto/Downloads/wattmail-desktop-0.14.8 --hidden`. The toggle
+  now goes through `set_autostart` / `autostart_enabled` commands: enabling is
+  refused (with the reason shown in Settings) unless this process is the
+  installed app — Linux requires `$APPIMAGE`, and any target under Downloads,
+  the temp dir, or a cargo `target/{debug,release}` tree is refused on every OS.
+  On Linux start-up `repair_login_entry` rewrites an entry whose `Exec` is not
+  the running installed AppImage. The JS `plugin-autostart` package and its
+  capability were dropped (the Rust plugin stays for the writer).
+- **Tests:** vault roundtrip / rename / no plaintext on disk, 0600 on Unix,
+  wrong-key + tamper + truncation rejection, secrets side-by-side and
+  last-removal-deletes-file, corrupt-vault recovery, token-store namespacing,
+  legacy layout parsing (both generations + original), full fake-keychain
+  migration, pacer timing, autostart classification and `Exec=` parsing.
+- **Verified here (Linux container):** `npm run build`, `cargo fmt --check`,
+  `cargo clippy --all-targets -D warnings`, `cargo test --workspace` — all
+  green except the two pre-existing `store::tests` that open a real SQLite
+  cache and need an OS keychain (they fail identically on the untouched base
+  in this container; Windows CI has Credential Manager). Live keychain
+  migration and the AppImage `--hidden` autostart path are **not** exercised
+  here — that is the debug-build handoff.
 
 ### 2026-09-04 — Auto-install updates on launch (v0.14.8)
 
@@ -2494,7 +2551,8 @@ pending (needs a signed-in window).
 | 06-15 | **OAuth public client + PKCE + loopback** (`http://localhost`), single-tenant | Recommended desktop pattern; a distributed binary can't protect a secret. Single-tenant = simplest for own mailbox. | Active |
 | 06-15 | **Token exchange via raw form-posts**, isolated in `infrastructure/auth`, not the `oauth2` crate | Transparent, fewer moving parts, mirrors Mailspring's handshake; swappable later without touching callers. | Active |
 | 06-15 | **Sync = delta-query polling** (`/messages/delta` + persisted deltaLink) | Graph change-notification webhooks need a public HTTPS callback — impractical for a desktop app. | Active (implemented, M3) |
-| 06-15 | **Persist only the refresh token, chunked across keyring entries** | Entra refresh tokens (~2.5–3.5 KB) exceed the Windows Credential Manager 2560-char limit; access tokens are short-lived → keep in memory. | Active |
+| 06-15 | **Persist only the refresh token, chunked across keyring entries** | Entra refresh tokens (~2.5–3.5 KB) exceed the Windows Credential Manager 2560-char limit; access tokens are short-lived → keep in memory. | Superseded 09-05 (vault) |
+| 09-05 | **Secrets in one encrypted vault file; the keychain holds only its key** | gnome-keyring-daemon 50.0 aborts when two Secret Service ops from short-lived connections follow each other, which the chunked store did on every launch. One keychain read per process; migration moves the old entries across, paced 400 ms apart. Mirrors WattDrive. | Active |
 | 06-16 | **UI-first sequencing** (Tauri shell before sync engine) | Visible payoff + exercises the Tauri build pipeline early; the `MailProvider` seam makes the later cache swap invisible to the UI. | Active |
 | 06-16 | **Stack mirrors AllTheThings**: Vite/TS/Tailwind/DaisyUI, vanilla TS, window-hidden-until-painted | Proven fast-startup Tauri setup the user already likes. | Active |
 | 06-16 | **All networking stays in Rust; webview does IPC only; CSP stays locked** | OAuth runs in the system browser, Graph calls in Rust — the frontend never needs a Graph origin, shrinking the webview attack surface. | Active |
