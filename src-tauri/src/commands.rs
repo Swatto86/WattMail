@@ -1344,8 +1344,8 @@ pub async fn open_attachment(
     let dir = std::env::temp_dir().join("WattMail").join("attachments");
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     let (stem, _ext) = safe_attachment_name(&att.name);
-    let path = unique_attachment_path(&dir, &stem, ".pdf");
-    std::fs::write(&path, bytes).map_err(|e| e.to_string())?;
+    let path = crate::export_files::write_unique(&dir, &stem, ".pdf", &bytes)
+        .map_err(|e| e.to_string())?;
     crate::external_open::open_path(&path)
 }
 
