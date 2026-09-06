@@ -1130,7 +1130,10 @@ fn safe_filename(subject: &str) -> String {
         return "message".into();
     }
     let (device, rest) = base.split_once('.').unwrap_or((base, ""));
-    if RESERVED_NAMES.iter().any(|r| device.eq_ignore_ascii_case(r)) {
+    if RESERVED_NAMES
+        .iter()
+        .any(|r| device.eq_ignore_ascii_case(r))
+    {
         return if rest.is_empty() {
             format!("{device}_")
         } else {
@@ -1174,16 +1177,14 @@ pub async fn export_messages_to_desktop(
     let mut error: Option<String> = None;
     for item in &items {
         let result = match app_export_message(&*provider, &item.id).await {
-            Ok(bytes) => {
-                crate::export_files::write_unique(
-                    &desktop,
-                    &safe_filename(&item.subject),
-                    ".eml",
-                    &bytes,
-                )
-                .map(|_| ())
-                .map_err(|e| e.to_string())
-            }
+            Ok(bytes) => crate::export_files::write_unique(
+                &desktop,
+                &safe_filename(&item.subject),
+                ".eml",
+                &bytes,
+            )
+            .map(|_| ())
+            .map_err(|e| e.to_string()),
             Err(e) => Err(e.to_string()),
         };
         match result {
@@ -2065,7 +2066,6 @@ mod tests {
         assert_eq!(safe_filename("lpt1"), "lpt1_");
         assert_eq!(safe_filename("CONTRACT"), "CONTRACT"); // prefix ≠ reserved
     }
-
 }
 
 #[cfg(test)]
