@@ -245,6 +245,9 @@ mod tests {
     /// builder the browser goes through and read the environment it actually
     /// received. A plan that is correct but never applied would still pass the
     /// tests above.
+    /// AppImage uses a POSIX shell. Git Bash on Windows rewrites PATH before
+    /// running the script, so it cannot test this Unix environment contract.
+    #[cfg(unix)]
     #[test]
     fn a_spawned_child_sees_the_cleaned_environment() {
         let appdir = Path::new("/tmp/.mount_test");
@@ -261,6 +264,7 @@ mod tests {
         }
         plan_for(Some(appdir), &poisoned).apply(&mut cmd);
         let out = cmd.output().expect("sh should run");
+        assert!(out.status.success(), "child shell failed: {:?}", out.stderr);
         let seen = String::from_utf8_lossy(&out.stdout);
         let (ld, path) = seen.split_once('|').expect("child should print both");
         assert_eq!(ld, "", "child still saw the bundled library path");
