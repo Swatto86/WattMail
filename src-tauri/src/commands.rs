@@ -1115,27 +1115,29 @@ fn safe_filename(subject: &str) -> String {
         })
         .collect();
     let collapsed = cleaned.split_whitespace().collect::<Vec<_>>().join(" ");
-    let capped: String = collapsed.chars().take(120).collect();
+    // Leave room for extensions and collision suffixes on byte-limited filesystems.
+    let mut bytes = 0usize;
+    let capped: String = collapsed
+        .chars()
+        .take(120)
+        .take_while(|c| {
+            bytes += c.len_utf8();
+            bytes <= 180
+        })
+        .collect();
     let base = capped.trim_end_matches(['.', ' ']);
     if base.is_empty() {
         return "message".into();
     }
-    if RESERVED_NAMES.iter().any(|r| base.eq_ignore_ascii_case(r)) {
-        return format!("{base}_");
+    let (device, rest) = base.split_once('.').unwrap_or((base, ""));
+    if RESERVED_NAMES.iter().any(|r| device.eq_ignore_ascii_case(r)) {
+        return if rest.is_empty() {
+            format!("{device}_")
+        } else {
+            format!("{device}_.{rest}")
+        };
     }
     base.to_string()
-}
-
-/// First non-existing `<base>.eml` path in `dir`, numbering duplicates
-/// Windows-style: `base.eml`, `base (2).eml`, `base (3).eml`, …
-fn unique_eml_path(dir: &std::path::Path, base: &str) -> std::path::PathBuf {
-    let mut path = dir.join(format!("{base}.eml"));
-    let mut n = 2u32;
-    while path.exists() {
-        path = dir.join(format!("{base} ({n}).eml"));
-        n += 1;
-    }
-    path
 }
 
 /// One message in a bulk desktop export: its id plus the subject that seeds
@@ -1173,8 +1175,14 @@ pub async fn export_messages_to_desktop(
     for item in &items {
         let result = match app_export_message(&*provider, &item.id).await {
             Ok(bytes) => {
-                let path = unique_eml_path(&desktop, &safe_filename(&item.subject));
-                std::fs::write(&path, bytes).map_err(|e| e.to_string())
+                crate::export_files::write_unique(
+                    &desktop,
+                    &safe_filename(&item.subject),
+                    ".eml",
+                    &bytes,
+                )
+                .map(|_| ())
+                .map_err(|e| e.to_string())
             }
             Err(e) => Err(e.to_string()),
         };
@@ -1215,18 +1223,6 @@ fn safe_attachment_name(name: &str) -> (String, String) {
     }
 }
 
-/// First non-existing `<stem><ext>` path in `dir`, numbering duplicates
-/// Windows-style before the extension: `a.pdf`, `a (2).pdf`, …
-fn unique_attachment_path(dir: &std::path::Path, stem: &str, ext: &str) -> std::path::PathBuf {
-    let mut path = dir.join(format!("{stem}{ext}"));
-    let mut n = 2u32;
-    while path.exists() {
-        path = dir.join(format!("{stem} ({n}){ext}"));
-        n += 1;
-    }
-    path
-}
-
 /// Save every attachment of a message into `dir_path` (from the folder
 /// picker), continuing past per-item failures. Names are sanitized and
 /// de-duplicated here — they come from the server, not the user.
@@ -1251,8 +1247,9 @@ pub async fn save_attachments_to_dir(
         let result = match download_attachment(&*provider, &message_id, &a.id).await {
             Ok(bytes) => {
                 let (stem, ext) = safe_attachment_name(&a.name);
-                let path = unique_attachment_path(&dir, &stem, &ext);
-                std::fs::write(&path, bytes).map_err(|e| e.to_string())
+                crate::export_files::write_unique(&dir, &stem, &ext, &bytes)
+                    .map(|_| ())
+                    .map_err(|e| e.to_string())
             }
             Err(e) => Err(e.to_string()),
         };
@@ -1977,7 +1974,6 @@ pub fn set_autostart(app: tauri::AppHandle, enabled: bool) -> Result<(), String>
 mod tests {
     use super::{
         attachment_paths_total_bytes, is_previewable_image, safe_attachment_name, safe_filename,
-        unique_attachment_path, unique_eml_path,
     };
 
     #[test]
@@ -2026,18 +2022,6 @@ mod tests {
     }
 
     #[test]
-    fn unique_attachment_path_numbers_before_the_extension() {
-        let dir = std::env::temp_dir().join(format!("wattmail-att-test-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let first = unique_attachment_path(&dir, "a", ".pdf");
-        assert_eq!(first.file_name().unwrap(), "a.pdf");
-        std::fs::write(&first, b"x").unwrap();
-        let second = unique_attachment_path(&dir, "a", ".pdf");
-        assert_eq!(second.file_name().unwrap(), "a (2).pdf");
-        std::fs::remove_dir_all(&dir).ok();
-    }
-
-    #[test]
     fn previewable_image_accepts_plain_subtypes_and_rejects_url_breakouts() {
         assert!(is_previewable_image("image/png"));
         assert!(is_previewable_image("image/svg+xml"));
@@ -2063,6 +2047,18 @@ mod tests {
     }
 
     #[test]
+    fn filenames_bound_unicode_bytes_and_reserved_names_with_extensions() {
+        let name = safe_filename(&"📬".repeat(120));
+        assert!(name.len() <= 180);
+        assert!(!name.is_empty());
+        assert_eq!(safe_filename("CON.report"), "CON_.report");
+        assert_eq!(
+            safe_attachment_name("NUL.backup.pdf"),
+            ("NUL_.backup".into(), ".pdf".into())
+        );
+    }
+
+    #[test]
     fn safe_filename_caps_length_and_dodges_reserved_device_names() {
         assert_eq!(safe_filename(&"x".repeat(300)).chars().count(), 120);
         assert_eq!(safe_filename("CON"), "CON_");
@@ -2070,20 +2066,6 @@ mod tests {
         assert_eq!(safe_filename("CONTRACT"), "CONTRACT"); // prefix ≠ reserved
     }
 
-    #[test]
-    fn unique_eml_path_numbers_collisions_windows_style() {
-        let dir = std::env::temp_dir().join(format!("wattmail-eml-test-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let first = unique_eml_path(&dir, "subject");
-        assert_eq!(first.file_name().unwrap(), "subject.eml");
-        std::fs::write(&first, b"x").unwrap();
-        let second = unique_eml_path(&dir, "subject");
-        assert_eq!(second.file_name().unwrap(), "subject (2).eml");
-        std::fs::write(&second, b"x").unwrap();
-        let third = unique_eml_path(&dir, "subject");
-        assert_eq!(third.file_name().unwrap(), "subject (3).eml");
-        std::fs::remove_dir_all(&dir).ok();
-    }
 }
 
 #[cfg(test)]

@@ -89,6 +89,10 @@ impl FieldCipher {
     /// keychain on the first call, generated and stored on first use).
     pub fn load_or_create() -> Result<Self, MailError> {
         let key = master_key().map_err(|e| MailError::Storage(format!("cache key: {e}")))?;
+        Self::from_key(key)
+    }
+
+    pub(crate) fn from_key(key: [u8; 32]) -> Result<Self, MailError> {
         let cipher = Aes256Gcm::new_from_slice(&key)
             .map_err(|e| MailError::Storage(format!("cipher init: {e}")))?;
         Ok(Self { cipher })

@@ -6,6 +6,7 @@
 mod accounts;
 mod autostart;
 mod commands;
+mod export_files;
 mod external_open;
 #[cfg(target_os = "linux")]
 pub mod linux_webkit;

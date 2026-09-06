@@ -102,6 +102,21 @@ Entra app registration (public, not secret):
 
 ## Progress log
 
+### 2026-09-06 — Export safety and executable CI tests (v0.15.2)
+
+- Automatically named attachment and Desktop exports now reserve destinations
+  with `create_new` and retry collisions. Concurrent saves no longer truncate
+  each other's output; dangling symlinks are collisions, not destinations.
+- Filename sanitization caps UTF-8 bytes as well as characters and handles
+  Windows device names before additional extensions (`CON.report`, etc.).
+- Added concurrent export, attachment collision/I/O, symlink and filename
+  regression tests. Cache tests use an injected cipher rather than a live
+  desktop keychain; CI now actually runs `cargo test --locked --workspace`
+  on Windows, Linux and macOS, in addition to compiling test targets.
+- Local frontend build passed. Rust toolchain unavailable in this environment;
+  native formatting, lint, tests and desktop build must pass CI before tagging.
+  Live account/keychain/UI workflows are not exercised by this sweep.
+
 ### 2026-09-05 — Bug sweep (v0.15.1)
 
 - **Sign-in browser inside the AppImage.** `AuthService` launched the

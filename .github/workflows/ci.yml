@@ -49,6 +49,9 @@ jobs:
       - name: Clippy
         run: cargo clippy --locked --all-targets -- -D warnings
 
+      - name: Tests
+        run: cargo test --locked --workspace
+
       # Debug compile of the real app — not installer packaging. Packaging,
       # signing, and updater artifacts belong to the tag-driven release.yml.
       - name: Tauri debug build
@@ -109,3 +112,6 @@ jobs:
 
       - name: Clippy
         run: cargo clippy --locked --all-targets -- -D warnings
+
+      - name: Tests
+        run: cargo test --locked --workspace

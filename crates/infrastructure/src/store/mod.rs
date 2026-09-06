@@ -617,6 +617,15 @@ mod tests {
         );
     }
 
+    fn open_test_store(path: &Path) -> SqliteStore {
+        let conn = Connection::open(path).unwrap();
+        migrate(&conn).unwrap();
+        SqliteStore {
+            conn: Arc::new(Mutex::new(conn)),
+            cipher: FieldCipher::from_key([7; 32]).unwrap(),
+        }
+    }
+
     fn temp_db(name: &str) -> std::path::PathBuf {
         let nanos = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -644,7 +653,7 @@ mod tests {
     async fn set_read_keeps_cached_folder_unread_count_in_sync() {
         let path = temp_db("set-read-count");
         {
-            let store = SqliteStore::open(&path).expect("open store");
+            let store = open_test_store(&path);
             store
                 .save_folders(vec![Folder {
                     id: "inbox".to_string(),
@@ -679,7 +688,7 @@ mod tests {
     async fn cached_for_search_decrypts_and_can_scope_to_a_folder() {
         let path = temp_db("cached-search");
         {
-            let store = SqliteStore::open(&path).expect("open store");
+            let store = open_test_store(&path);
             store
                 .upsert_messages(
                     "inbox",
