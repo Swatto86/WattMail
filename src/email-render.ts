@@ -229,6 +229,99 @@ export function wrapEmailHtml(inner: string, opts: WrapOpts): string {
 </style></head><body>${inner}</body></html>`;
 }
 
+// ---- Body zoom (Shift + mouse wheel, like Outlook) ----
+// The zoom level is a percentage applied to the email document's <body> via
+// the CSS `zoom` property, so text, images and tables all scale and reflow
+// together. It is stored in localStorage so it carries across messages and
+// between the reading pane and the pop-out window; a short-lived badge in the
+// corner of the body shows the level while it changes.
+const ZOOM_KEY = "wattmail.reader-zoom";
+const ZOOM_MIN = 50;
+const ZOOM_MAX = 300;
+const ZOOM_STEP = 10;
+const ZOOM_DEFAULT = 100;
+
+function clampZoom(n: number): number {
+  if (!Number.isFinite(n)) return ZOOM_DEFAULT;
+  return Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, Math.round(n / ZOOM_STEP) * ZOOM_STEP));
+}
+
+export function loadZoom(): number {
+  try {
+    const raw = localStorage.getItem(ZOOM_KEY);
+    return raw == null ? ZOOM_DEFAULT : clampZoom(Number(raw));
+  } catch {
+    return ZOOM_DEFAULT;
+  }
+}
+
+function saveZoom(pct: number): void {
+  try {
+    if (pct === ZOOM_DEFAULT) localStorage.removeItem(ZOOM_KEY);
+    else localStorage.setItem(ZOOM_KEY, String(pct));
+  } catch {
+    // Storage unavailable: the zoom still applies for this message.
+  }
+}
+
+function applyZoom(doc: Document, pct: number): void {
+  doc.body?.style.setProperty("zoom", `${pct}%`);
+}
+
+function showZoomBadge(doc: Document, pct: number): void {
+  let badge = doc.getElementById("wm-zoom-badge");
+  if (!badge) {
+    badge = doc.createElement("div");
+    badge.id = "wm-zoom-badge";
+    badge.setAttribute("aria-live", "polite");
+    // Fixed to the frame viewport and sized in px so the body zoom does not
+    // scale the badge itself (zoom on <body> does not reach fixed children of
+    // <html>, which is where this lives).
+    badge.style.cssText =
+      "position:fixed;top:8px;right:12px;z-index:2147483647;padding:4px 10px;" +
+      "border-radius:6px;background:rgba(0,0,0,0.75);color:#fff;font:600 12px system-ui,sans-serif;" +
+      "pointer-events:none;transition:opacity 0.2s;";
+    doc.documentElement.appendChild(badge);
+  }
+  badge.textContent = `${pct}%`;
+  badge.style.opacity = "1";
+  const w = doc.defaultView as (Window & { __wmZoomTimer?: number }) | null;
+  if (w?.__wmZoomTimer) w.clearTimeout(w.__wmZoomTimer);
+  if (w) {
+    w.__wmZoomTimer = w.setTimeout(() => {
+      badge!.style.opacity = "0";
+    }, 900);
+  }
+}
+
+/** Apply the saved zoom to a freshly loaded email frame and let Shift+wheel change it. */
+export function wireFrameZoom(frame: HTMLIFrameElement): void {
+  const doc = frame.contentDocument;
+  if (!doc) return;
+  let zoom = loadZoom();
+  applyZoom(doc, zoom);
+  doc.addEventListener(
+    "wheel",
+    (ev) => {
+      if (!ev.shiftKey || ev.ctrlKey || ev.altKey || ev.metaKey) return;
+      // With Shift held, Chromium/WebView2 reports a vertical wheel as deltaX.
+      const delta = ev.deltaY !== 0 ? ev.deltaY : ev.deltaX;
+      if (delta === 0) return;
+      ev.preventDefault();
+      const next = clampZoom(zoom + (delta < 0 ? ZOOM_STEP : -ZOOM_STEP));
+      if (next === zoom) {
+        showZoomBadge(doc, zoom);
+        return;
+      }
+      zoom = next;
+      applyZoom(doc, zoom);
+      saveZoom(zoom);
+      showZoomBadge(doc, zoom);
+    },
+    { passive: false },
+  );
+}
+
 // ---- Reading-pane link hits ----
 // Email "buttons" are often a padded <td> whose <a> only wraps the label, or a
 // <p><a href><table>…</table></a></p> that HTML5 splits into an empty <a> plus

@@ -5,7 +5,7 @@
 > new milestone state, a decision made/reversed, or an open question resolved.
 > Keep newest progress entries at the top of the log.
 >
-> **Last updated:** 2026-09-05 (bug sweep, v0.15.1)
+> **Last updated:** 2026-09-07 (reader zoom, v0.15.3)
 
 ---
 
@@ -101,6 +101,18 @@ Entra app registration (public, not secret):
 ---
 
 ## Progress log
+
+### 2026-09-07 — Shift+wheel zoom in the reader (v0.15.3)
+
+- Holding Shift and rolling the mouse wheel over an open email body zooms it
+  in 10% steps between 50% and 300%, Outlook-style, with a transient badge
+  showing the level. Implemented once in `email-render.ts` (`wireFrameZoom`)
+  as CSS `zoom` on the frame's `<body>`, wired into both the reading pane and
+  the pop-out message window. The level persists in localStorage
+  (`wattmail.reader-zoom`, removed at 100%) so it carries across messages and
+  windows; Ctrl/Alt combinations are left alone.
+- `scripts/test-reader-frame.py` now reads sources as UTF-8; it crashed on
+  Windows (cp1252 default) before reaching its skip path, failing `verify.sh`.
 
 ### 2026-09-06 — Export safety and executable CI tests (v0.15.2)
 

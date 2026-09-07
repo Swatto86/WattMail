@@ -27,6 +27,7 @@ import {
   hrefFromEmailEvent,
   readThemeColors,
   safeExternalHref,
+  wireFrameZoom,
   wrapEmailHtml,
 } from "./email-render";
 import "./styles.css";
@@ -1660,6 +1661,7 @@ function renderReader(msg: MessageView): void {
   frame.classList.toggle("is-paper-card", !adapt);
   frame.addEventListener("load", () => {
     wireFrameLinks(frame);
+    wireFrameZoom(frame);
     if (adapt) adaptPlainEmail(frame, theme);
   });
   frame.srcdoc = wrapEmailHtml(msg.html, { adapt, bg: theme.bg, fg: theme.fg });

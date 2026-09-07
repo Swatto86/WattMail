@@ -39,7 +39,7 @@ ROOT = Path(__file__).resolve().parent.parent
 
 
 def read_sandbox() -> str:
-    src = (ROOT / "src" / "email-render.ts").read_text()
+    src = (ROOT / "src" / "email-render.ts").read_text(encoding="utf-8")
     m = re.search(r'export const EMAIL_FRAME_SANDBOX\s*=\s*"([^"]+)"', src)
     if not m:
         sys.exit("could not read EMAIL_FRAME_SANDBOX from src/email-render.ts")
@@ -60,7 +60,7 @@ INTERACTIVE_FRAMES = ("src/main.ts", "src/message.ts", "src/calendar.ts")
 
 def check_frames_use_the_constant() -> None:
     for rel in INTERACTIVE_FRAMES:
-        text = (ROOT / rel).read_text()
+        text = (ROOT / rel).read_text(encoding="utf-8")
         # Assert the file is the one we think it is before concluding anything
         # from its absence of a literal: a moved frame would otherwise pass.
         if "sandbox" not in text:
@@ -75,7 +75,7 @@ def check_frames_use_the_constant() -> None:
 
 
 def read_csp() -> str:
-    conf = json.loads((ROOT / "src-tauri" / "tauri.conf.json").read_text())
+    conf = json.loads((ROOT / "src-tauri" / "tauri.conf.json").read_text(encoding="utf-8"))
     csp = conf["app"]["security"]["csp"]
     if not csp or "default-src" not in csp:
         sys.exit(f"tauri.conf.json csp looks wrong: {csp!r}")
