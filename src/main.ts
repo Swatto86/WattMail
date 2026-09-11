@@ -271,6 +271,127 @@ const PROTECTED_FOLDER_NAMES = new Set([
 function isProtectedFolder(f: FolderInfo): boolean {
   return f.role != null || PROTECTED_FOLDER_NAMES.has(f.name.toLowerCase());
 }
+
+// Sidebar colour / pin, persisted in settings.json via get/set_folder_pref.
+// Keyed `{accountId}:{folderId}` so each mailbox keeps its own marks.
+interface FolderPref {
+  color?: string | null;
+  pinned?: boolean;
+}
+const FOLDER_COLOR_PALETTE = [
+  "#ef4444",
+  "#f97316",
+  "#eab308",
+  "#22c55e",
+  "#14b8a6",
+  "#3b82f6",
+  "#8b5cf6",
+  "#ec4899",
+] as const;
+let folderPrefs: Record<string, FolderPref> = {};
+
+function folderPrefKey(folderId: string): string {
+  const acc = accountList.find((a) => a.active)?.id ?? "";
+  return acc ? `${acc}:${folderId}` : folderId;
+}
+
+function sanitizeFolderColor(color: string | null | undefined): string | null {
+  if (!color) return null;
+  const normalized = color.trim().toLowerCase();
+  return /^#[0-9a-f]{6}$/.test(normalized) ? normalized : null;
+}
+
+function prefFor(folderId: string): FolderPref {
+  return folderPrefs[folderPrefKey(folderId)] ?? {};
+}
+
+function folderColor(folderId: string): string | null {
+  return sanitizeFolderColor(prefFor(folderId).color);
+}
+
+function isFolderPinned(folderId: string): boolean {
+  return !!prefFor(folderId).pinned;
+}
+
+async function loadFolderPrefs(): Promise<void> {
+  try {
+    folderPrefs = await invoke<Record<string, FolderPref>>("get_folder_prefs");
+  } catch {
+    folderPrefs = {};
+  }
+}
+
+async function persistFolderPref(folderId: string, next: FolderPref): Promise<void> {
+  const key = folderPrefKey(folderId);
+  const color = sanitizeFolderColor(next.color);
+  const pinned = !!next.pinned;
+  if (!color && !pinned) delete folderPrefs[key];
+  else folderPrefs[key] = { color, pinned };
+  renderFolders();
+  try {
+    await invoke("set_folder_pref", { key, color, pinned });
+  } catch (e) {
+    statusEl.textContent = `Could not save folder preference: ${e}`;
+  }
+}
+
+async function toggleFolderPin(folderId: string): Promise<void> {
+  const cur = prefFor(folderId);
+  await persistFolderPref(folderId, { color: cur.color, pinned: !cur.pinned });
+}
+
+async function setFolderColor(folderId: string, color: string | null): Promise<void> {
+  const cur = prefFor(folderId);
+  await persistFolderPref(folderId, { color, pinned: !!cur.pinned });
+}
+
+// Pinned folders (plus their descendants) sit above the rest, in original
+// relative order. A pinned nested folder is shown as its own block with indent
+// reset so it does not look like an orphan under whatever is now above it.
+function foldersForSidebar(list: FolderInfo[]): Array<FolderInfo & { indent: number }> {
+  const pinnedRootAt: boolean[] = new Array(list.length).fill(false);
+  const ancestorPinned: boolean[] = new Array(list.length).fill(false);
+  const stack: number[] = [];
+  for (let i = 0; i < list.length; i++) {
+    while (stack.length && list[stack[stack.length - 1]].depth >= list[i].depth) {
+      stack.pop();
+    }
+    const parent = stack.length ? stack[stack.length - 1] : -1;
+    const parentPinned = parent >= 0 && (pinnedRootAt[parent] || ancestorPinned[parent]);
+    ancestorPinned[i] = parentPinned;
+    pinnedRootAt[i] = isFolderPinned(list[i].id) && !parentPinned;
+    stack.push(i);
+  }
+  const taken = new Set<number>();
+  const pinnedBlocks: Array<{ items: FolderInfo[]; rootDepth: number }> = [];
+  for (let i = 0; i < list.length; i++) {
+    if (!pinnedRootAt[i]) continue;
+    const depth = list[i].depth;
+    let end = i + 1;
+    while (end < list.length && list[end].depth > depth) end++;
+    pinnedBlocks.push({ items: list.slice(i, end), rootDepth: depth });
+    for (let j = i; j < end; j++) taken.add(j);
+  }
+  const out: Array<FolderInfo & { indent: number }> = [];
+  for (const block of pinnedBlocks) {
+    for (const f of block.items) {
+      out.push({ ...f, indent: f.depth - block.rootDepth });
+    }
+  }
+  for (let i = 0; i < list.length; i++) {
+    if (!taken.has(i)) out.push({ ...list[i], indent: list[i].depth });
+  }
+  return out;
+}
+
+function folderColorPaletteHtml(selected: string | null): string {
+  const noneSel = selected ? "" : " is-selected";
+  const dots = FOLDER_COLOR_PALETTE.map((c) => {
+    const sel = selected === c ? " is-selected" : "";
+    return `<button type="button" class="ctx-color${sel}" data-color="${c}" style="--c:${c}" title="Folder color"></button>`;
+  }).join("");
+  return `<div class="ctx-colors" role="group" aria-label="Folder color"><button type="button" class="ctx-color is-none${noneSel}" data-color="" title="No color"></button>${dots}</div>`;
+}
 function currentFolderIsDrafts(): boolean {
   const folder = folders.find((f) => f.id === currentFolderId);
   return !!folder && isDraftsFolder(folder);
@@ -2784,12 +2905,19 @@ async function loadFolders(): Promise<void> {
 }
 
 function renderFolders(): void {
-  foldersEl.innerHTML = folders
+  foldersEl.innerHTML = foldersForSidebar(folders)
     .map((f) => {
       const active = f.id === currentFolderId ? "active" : "";
+      const color = folderColor(f.id);
+      const pinned = isFolderPinned(f.id);
+      const colorClass = color ? " has-color" : "";
+      const pinClass = pinned ? " is-pinned" : "";
       const badge = f.unreadCount > 0 ? `<span class="folder-badge">${f.unreadCount}</span>` : "";
-      const pad = 10 + f.depth * 14;
-      return `<button class="folder ${active}" data-fid="${esc(f.id)}" title="${esc(f.name)}" style="padding-left:${pad}px"><span class="folder-name">${esc(f.name)}</span>${badge}</button>`;
+      const pad = 10 + f.indent * 14;
+      const colorStyle = color ? `--folder-color:${color};` : "";
+      const swatch = color ? `<span class="folder-swatch" aria-hidden="true"></span>` : "";
+      const pin = pinned ? `<span class="folder-pin" title="Pinned" aria-hidden="true"></span>` : "";
+      return `<button class="folder ${active}${colorClass}${pinClass}" data-fid="${esc(f.id)}" title="${esc(f.name)}" style="${colorStyle}padding-left:${pad}px">${pin}${swatch}<span class="folder-name">${esc(f.name)}</span>${badge}</button>`;
     })
     .join("");
 }
@@ -5468,6 +5596,10 @@ function showFolderMenu(x: number, y: number, fid: string | null): void {
   ];
   if (fid) {
     items.push({ act: "newSubfolder", label: "New subfolder…" });
+    items.push(
+      "sep",
+      { act: "togglePin", label: isFolderPinned(fid) ? "Unpin" : "Pin to top" },
+    );
     const target = folders.find((f) => f.id === fid);
     if (target?.unreadCount) items.push("sep", { act: "markAllRead", label: "Mark all as read" });
     // Emptying is only offered where deletion is already permanent by design.
@@ -5485,13 +5617,15 @@ function showFolderMenu(x: number, y: number, fid: string | null): void {
       );
     }
   }
-  folderMenu.innerHTML = items
+  const rows = items
     .map((it) =>
       it === "sep"
         ? `<div class="ctx-sep"></div>`
         : `<button class="ctx-item${it.danger ? " ctx-danger" : ""}" data-act="${it.act}">${it.label}</button>`,
     )
     .join("");
+  const palette = fid ? `<div class="ctx-sep"></div>${folderColorPaletteHtml(folderColor(fid))}` : "";
+  folderMenu.innerHTML = rows + palette;
   folderMenu.classList.remove("hidden");
   // Position at the click point, clamped inside the viewport.
   folderMenu.style.left = "0";
@@ -5510,6 +5644,13 @@ foldersEl.addEventListener("contextmenu", (e) => {
 
 folderMenu.addEventListener("click", (e) => {
   e.stopPropagation();
+  const colorBtn = (e.target as HTMLElement).closest<HTMLElement>(".ctx-color");
+  if (colorBtn) {
+    const fid = folderMenuTargetId;
+    hideFolderMenu();
+    if (fid) void setFolderColor(fid, colorBtn.dataset.color || null);
+    return;
+  }
   const item = (e.target as HTMLElement).closest<HTMLElement>(".ctx-item");
   if (!item) return;
   const fid = folderMenuTargetId;
@@ -5532,6 +5673,9 @@ folderMenu.addEventListener("click", (e) => {
       break;
     case "emptyFolder":
       if (fid) void emptyFolderConfirmed(fid);
+      break;
+    case "togglePin":
+      if (fid) void toggleFolderPin(fid);
       break;
   }
 });
@@ -6663,6 +6807,7 @@ async function boot(): Promise<void> {
       /* the shipped fallback stands; it is the smaller, safer claim */
     });
   applyThemePref(loadThemePref());
+  await loadFolderPrefs();
   sortSelect.value = sortMode;
   updateFilterUi();
   updateGroupUi();

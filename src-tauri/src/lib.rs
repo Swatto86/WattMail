@@ -228,6 +228,8 @@ pub fn run() {
             commands::set_notification_setting,
             commands::get_signature,
             commands::set_signature,
+            commands::get_folder_prefs,
+            commands::set_folder_pref,
             commands::upload_draft_attachments,
             commands::attachment_paths_total_bytes,
             commands::max_attachment_bytes,

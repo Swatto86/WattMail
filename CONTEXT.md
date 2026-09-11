@@ -5,7 +5,7 @@
 > new milestone state, a decision made/reversed, or an open question resolved.
 > Keep newest progress entries at the top of the log.
 >
-> **Last updated:** 2026-09-07 (reader zoom, v0.15.3)
+> **Last updated:** 2026-09-11 (folder color + pin)
 
 ---
 
@@ -101,6 +101,19 @@ Entra app registration (public, not secret):
 ---
 
 ## Progress log
+
+### 2026-09-11 — Folder colour-coding and pin-to-top
+
+- Right-click a folder in the sidebar: **Pin to top** / **Unpin**, plus a
+  colour-dot row (or “no colour”). A small swatch and left-edge tint show the
+  colour; a pin mark shows favourites.
+- Pinned folders sit at the top of that account’s list, keeping their original
+  relative order. Pinning a nested folder lifts it and its children as one
+  block and resets indent so it does not look orphaned.
+- Prefs live in the existing `settings.json` map `folderPrefs`, keyed
+  `{accountId}:{folderId}`, so they survive restart and stay per-mailbox.
+  Colours must be `#rrggbb`. Send and junk hard-delete paths are untouched.
+- SwatBox `/etc/swatmail` sorter was not changed.
 
 ### 2026-09-07 — Shift+wheel zoom in the reader (v0.15.3)
 

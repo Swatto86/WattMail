@@ -852,10 +852,66 @@ body,
   background: oklch(var(--p) / 0.18);
   box-shadow: inset 3px 0 0 oklch(var(--p));
 }
+.folder.has-color {
+  box-shadow: inset 3px 0 0 var(--folder-color);
+}
+.folder.active.has-color,
+.folder.active.has-color:hover {
+  box-shadow: inset 3px 0 0 var(--folder-color);
+}
+.folder-swatch {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  background: var(--folder-color);
+}
+.folder-pin {
+  width: 8px;
+  height: 8px;
+  flex-shrink: 0;
+  opacity: 0.55;
+  background: currentColor;
+  clip-path: polygon(50% 0, 100% 38%, 82% 100%, 18% 100%, 0 38%);
+}
 .folder-name {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+.ctx-colors {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 8px 4px;
+}
+.ctx-color {
+  width: 16px;
+  height: 16px;
+  padding: 0;
+  border-radius: 50%;
+  border: 1px solid oklch(var(--bc) / 0.22);
+  background: var(--c, transparent);
+  cursor: pointer;
+}
+.ctx-color.is-none {
+  background:
+    linear-gradient(
+      135deg,
+      transparent 46%,
+      oklch(var(--er)) 46%,
+      oklch(var(--er)) 54%,
+      transparent 54%
+    ),
+    oklch(var(--b2));
+}
+.ctx-color.is-selected {
+  outline: 2px solid oklch(var(--p));
+  outline-offset: 1px;
+}
+.ctx-color:hover {
+  filter: brightness(1.08);
 }
 .folder-badge {
   flex-shrink: 0;

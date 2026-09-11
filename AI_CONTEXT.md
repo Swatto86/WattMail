@@ -23,6 +23,8 @@ is the single item WattMail keeps in the OS keychain (read once per process).
 
 ## Component Map
 
+- `src-tauri/src/settings.rs` — `settings.json`; close-to-tray, notifications,
+  signature, plus `folderPrefs` (`{accountId}:{folderId}` → color / pinned)
 - `src-tauri/src/lib.rs` — composition, tray branch (Linux ksni vs native)
 - `src-tauri/src/linux_webkit.rs` — NVIDIA/Hyprland WebKit env quirks at boot
 - `src-tauri/src/window_ops.rs` — show / toggle main window (tray Activate)
@@ -40,6 +42,9 @@ is the single item WattMail keeps in the OS keychain (read once per process).
 
 ## Data Flow
 
+Folder sidebar (`src/main.ts` `renderFolders`) reads `folderPrefs` from settings
+and paints a swatch / left tint plus pins favourite folders to the top of the
+account's list (subtree stays together; nested pin resets indent).
 Frontend sync → `set_unread` → `update_tray` → (Linux) channel → ksni update.
 Boot → `checkForUpdates` → if newer signed release: banner + `downloadAndInstall`
 → `relaunch`. About check still shows Install/Later without forcing restart.
@@ -53,6 +58,9 @@ aborts on that).
 
 ## Recent Context & Decisions
 
+- 2026-09-11: Folder sidebar colour + pin — right-click a folder for Pin to top
+  and a colour palette; prefs persist in `settings.json` (`folderPrefs`), keyed
+  per account. Nested pin lifts that folder and its children as a block.
 - 2026-09-05: v0.15.0 — Secrets vault: every refresh token / app-password in
   `<data dir>/secrets.bin` (AES-256-GCM, 0600), keyed off the existing
   `cache-key` keychain item via SHA-256 derivation; one keychain read per

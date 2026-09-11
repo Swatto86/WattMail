@@ -1,5 +1,6 @@
 //! Tauri commands bridging the frontend to the application/infrastructure layers.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use base64::Engine;
@@ -1494,6 +1495,38 @@ pub fn set_signature(state: State<'_, SettingsState>, value: String) -> Result<(
             .write()
             .map_err(|_| "settings lock poisoned".to_string())?;
         guard.signature = value;
+        guard.clone()
+    };
+    settings::save(&updated).map_err(|e| e.to_string())
+}
+
+/// Sidebar colour / pin map (`{accountId}:{folderId}` → pref).
+#[tauri::command]
+pub fn get_folder_prefs(state: State<'_, SettingsState>) -> HashMap<String, settings::FolderPref> {
+    state
+        .0
+        .read()
+        .map(|s| s.folder_prefs.clone())
+        .unwrap_or_default()
+}
+
+/// Persist one folder's colour and pin. Clearing both deletes the entry.
+#[tauri::command]
+pub fn set_folder_pref(
+    state: State<'_, SettingsState>,
+    key: String,
+    color: Option<String>,
+    pinned: bool,
+) -> Result<(), String> {
+    if key.is_empty() || key.len() > 512 {
+        return Err("invalid folder preference key".to_string());
+    }
+    let updated = {
+        let mut guard = state
+            .0
+            .write()
+            .map_err(|_| "settings lock poisoned".to_string())?;
+        guard.upsert_folder_pref(key, color, pinned);
         guard.clone()
     };
     settings::save(&updated).map_err(|e| e.to_string())
