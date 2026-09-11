@@ -45,8 +45,10 @@ is the single item WattMail keeps in the OS keychain (read once per process).
 
 Folder sidebar (`src/main.ts` `renderFolders` → `src/folder-sidebar.ts`
 `foldersForSidebar`) reads `folderPrefs` from settings and paints a swatch /
-left tint. Order: pinned blocks, then unpinned folders with `unreadCount > 0`
-(same subtree lift + indent reset), then the rest in original tree order.
+left tint. Row layout is a 2-slot grid (`.folder-pin` col 1, `.folder-swatch`
+col 2, or col 1 when unpinned) so names stay aligned. Order: pinned blocks,
+then unpinned folders with `unreadCount > 0` (same subtree lift + indent
+reset), then the rest in original tree order.
 Frontend sync → `set_unread` → `update_tray` → (Linux) channel → ksni update.
 Boot → `checkForUpdates` → if newer signed release: banner + `downloadAndInstall`
 → `relaunch`. About check still shows Install/Later without forcing restart.
@@ -60,6 +62,9 @@ aborts on that).
 
 ## Recent Context & Decisions
 
+- 2026-09-11: Sidebar folder pin/swatch — `.folder` is a 2-slot grid so the
+  colour pill sits next to the pin; unpinned pills use the pin column. Sorter
+  and prefs unchanged.
 - 2026-09-11: v0.15.5 — Sidebar unread grouping — unpinned folders with `unreadCount > 0`
   surface under the pin block; zero unread returns them to tree order on the
   next `renderFolders`. Sort lives in `src/folder-sidebar.ts`. Pin/colour prefs

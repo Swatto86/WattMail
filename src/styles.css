@@ -829,12 +829,13 @@ body,
   margin: 8px;
 }
 
-/* Folder sidebar */
+/* Folder sidebar — pin + swatch share two 8px slots so names line up.
+   Unpinned colour occupies the pin column. */
 .folder {
-  display: flex;
+  display: grid;
+  grid-template-columns: 8px 8px minmax(0, 1fr) auto;
   align-items: center;
-  justify-content: space-between;
-  gap: 6px;
+  column-gap: 6px;
   width: 100%;
   padding: 5px 10px;
   font-size: 13px;
@@ -860,21 +861,25 @@ body,
   box-shadow: inset 3px 0 0 var(--folder-color);
 }
 .folder-swatch {
+  grid-column: 2;
   width: 8px;
   height: 8px;
   border-radius: 50%;
-  flex-shrink: 0;
   background: var(--folder-color);
 }
+.folder:not(.is-pinned) .folder-swatch {
+  grid-column: 1;
+}
 .folder-pin {
+  grid-column: 1;
   width: 8px;
   height: 8px;
-  flex-shrink: 0;
   opacity: 0.55;
   background: currentColor;
   clip-path: polygon(50% 0, 100% 38%, 82% 100%, 18% 100%, 0 38%);
 }
 .folder-name {
+  grid-column: 3;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -914,7 +919,7 @@ body,
   filter: brightness(1.08);
 }
 .folder-badge {
-  flex-shrink: 0;
+  grid-column: 4;
   font-size: 11px;
   opacity: 0.85;
   background: oklch(var(--bc) / 0.12);

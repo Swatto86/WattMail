@@ -5,7 +5,7 @@
 > new milestone state, a decision made/reversed, or an open question resolved.
 > Keep newest progress entries at the top of the log.
 >
-> **Last updated:** 2026-09-11 (sidebar unread folders surface under pins, v0.15.5)
+> **Last updated:** 2026-09-11 (sidebar pin/colour pills share a 2-slot grid)
 
 ---
 
@@ -101,6 +101,13 @@ Entra app registration (public, not secret):
 ---
 
 ## Progress log
+
+### 2026-09-11 — Sidebar colour pills sit in the pin column
+
+- `.folder` rows are a 2-slot CSS grid (`src/styles.css`): pin in column 1,
+  swatch in column 2 (or column 1 when the folder is not pinned). `space-between`
+  was shoving the pill away from the pin; names now share one column.
+- Markup, `folderPrefs`, unread-float order, and SwatBox are unchanged.
 
 ### 2026-09-11 — Unread folders surface under pins (v0.15.5)
 
