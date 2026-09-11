@@ -12,6 +12,7 @@ cd "$(dirname "$0")/.."
 export PATH="$HOME/.cargo/bin:$PATH"
 
 npm run build
+node --experimental-strip-types scripts/test-folder-sidebar.mjs
 cargo fmt --all -- --check
 cargo clippy --all-targets -- -D warnings
 cargo test --workspace

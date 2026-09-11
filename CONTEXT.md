@@ -5,7 +5,7 @@
 > new milestone state, a decision made/reversed, or an open question resolved.
 > Keep newest progress entries at the top of the log.
 >
-> **Last updated:** 2026-09-11 (folder colour + pin, v0.15.4)
+> **Last updated:** 2026-09-11 (sidebar unread folders surface under pins)
 
 ---
 
@@ -101,6 +101,19 @@ Entra app registration (public, not secret):
 ---
 
 ## Progress log
+
+### 2026-09-11 — Unread folders surface under pins
+
+- Sidebar order is now: pinned blocks (unchanged), then unpinned folders that
+  currently have `unreadCount > 0` (subtree stays together, indent reset —
+  same lift as pins), then remaining folders in original tree order.
+- When a folder’s unread count hits zero, the next `renderFolders` drops it
+  back among the empty folders. No extra persistence; uses the unread counts
+  already on `FolderInfo`.
+- Sort extracted to `src/folder-sidebar.ts` so the order can be checked
+  without booting Tauri (`scripts/test-folder-sidebar.mjs`, also run from
+  `verify.sh`). Pin/colour prefs, send, junk hard-delete, and SwatBox were
+  not touched.
 
 ### 2026-09-11 — Folder colour-coding and pin-to-top (v0.15.4)
 

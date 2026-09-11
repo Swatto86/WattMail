@@ -23,6 +23,7 @@ is the single item WattMail keeps in the OS keychain (read once per process).
 
 ## Component Map
 
+- `src/folder-sidebar.ts` — sidebar folder order (pinned blocks, then unread, then tree)
 - `src-tauri/src/settings.rs` — `settings.json`; close-to-tray, notifications,
   signature, plus `folderPrefs` (`{accountId}:{folderId}` → color / pinned)
 - `src-tauri/src/lib.rs` — composition, tray branch (Linux ksni vs native)
@@ -42,9 +43,10 @@ is the single item WattMail keeps in the OS keychain (read once per process).
 
 ## Data Flow
 
-Folder sidebar (`src/main.ts` `renderFolders`) reads `folderPrefs` from settings
-and paints a swatch / left tint plus pins favourite folders to the top of the
-account's list (subtree stays together; nested pin resets indent).
+Folder sidebar (`src/main.ts` `renderFolders` → `src/folder-sidebar.ts`
+`foldersForSidebar`) reads `folderPrefs` from settings and paints a swatch /
+left tint. Order: pinned blocks, then unpinned folders with `unreadCount > 0`
+(same subtree lift + indent reset), then the rest in original tree order.
 Frontend sync → `set_unread` → `update_tray` → (Linux) channel → ksni update.
 Boot → `checkForUpdates` → if newer signed release: banner + `downloadAndInstall`
 → `relaunch`. About check still shows Install/Later without forcing restart.
@@ -58,6 +60,10 @@ aborts on that).
 
 ## Recent Context & Decisions
 
+- 2026-09-11: Sidebar unread grouping — unpinned folders with `unreadCount > 0`
+  surface under the pin block; zero unread returns them to tree order on the
+  next `renderFolders`. Sort lives in `src/folder-sidebar.ts`. Pin/colour prefs
+  unchanged.
 - 2026-09-11: v0.15.4 — Folder sidebar colour + pin — right-click a folder for Pin to top
   and a colour palette; prefs persist in `settings.json` (`folderPrefs`), keyed
   per account. Nested pin lifts that folder and its children as a block.

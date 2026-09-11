@@ -20,6 +20,7 @@ import {
   startEventReminders,
 } from "./calendar";
 import { showConfirm, showPrompt, isDialogOpen } from "./dialog";
+import { foldersForSidebar } from "./folder-sidebar";
 import {
   adaptPlainEmail,
   EMAIL_FRAME_SANDBOX,
@@ -343,45 +344,6 @@ async function toggleFolderPin(folderId: string): Promise<void> {
 async function setFolderColor(folderId: string, color: string | null): Promise<void> {
   const cur = prefFor(folderId);
   await persistFolderPref(folderId, { color, pinned: !!cur.pinned });
-}
-
-// Pinned folders (plus their descendants) sit above the rest, in original
-// relative order. A pinned nested folder is shown as its own block with indent
-// reset so it does not look like an orphan under whatever is now above it.
-function foldersForSidebar(list: FolderInfo[]): Array<FolderInfo & { indent: number }> {
-  const pinnedRootAt: boolean[] = new Array(list.length).fill(false);
-  const ancestorPinned: boolean[] = new Array(list.length).fill(false);
-  const stack: number[] = [];
-  for (let i = 0; i < list.length; i++) {
-    while (stack.length && list[stack[stack.length - 1]].depth >= list[i].depth) {
-      stack.pop();
-    }
-    const parent = stack.length ? stack[stack.length - 1] : -1;
-    const parentPinned = parent >= 0 && (pinnedRootAt[parent] || ancestorPinned[parent]);
-    ancestorPinned[i] = parentPinned;
-    pinnedRootAt[i] = isFolderPinned(list[i].id) && !parentPinned;
-    stack.push(i);
-  }
-  const taken = new Set<number>();
-  const pinnedBlocks: Array<{ items: FolderInfo[]; rootDepth: number }> = [];
-  for (let i = 0; i < list.length; i++) {
-    if (!pinnedRootAt[i]) continue;
-    const depth = list[i].depth;
-    let end = i + 1;
-    while (end < list.length && list[end].depth > depth) end++;
-    pinnedBlocks.push({ items: list.slice(i, end), rootDepth: depth });
-    for (let j = i; j < end; j++) taken.add(j);
-  }
-  const out: Array<FolderInfo & { indent: number }> = [];
-  for (const block of pinnedBlocks) {
-    for (const f of block.items) {
-      out.push({ ...f, indent: f.depth - block.rootDepth });
-    }
-  }
-  for (let i = 0; i < list.length; i++) {
-    if (!taken.has(i)) out.push({ ...list[i], indent: list[i].depth });
-  }
-  return out;
 }
 
 function folderColorPaletteHtml(selected: string | null): string {
@@ -2905,7 +2867,7 @@ async function loadFolders(): Promise<void> {
 }
 
 function renderFolders(): void {
-  foldersEl.innerHTML = foldersForSidebar(folders)
+  foldersEl.innerHTML = foldersForSidebar(folders, isFolderPinned)
     .map((f) => {
       const active = f.id === currentFolderId ? "active" : "";
       const color = folderColor(f.id);
