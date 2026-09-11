@@ -60,7 +60,7 @@ aborts on that).
 
 ## Recent Context & Decisions
 
-- 2026-09-11: Sidebar unread grouping — unpinned folders with `unreadCount > 0`
+- 2026-09-11: v0.15.5 — Sidebar unread grouping — unpinned folders with `unreadCount > 0`
   surface under the pin block; zero unread returns them to tree order on the
   next `renderFolders`. Sort lives in `src/folder-sidebar.ts`. Pin/colour prefs
   unchanged.

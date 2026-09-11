@@ -5,7 +5,7 @@
 > new milestone state, a decision made/reversed, or an open question resolved.
 > Keep newest progress entries at the top of the log.
 >
-> **Last updated:** 2026-09-11 (sidebar unread folders surface under pins)
+> **Last updated:** 2026-09-11 (sidebar unread folders surface under pins, v0.15.5)
 
 ---
 
@@ -102,7 +102,7 @@ Entra app registration (public, not secret):
 
 ## Progress log
 
-### 2026-09-11 — Unread folders surface under pins
+### 2026-09-11 — Unread folders surface under pins (v0.15.5)
 
 - Sidebar order is now: pinned blocks (unchanged), then unpinned folders that
   currently have `unreadCount > 0` (subtree stays together, indent reset —
