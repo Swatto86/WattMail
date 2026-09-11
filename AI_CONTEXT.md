@@ -58,7 +58,7 @@ aborts on that).
 
 ## Recent Context & Decisions
 
-- 2026-09-11: Folder sidebar colour + pin — right-click a folder for Pin to top
+- 2026-09-11: v0.15.4 — Folder sidebar colour + pin — right-click a folder for Pin to top
   and a colour palette; prefs persist in `settings.json` (`folderPrefs`), keyed
   per account. Nested pin lifts that folder and its children as a block.
 - 2026-09-05: v0.15.0 — Secrets vault: every refresh token / app-password in

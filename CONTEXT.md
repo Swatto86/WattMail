@@ -5,7 +5,7 @@
 > new milestone state, a decision made/reversed, or an open question resolved.
 > Keep newest progress entries at the top of the log.
 >
-> **Last updated:** 2026-09-11 (folder color + pin)
+> **Last updated:** 2026-09-11 (folder colour + pin, v0.15.4)
 
 ---
 
@@ -102,7 +102,7 @@ Entra app registration (public, not secret):
 
 ## Progress log
 
-### 2026-09-11 — Folder colour-coding and pin-to-top
+### 2026-09-11 — Folder colour-coding and pin-to-top (v0.15.4)
 
 - Right-click a folder in the sidebar: **Pin to top** / **Unpin**, plus a
   colour-dot row (or “no colour”). A small swatch and left-edge tint show the
