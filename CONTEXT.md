@@ -5,7 +5,7 @@
 > new milestone state, a decision made/reversed, or an open question resolved.
 > Keep newest progress entries at the top of the log.
 >
-> **Last updated:** 2026-09-11 (sidebar pin/colour pills share a 2-slot grid)
+> **Last updated:** 2026-09-11 (sidebar pin/colour pills share a 2-slot grid, v0.15.6)
 
 ---
 
@@ -102,7 +102,7 @@ Entra app registration (public, not secret):
 
 ## Progress log
 
-### 2026-09-11 — Sidebar colour pills sit in the pin column
+### 2026-09-11 — Sidebar colour pills sit in the pin column (v0.15.6)
 
 - `.folder` rows are a 2-slot CSS grid (`src/styles.css`): pin in column 1,
   swatch in column 2 (or column 1 when the folder is not pinned). `space-between`

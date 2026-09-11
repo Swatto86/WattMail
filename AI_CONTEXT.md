@@ -62,7 +62,7 @@ aborts on that).
 
 ## Recent Context & Decisions
 
-- 2026-09-11: Sidebar folder pin/swatch — `.folder` is a 2-slot grid so the
+- 2026-09-11: v0.15.6 — Sidebar folder pin/swatch — `.folder` is a 2-slot grid so the
   colour pill sits next to the pin; unpinned pills use the pin column. Sorter
   and prefs unchanged.
 - 2026-09-11: v0.15.5 — Sidebar unread grouping — unpinned folders with `unreadCount > 0`
