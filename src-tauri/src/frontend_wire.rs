@@ -28,4 +28,32 @@ mod tests {
             "boot must still call checkForUpdates"
         );
     }
+
+    /// Date-range control defaults to last 7 days and can widen; list coverage
+    /// expands until the window reaches the cutoff.
+    #[test]
+    fn mail_list_date_range_defaults_to_seven_days() {
+        let main = include_str!("../../src/main.ts");
+        let helpers = include_str!("../../src/date-range.ts");
+        assert!(
+            main.contains("id=\"range\""),
+            "toolbar must expose the date-range select"
+        );
+        assert!(
+            main.contains("Last 7 days"),
+            "default option label must be Last 7 days"
+        );
+        assert!(
+            main.contains("ensureRangeCoverage"),
+            "finite ranges must auto-expand the loaded window"
+        );
+        assert!(
+            helpers.contains("parseRangeDays") && helpers.contains(": 7"),
+            "missing/invalid stored range must fall back to 7 days"
+        );
+        assert!(
+            helpers.contains("filterByReceivedRange"),
+            "list must filter by received timestamp against the cutoff"
+        );
+    }
 }

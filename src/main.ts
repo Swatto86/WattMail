@@ -9,6 +9,13 @@ import { relaunch } from "@tauri-apps/plugin-process";
 import { isPermissionGranted, requestPermission } from "@tauri-apps/plugin-notification";
 import { showDesktopNotification } from "./desktop-notify";
 import {
+  filterByReceivedRange,
+  parseRangeDays,
+  rangeIsCovered as rangeWindowCovered,
+  RANGE_CHOICES,
+  type RangeDays,
+} from "./date-range";
+import {
   IANA_ZONE,
   initCalendar,
   loadCalendar,
@@ -432,6 +439,23 @@ function applyFilter(messages: Message[]): Message[] {
   }
 }
 
+// ---- Date range (client-side, over the loaded window) ----
+// Default shows the last week; the control can widen to 14/30/90 days or All.
+// When a finite range is active, the list auto-expands (cache + server backfill)
+// until the loaded window reaches past the cutoff so "last N days" is complete.
+const RANGE_KEY = "wattmail.rangeDays";
+let rangeDays: RangeDays = parseRangeDays(localStorage.getItem(RANGE_KEY));
+// Guards overlapping auto-expand loops from sync + range changes.
+let coveringRange = false;
+
+function applyDateRange(messages: Message[]): Message[] {
+  return filterByReceivedRange(messages, rangeDays);
+}
+
+function rangeIsCovered(messages: Message[]): boolean {
+  return rangeWindowCovered(messages, rangeDays, reachedOldest);
+}
+
 // ---- Date grouping (Outlook-style sections) ----
 const GROUP_KEY = "wattmail.group";
 // Grouping is on by default; only meaningful for date-ordered sorts.
@@ -519,6 +543,13 @@ appRoot.innerHTML = /* html */ `
           <svg class="seg-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg>
         </button>
       </div>
+      <select id="range" class="select select-bordered select-xs mail-only" title="Show mail received within">
+        <option value="7">Last 7 days</option>
+        <option value="14">Last 14 days</option>
+        <option value="30">Last 30 days</option>
+        <option value="90">Last 90 days</option>
+        <option value="0">All mail</option>
+      </select>
       <select id="sort" class="select select-bordered select-xs mail-only" title="Sort by">
         <option value="dateDesc">Newest</option>
         <option value="dateAsc">Oldest</option>
@@ -821,6 +852,7 @@ const aboutMsg = document.querySelector<HTMLDivElement>("#about-msg")!;
 const refreshBtn = document.querySelector<HTMLButtonElement>("#refresh")!;
 const gear = document.querySelector<HTMLButtonElement>("#gear")!;
 const sortSelect = document.querySelector<HTMLSelectElement>("#sort")!;
+const rangeSelect = document.querySelector<HTMLSelectElement>("#range")!;
 const filterSeg = document.querySelector<HTMLDivElement>("#filter-seg")!;
 const groupToggle = document.querySelector<HTMLButtonElement>("#group-toggle")!;
 const searchInput = document.querySelector<HTMLInputElement>("#search")!;
@@ -1139,25 +1171,39 @@ function renderInbox(inbox: Inbox): void {
   const folder = folders.find((f) => f.id === currentFolderId);
   const showRecipient = !!folder && isOutgoingFolder(folder);
 
-  // Quick-filter then sort the loaded window; grouping happens in renderListBody.
-  const visible = sortMessages(applyFilter(inbox.messages));
+  // Quick-filter + date-range then sort the loaded window; grouping happens in renderListBody.
+  const visible = sortMessages(applyDateRange(applyFilter(inbox.messages)));
 
   // Rows cached but not yet in the window can be shown instantly; once those run
   // out, "Load more" backfills older history from the server until its start is
-  // reached (`reachedOldest`).
+  // reached (`reachedOldest`). A finite date range hides Load more once the
+  // window covers the cutoff — widen the range control to see older mail.
   const cachedRemaining = inbox.total - inbox.messages.length;
-  const label =
-    cachedRemaining > 0
-      ? `Load ${Math.min(cachedRemaining, PAGE_SIZE)} more (${cachedRemaining} older)`
-      : "Load older messages";
-  const more =
-    cachedRemaining > 0 || !reachedOldest
-      ? `<button class="load-more" data-role="load-more">${esc(label)}</button>`
-      : "";
+  const covered = rangeIsCovered(inbox.messages);
+  let more = "";
+  if (rangeDays > 0) {
+    if (!covered) {
+      more = `<button class="load-more" disabled>Loading last ${rangeDays} days…</button>`;
+    }
+  } else {
+    const label =
+      cachedRemaining > 0
+        ? `Load ${Math.min(cachedRemaining, PAGE_SIZE)} more (${cachedRemaining} older)`
+        : "Load older messages";
+    if (cachedRemaining > 0 || !reachedOldest) {
+      more = `<button class="load-more" data-role="load-more">${esc(label)}</button>`;
+    }
+  }
 
   if (visible.length === 0) {
-    const empty =
-      inbox.messages.length === 0 ? "No messages." : "No messages match this filter.";
+    let empty = "No messages.";
+    if (inbox.messages.length > 0) {
+      const afterProps = applyFilter(inbox.messages);
+      empty =
+        rangeDays > 0 && afterProps.length > 0 && applyDateRange(afterProps).length === 0
+          ? `No messages in the last ${rangeDays} days.`
+          : "No messages match this filter.";
+    }
     listEl.innerHTML = `<div class="p-6 text-center opacity-60">${empty}</div>` + more;
   } else {
     listEl.innerHTML = renderListBody(visible, showRecipient) + more;
@@ -1592,9 +1638,9 @@ function setSearchClearVisible(visible: boolean): void {
 // Render search results into the list area, reusing the folder list-row markup.
 function renderSearchResults(query: string, results: Message[]): void {
   currentIds = new Set(results.map((m) => m.id));
-  // The quick filter also applies to search results; grouping does not (results
-  // keep their relevance/date order under the search header).
-  const visible = sortMessages(applyFilter(results));
+  // The quick filter + date range also apply to search results; grouping does not
+  // (results keep their relevance/date order under the search header).
+  const visible = sortMessages(applyDateRange(applyFilter(results)));
   const count =
     visible.length === results.length ? `${results.length}` : `${visible.length} of ${results.length}`;
   const header = `<div class="search-header">Search results for: ${esc(query)} (${count})</div>`;
@@ -3064,15 +3110,61 @@ async function refreshFromCache(preserveScroll = false): Promise<void> {
   showSignedIn();
   renderInbox(inbox);
   if (preserveScroll) listEl.scrollTop = scroll;
+  // Grow the window until a finite date range is fully covered (or the folder
+  // starts). Fire-and-forget so the first paint stays instant.
+  void ensureRangeCoverage();
+}
+
+// Widen the loaded window until every message in the active date range is on
+// screen (or the folder has no older mail). No-op for "All mail".
+async function ensureRangeCoverage(): Promise<void> {
+  if (rangeDays <= 0 || searchActive || coveringRange || !currentFolderId) return;
+  coveringRange = true;
+  const fid = currentFolderId;
+  try {
+    for (let i = 0; i < 100; i++) {
+      if (fid !== currentFolderId || searchActive || rangeDays <= 0) return;
+      const inbox = await invoke<Inbox>("folder_from_cache", {
+        folderId: fid,
+        top: loadedCount,
+      });
+      if (fid !== currentFolderId || searchActive) return;
+      if (rangeIsCovered(inbox.messages)) {
+        renderInbox(inbox);
+        return;
+      }
+      const scroll = listEl.scrollTop;
+      if (loadedCount <= inbox.total) {
+        loadedCount += PAGE_SIZE;
+        const next = await invoke<Inbox>("folder_from_cache", {
+          folderId: fid,
+          top: loadedCount,
+        });
+        if (fid !== currentFolderId || searchActive) return;
+        renderInbox(next);
+        listEl.scrollTop = scroll;
+        continue;
+      }
+      // Cache exhausted — pull older history from the server.
+      if (backfilling) return;
+      const before = inbox.total;
+      const ok = await backfillOlder();
+      if (fid !== currentFolderId || searchActive) return;
+      if (!ok || reachedOldest || currentTotal <= before) return;
+    }
+  } finally {
+    coveringRange = false;
+  }
 }
 
 // Pull a page of older messages from the server into the cache, then re-render
 // the grown window. Used by "Load more" once the cached window is exhausted, so
 // the user can page back through the whole folder rather than only the recent
 // slice the delta sync keeps. Scroll is preserved so new rows append below.
-async function backfillOlder(): Promise<void> {
+// Returns false when the server call failed (offline); true otherwise.
+async function backfillOlder(): Promise<boolean> {
   const fid = currentFolderId;
-  if (!fid || backfilling) return;
+  if (!fid || backfilling) return false;
   backfilling = true;
   const moreBtn = listEl.querySelector<HTMLButtonElement>(".load-more");
   if (moreBtn) {
@@ -3084,18 +3176,23 @@ async function backfillOlder(): Promise<void> {
   const before = currentTotal;
   try {
     const inbox = await invoke<Inbox>("load_older", { folderId: fid, top: loadedCount });
-    if (fid !== currentFolderId || searchActive) return; // folder switched / search started
+    if (fid !== currentFolderId || searchActive) return true; // folder switched / search started
     if (inbox.total <= before) reachedOldest = true; // server had nothing older
     renderInbox(inbox);
     listEl.scrollTop = scroll;
     statusEl.textContent = "";
+    return true;
   } catch (e) {
     // Server backfill failed (offline). Still widen from the cache up to what it
     // holds, so the rows the "Load more" click promised do render; leave
     // reachedOldest false so the button stays for a retry.
     statusEl.textContent = "Could not load older messages — check your connection and try again.";
     loadedCount = Math.max(PAGE_SIZE, Math.min(loadedCount, currentTotal));
-    if (fid === currentFolderId && !searchActive) await refreshFromCache(true).catch(() => {});
+    // Skip refresh while range coverage owns the loop — it would re-enter ensure.
+    if (fid === currentFolderId && !searchActive && !coveringRange) {
+      await refreshFromCache(true).catch(() => {});
+    }
+    return false;
   } finally {
     backfilling = false;
   }
@@ -5970,6 +6067,14 @@ sortSelect.addEventListener("change", () => {
   updateGroupUi(); // group availability depends on the sort
   rerenderList();
 });
+rangeSelect.addEventListener("change", () => {
+  const v = Number.parseInt(rangeSelect.value, 10);
+  rangeDays = (RANGE_CHOICES as readonly number[]).includes(v) ? (v as RangeDays) : 7;
+  localStorage.setItem(RANGE_KEY, String(rangeDays));
+  // Widening may need more rows; narrowing only re-filters. Always re-cover.
+  rerenderList();
+  void ensureRangeCoverage();
+});
 filterSeg.addEventListener("click", (e) => {
   const f = (e.target as HTMLElement).closest("button")?.dataset.filter as FilterMode | undefined;
   if (!f || f === filterMode) return;
@@ -6771,6 +6876,7 @@ async function boot(): Promise<void> {
   applyThemePref(loadThemePref());
   await loadFolderPrefs();
   sortSelect.value = sortMode;
+  rangeSelect.value = String(rangeDays);
   updateFilterUi();
   updateGroupUi();
   try {
