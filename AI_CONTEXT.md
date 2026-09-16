@@ -64,7 +64,7 @@ aborts on that).
 
 ## Recent Context & Decisions
 
-- 2026-09-16: Mail list date-range control — toolbar `#range` select defaults to
+- 2026-09-16: v0.15.7 — Mail list date-range control — toolbar `#range` select defaults to
   last 7 days (14/30/90/All); shows every message in the window (read and
   unread — Unread quick-filter disabled while a range is active).
   `src/date-range.ts` filters by `received` and `ensureRangeCoverage` in

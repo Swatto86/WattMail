@@ -5,7 +5,7 @@
 > new milestone state, a decision made/reversed, or an open question resolved.
 > Keep newest progress entries at the top of the log.
 >
-> **Last updated:** 2026-09-11 (sidebar pin/colour pills share a 2-slot grid, v0.15.6)
+> **Last updated:** 2026-09-16 (mail list date-range control, v0.15.7)
 
 ---
 
@@ -101,6 +101,15 @@ Entra app registration (public, not secret):
 ---
 
 ## Progress log
+
+### 2026-09-16 — Mail list date-range control (v0.15.7)
+
+- Toolbar `#range` select defaults to **Last 7 days** (14/30/90/All); filters by
+  `received` via `src/date-range.ts`.
+- Finite ranges show **every** message in the window (read and unread); Unread
+  quick-filter is disabled while a range is active.
+- `ensureRangeCoverage` grows the cache window then server-backfills until the
+  newest-first slice reaches past the cutoff. **Load more** remains for All mail.
 
 ### 2026-09-11 — Sidebar colour pills sit in the pin column (v0.15.6)
 
