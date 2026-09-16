@@ -188,6 +188,7 @@ pub fn run() {
             commands::load_older,
             commands::sync_folder,
             commands::search_messages,
+            commands::list_messages_since,
             commands::load_message,
             commands::open_message_window,
             commands::message_window_target,

@@ -10,6 +10,12 @@ export function rangeCutoffMs(days: number, nowMs = Date.now()): number | null {
   return nowMs - days * 86_400_000;
 }
 
+/** ISO-8601 cutoff for Graph `$filter=receivedDateTime ge …`, or null for All. */
+export function rangeSinceIso(days: number, nowMs = Date.now()): string | null {
+  const cutoff = rangeCutoffMs(days, nowMs);
+  return cutoff === null ? null : new Date(cutoff).toISOString();
+}
+
 export function parseRangeDays(raw: string | null): RangeDays {
   const v = Number.parseInt(raw ?? "", 10);
   return (RANGE_CHOICES as readonly number[]).includes(v) ? (v as RangeDays) : 7;
@@ -31,7 +37,8 @@ export function filterByReceivedRange<T extends { received: string }>(
 
 /**
  * Newest-first window already reaches before the cutoff (or range is All /
- * folder exhausted / empty).
+ * folder exhausted / empty). Used only for folder-scoped coverage; mailbox-wide
+ * range mode pages from the server instead.
  */
 export function rangeIsCovered(
   messages: { received: string }[],

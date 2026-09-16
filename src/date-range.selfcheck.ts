@@ -7,6 +7,7 @@ import {
   parseRangeDays,
   rangeCutoffMs,
   rangeIsCovered,
+  rangeSinceIso,
 } from "./date-range.ts";
 
 const now = Date.parse("2026-09-16T12:00:00Z");
@@ -18,6 +19,8 @@ function assert(cond: boolean, msg: string): void {
 
 assert(rangeCutoffMs(0, now) === null, "all-mail has no cutoff");
 assert(rangeCutoffMs(7, now) === now - 7 * day, "7-day cutoff");
+assert(rangeSinceIso(7, now) === new Date(now - 7 * day).toISOString(), "ISO cutoff");
+assert(rangeSinceIso(0, now) === null, "all-mail has no ISO cutoff");
 assert(parseRangeDays(null) === 7, "default is 7 days");
 assert(parseRangeDays("30") === 30, "parses 30");
 assert(parseRangeDays("3") === 7, "unknown falls back to 7");

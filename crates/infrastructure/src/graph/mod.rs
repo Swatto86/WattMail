@@ -710,6 +710,60 @@ impl MailProvider for GraphClient {
         Ok(messages)
     }
 
+    async fn list_since(&self, since: &str, top: u32) -> Result<Vec<MessageSummary>, MailError> {
+        // `/me/messages` is mailbox-wide (every folder). `$filter` + `$orderby`
+        // work together here (unlike `$search`), so we page newest-first until
+        // `top` or the folder set is exhausted.
+        let filter = format!("receivedDateTime ge {since}");
+        let page_top = top.clamp(1, 50);
+        let select =
+            "id,subject,from,toRecipients,receivedDateTime,bodyPreview,isRead,flag,hasAttachments,importance";
+        let mut messages = Vec::new();
+        let mut next: Option<String> = None;
+        loop {
+            let response = match next.as_deref() {
+                Some(url) => self
+                    .http
+                    .get(url)
+                    .bearer_auth(&self.access_token)
+                    .send()
+                    .await
+                    .map_err(|e| MailError::Network(e.to_string()))?,
+                None => {
+                    let top_str = page_top.to_string();
+                    self.http
+                        .get(format!("{GRAPH_BASE}/me/messages"))
+                        .bearer_auth(&self.access_token)
+                        .query(&[
+                            ("$filter", filter.as_str()),
+                            ("$orderby", "receivedDateTime desc"),
+                            ("$top", top_str.as_str()),
+                            ("$select", select),
+                        ])
+                        .send()
+                        .await
+                        .map_err(|e| MailError::Network(e.to_string()))?
+                }
+            };
+            let page: GraphPage<GraphMessage> = check_status(response)
+                .await?
+                .json()
+                .await
+                .map_err(|e| MailError::Decode(e.to_string()))?;
+            for item in page.value {
+                messages.push(MessageSummary::from(item));
+                if messages.len() as u32 >= top {
+                    return Ok(messages);
+                }
+            }
+            match page.next_link {
+                Some(link) => next = Some(link),
+                None => break,
+            }
+        }
+        Ok(messages)
+    }
+
     async fn fetch_older(
         &self,
         folder_id: &str,

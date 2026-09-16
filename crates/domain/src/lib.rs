@@ -437,6 +437,13 @@ pub trait MailProvider: Send + Sync {
     /// `query`, newest first.
     async fn search(&self, query: &str, top: u32) -> Result<Vec<MessageSummary>, MailError>;
 
+    /// Mailbox-wide messages received at or after `since` (ISO-8601), newest
+    /// first, up to `top`. Used by the date-range list. Default is unsupported
+    /// so cache-only backends can fall back in the application layer.
+    async fn list_since(&self, _since: &str, _top: u32) -> Result<Vec<MessageSummary>, MailError> {
+        Err(MailError::Unsupported)
+    }
+
     /// Fetch up to `limit` messages in `folder_id` strictly older than `before`
     /// (an ISO-8601 received timestamp), newest first — backfilling history that
     /// the bounded delta sync window doesn't reach. The default returns nothing:

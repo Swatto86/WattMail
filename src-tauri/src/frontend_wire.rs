@@ -44,8 +44,8 @@ mod tests {
             "default option label must be Last 7 days"
         );
         assert!(
-            main.contains("ensureRangeCoverage"),
-            "finite ranges must auto-expand the loaded window"
+            main.contains("loadMailboxRange") && main.contains("list_messages_since"),
+            "finite ranges must load mailbox-wide via list_messages_since"
         );
         assert!(
             main.contains("rangeDays > 0 && filterMode === \"unread\" ? \"all\""),
@@ -56,8 +56,8 @@ mod tests {
             "missing/invalid stored range must fall back to 7 days"
         );
         assert!(
-            helpers.contains("filterByReceivedRange"),
-            "list must filter by received timestamp against the cutoff"
+            helpers.contains("rangeSinceIso"),
+            "cutoff must be an ISO timestamp for Graph $filter"
         );
     }
 }

@@ -84,6 +84,39 @@ pub async fn search_messages(
     }
 }
 
+/// Mailbox-wide messages received at or after `since` (ISO-8601), newest first.
+/// Live from the provider when possible; falls back to every folder's cache.
+pub async fn messages_since(
+    provider: &dyn MailProvider,
+    store: &dyn MailStore,
+    since: &str,
+    top: u32,
+) -> Result<SearchResults, MailError> {
+    match provider.list_since(since, top).await {
+        Ok(messages) => Ok(SearchResults {
+            messages,
+            from_cache: false,
+        }),
+        Err(MailError::Network(_)) | Err(MailError::Unsupported) => {
+            // Decrypt a wide newest-first window across folders, then keep rows
+            // at/after `since`. Cap is well above the UI's range top so offline
+            // still sees a useful slice of the week.
+            let cap = top.max(500);
+            let rows = store.cached_for_search(None, cap).await?;
+            let messages = rows
+                .into_iter()
+                .filter(|m| !m.received.is_empty() && m.received.as_str() >= since)
+                .take(top as usize)
+                .collect();
+            Ok(SearchResults {
+                messages,
+                from_cache: true,
+            })
+        }
+        Err(e) => Err(e),
+    }
+}
+
 async fn search_cached(
     store: &dyn MailStore,
     query: &wattmail_domain::MailQuery,
@@ -1075,6 +1108,46 @@ mod tests {
             provider.search_queries.lock().unwrap().as_slice(),
             ["\"s\""]
         );
+    }
+
+    #[tokio::test]
+    async fn messages_since_falls_back_to_cache_across_folders() {
+        let store = MockStore::default();
+        store
+            .upsert_messages(
+                "inbox",
+                vec![
+                    MessageSummary {
+                        received: "2026-09-15T00:00:00Z".into(),
+                        ..summary("new")
+                    },
+                    MessageSummary {
+                        received: "2026-08-01T00:00:00Z".into(),
+                        ..summary("old")
+                    },
+                ],
+            )
+            .await
+            .unwrap();
+        store
+            .upsert_messages(
+                "archive",
+                vec![MessageSummary {
+                    received: "2026-09-14T00:00:00Z".into(),
+                    ..summary("arc")
+                }],
+            )
+            .await
+            .unwrap();
+        // Default list_since is Unsupported → cache path across all folders.
+        let provider = mock_provider(None);
+        let results = messages_since(&provider, &store, "2026-09-09T00:00:00Z", 50)
+            .await
+            .unwrap();
+        assert!(results.from_cache);
+        let mut ids: Vec<_> = results.messages.iter().map(|m| m.id.as_str()).collect();
+        ids.sort_unstable();
+        assert_eq!(ids, vec!["arc", "new"]);
     }
 
     #[tokio::test]

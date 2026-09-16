@@ -24,8 +24,8 @@ is the single item WattMail keeps in the OS keychain (read once per process).
 ## Component Map
 
 - `src/folder-sidebar.ts` — sidebar folder order (pinned blocks, then unread, then tree)
-- `src/date-range.ts` — rolling N-day received cutoff helpers for the mail list
-  (`#range` in `src/main.ts`; default 7 days; `ensureRangeCoverage` expands load)
+- `src/date-range.ts` — rolling N-day received cutoff helpers; mailbox-wide
+  range list via `list_messages_since` (`src/main.ts` `loadMailboxRange`)
 - `src-tauri/src/settings.rs` — `settings.json`; close-to-tray, notifications,
   signature, plus `folderPrefs` (`{accountId}:{folderId}` → color / pinned)
 - `src-tauri/src/lib.rs` — composition, tray branch (Linux ksni vs native)
@@ -64,12 +64,10 @@ aborts on that).
 
 ## Recent Context & Decisions
 
-- 2026-09-16: v0.15.7 — Mail list date-range control — toolbar `#range` select defaults to
-  last 7 days (14/30/90/All); shows every message in the window (read and
-  unread — Unread quick-filter disabled while a range is active).
-  `src/date-range.ts` filters by `received` and `ensureRangeCoverage` in
-  `src/main.ts` grows the cache window (then server backfill) until the
-  newest-first slice reaches past the cutoff. "Load more" stays for All mail only.
+- 2026-09-16: v0.15.8 — Mailbox-wide date-range list — `#range` defaults to last
+  7 days across **every folder** via `list_messages_since` / Graph `$filter`
+  (read + unread). Offline: `cached_for_search(None)`. All mail = per-folder.
+- 2026-09-16: v0.15.7 — Mail list date-range control (folder-scoped; superseded).
 - 2026-09-11: v0.15.6 — Sidebar folder pin/swatch — `.folder` is a 2-slot grid so the
   colour pill sits next to the pin; unpinned pills use the pin column. Sorter
   and prefs unchanged.

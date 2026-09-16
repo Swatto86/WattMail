@@ -22,8 +22,8 @@ use wattmail_application::{
     list_calendars as app_list_calendars, list_folders as app_list_folders,
     load_draft as app_load_draft, load_older as app_load_older,
     mark_folder_read as app_mark_folder_read, meeting_invite as app_meeting_invite,
-    move_message as app_move_message, read_headers, read_message,
-    rename_folder as app_rename_folder, respond_to_event as app_respond_to_event,
+    messages_since as app_messages_since, move_message as app_move_message, read_headers,
+    read_message, rename_folder as app_rename_folder, respond_to_event as app_respond_to_event,
     save_draft as app_save_draft, search_messages as app_search_messages,
     send_draft as app_send_draft, send_message as app_send_message, send_reply as app_send_reply,
     set_auto_reply_settings as app_set_auto_reply_settings, set_flag as app_set_flag,
@@ -317,6 +317,24 @@ pub async fn search_messages(
     )
     .await
     .map_err(|e| e.to_string())?;
+    Ok(SearchResultsDto {
+        messages: results.messages.into_iter().map(message_dto).collect(),
+        from_cache: results.from_cache,
+    })
+}
+
+/// Mailbox-wide messages received at or after `since` (ISO-8601), for the
+/// date-range list (every folder, read and unread).
+#[tauri::command]
+pub async fn list_messages_since(
+    accounts: State<'_, AccountManager>,
+    since: String,
+    top: u32,
+) -> Result<SearchResultsDto, String> {
+    let (account, provider) = active_provider(&accounts).await?;
+    let results = app_messages_since(&*provider, &account.store, &since, top)
+        .await
+        .map_err(|e| e.to_string())?;
     Ok(SearchResultsDto {
         messages: results.messages.into_iter().map(message_dto).collect(),
         from_cache: results.from_cache,
