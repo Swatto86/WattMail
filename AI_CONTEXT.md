@@ -65,10 +65,11 @@ aborts on that).
 ## Recent Context & Decisions
 
 - 2026-09-16: Mail list date-range control — toolbar `#range` select defaults to
-  last 7 days (14/30/90/All); `src/date-range.ts` filters by `received` and
-  `ensureRangeCoverage` in `src/main.ts` grows the cache window (then server
-  backfill) until the newest-first slice reaches past the cutoff. "Load more"
-  stays for All mail only.
+  last 7 days (14/30/90/All); shows every message in the window (read and
+  unread — Unread quick-filter disabled while a range is active).
+  `src/date-range.ts` filters by `received` and `ensureRangeCoverage` in
+  `src/main.ts` grows the cache window (then server backfill) until the
+  newest-first slice reaches past the cutoff. "Load more" stays for All mail only.
 - 2026-09-11: v0.15.6 — Sidebar folder pin/swatch — `.folder` is a 2-slot grid so the
   colour pill sits next to the pin; unpinned pills use the pin column. Sorter
   and prefs unchanged.

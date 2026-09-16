@@ -48,6 +48,10 @@ mod tests {
             "finite ranges must auto-expand the loaded window"
         );
         assert!(
+            main.contains("rangeDays > 0 && filterMode === \"unread\" ? \"all\""),
+            "finite date ranges must include both read and unread mail"
+        );
+        assert!(
             helpers.contains("parseRangeDays") && helpers.contains(": 7"),
             "missing/invalid stored range must fall back to 7 days"
         );

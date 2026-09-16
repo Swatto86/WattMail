@@ -427,7 +427,10 @@ function loadFilterMode(): FilterMode {
 let filterMode: FilterMode = loadFilterMode();
 
 function applyFilter(messages: Message[]): Message[] {
-  switch (filterMode) {
+  // A finite date range always includes both read and unread mail in that
+  // window; the Unread quick-filter only applies when showing All mail.
+  const mode = rangeDays > 0 && filterMode === "unread" ? "all" : filterMode;
+  switch (mode) {
     case "unread":
       return messages.filter((m) => !m.isRead);
     case "flagged":
@@ -440,9 +443,10 @@ function applyFilter(messages: Message[]): Message[] {
 }
 
 // ---- Date range (client-side, over the loaded window) ----
-// Default shows the last week; the control can widen to 14/30/90 days or All.
-// When a finite range is active, the list auto-expands (cache + server backfill)
-// until the loaded window reaches past the cutoff so "last N days" is complete.
+// Default shows every message received in the last week (read and unread);
+// the control can widen to 14/30/90 days or All. When a finite range is active,
+// the list auto-expands (cache + server backfill) until the loaded window
+// reaches past the cutoff so the range is complete.
 const RANGE_KEY = "wattmail.rangeDays";
 let rangeDays: RangeDays = parseRangeDays(localStorage.getItem(RANGE_KEY));
 // Guards overlapping auto-expand loops from sync + range changes.
@@ -6046,8 +6050,18 @@ function rerenderList(): void {
   else void refreshFromCache(true);
 }
 function updateFilterUi(): void {
+  // Finite date ranges always show read + unread; reflect that in the seg UI.
+  const effective = rangeDays > 0 && filterMode === "unread" ? "all" : filterMode;
   for (const b of filterSeg.querySelectorAll<HTMLButtonElement>("button")) {
-    b.classList.toggle("active", b.dataset.filter === filterMode);
+    const isUnread = b.dataset.filter === "unread";
+    b.classList.toggle("active", b.dataset.filter === effective);
+    b.disabled = isUnread && rangeDays > 0;
+    if (isUnread) {
+      b.title =
+        rangeDays > 0
+          ? "Unread filter unavailable while a date range is active (shows read and unread)"
+          : "Unread only";
+    }
   }
 }
 function updateGroupUi(): void {
@@ -6071,6 +6085,12 @@ rangeSelect.addEventListener("change", () => {
   const v = Number.parseInt(rangeSelect.value, 10);
   rangeDays = (RANGE_CHOICES as readonly number[]).includes(v) ? (v as RangeDays) : 7;
   localStorage.setItem(RANGE_KEY, String(rangeDays));
+  // Date ranges show every message in the window (read and unread).
+  if (rangeDays > 0 && filterMode === "unread") {
+    filterMode = "all";
+    localStorage.setItem(FILTER_KEY, filterMode);
+  }
+  updateFilterUi();
   // Widening may need more rows; narrowing only re-filters. Always re-cover.
   rerenderList();
   void ensureRangeCoverage();
@@ -6078,6 +6098,8 @@ rangeSelect.addEventListener("change", () => {
 filterSeg.addEventListener("click", (e) => {
   const f = (e.target as HTMLElement).closest("button")?.dataset.filter as FilterMode | undefined;
   if (!f || f === filterMode) return;
+  // Ignore Unread while a date range is active — range always includes both.
+  if (f === "unread" && rangeDays > 0) return;
   filterMode = f;
   localStorage.setItem(FILTER_KEY, filterMode);
   updateFilterUi();
