@@ -66,6 +66,8 @@ aborts on that).
 
 ## Recent Context & Decisions
 
+- 2026-09-17: v0.15.10 — Sidebar folder filter + cache-first folder switches
+  (skip Graph sync within 60s; remember per-folder loaded window).
 - 2026-09-17: Sidebar folder filter (`#folder-filter`) + faster folder switches —
   paint from SQLite first; skip Graph sync when that folder was synced within
   the last 60s; remember `loadedCount` / `reachedOldest` per folder.
