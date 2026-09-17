@@ -9,7 +9,6 @@ import { relaunch } from "@tauri-apps/plugin-process";
 import { isPermissionGranted, requestPermission } from "@tauri-apps/plugin-notification";
 import { showDesktopNotification } from "./desktop-notify";
 import {
-  filterByReceivedRange,
   parseRangeDays,
   rangeSinceIso,
   RANGE_CHOICES,
@@ -427,9 +426,9 @@ function loadFilterMode(): FilterMode {
 let filterMode: FilterMode = loadFilterMode();
 
 function applyFilter(messages: Message[]): Message[] {
-  // A finite date range always includes both read and unread mail in that
-  // window; the Unread quick-filter only applies when showing All mail.
-  const mode = rangeDays > 0 && filterMode === "unread" ? "all" : filterMode;
+  // Filtered Mail always includes both read and unread; Unread only applies
+  // to real folders / search.
+  const mode = viewingFilteredMail() && filterMode === "unread" ? "all" : filterMode;
   switch (mode) {
     case "unread":
       return messages.filter((m) => !m.isRead);
@@ -442,20 +441,24 @@ function applyFilter(messages: Message[]): Message[] {
   }
 }
 
-// ---- Date range (mailbox-wide when finite) ----
-// Default shows every message received in the last week across the whole
-// mailbox (every folder, read and unread). Widen to 14/30/90 days or All.
-// Finite ranges load via Graph `/me/messages` `$filter` (cache fallback);
-// All mail restores the normal per-folder list + Load more.
+// ---- Date range (mailbox-wide Filtered Mail virtual folder) ----
+// Finite ranges load via Graph `/me/messages` `$filter` into a virtual sidebar
+// folder ("Filtered Mail"). Real folders (Inbox, …) keep their normal contents.
+// "All mail" hides the virtual folder's usefulness — pick a range to fill it.
 const RANGE_KEY = "wattmail.rangeDays";
 const RANGE_TOP = 2000;
+const FILTERED_MAIL_ID = "__wattmail_filtered__";
 let rangeDays: RangeDays = parseRangeDays(localStorage.getItem(RANGE_KEY));
 let rangeActive = false;
 let rangeMessages: Message[] = [];
 let rangeSeq = 0;
 
-function applyDateRange(messages: Message[]): Message[] {
-  return filterByReceivedRange(messages, rangeDays);
+function isFilteredMailId(id: string | null | undefined): boolean {
+  return id === FILTERED_MAIL_ID;
+}
+
+function viewingFilteredMail(): boolean {
+  return isFilteredMailId(currentFolderId);
 }
 
 // ---- Date grouping (Outlook-style sections) ----
@@ -917,6 +920,9 @@ const cToInput = document.querySelector<HTMLInputElement>("#c-to")!;
 const cCcInput = document.querySelector<HTMLInputElement>("#c-cc")!;
 const cBccInput = document.querySelector<HTMLInputElement>("#c-bcc")!;
 const correspondentsList = document.querySelector<HTMLDivElement>("#correspondents")!;
+// Host outside `.compose-panel` (`overflow: hidden`) so the fixed dropdown is
+// never clipped — autocomplete must work for new / reply / forward / drafts.
+document.body.appendChild(correspondentsList);
 const cSubjectInput = document.querySelector<HTMLInputElement>("#c-subject")!;
 const cBodyInput = document.querySelector<HTMLDivElement>("#c-body")!;
 const composeToolbar = document.querySelector<HTMLDivElement>("#c-toolbar")!;
@@ -1173,9 +1179,9 @@ function renderInbox(inbox: Inbox): void {
   const folder = folders.find((f) => f.id === currentFolderId);
   const showRecipient = !!folder && isOutgoingFolder(folder);
 
-  // Quick-filter + date-range then sort the loaded window; grouping happens in renderListBody.
-  // (Finite date ranges use mailbox-wide range mode instead of this folder slice.)
-  const visible = sortMessages(applyDateRange(applyFilter(inbox.messages)));
+  // Quick-filter then sort the loaded window; grouping happens in renderListBody.
+  // Date range lives only in the Filtered Mail virtual folder.
+  const visible = sortMessages(applyFilter(inbox.messages));
 
   // Rows cached but not yet in the window can be shown instantly; once those run
   // out, "Load more" backfills older history from the server until its start is
@@ -1627,9 +1633,9 @@ function setSearchClearVisible(visible: boolean): void {
 // Render search results into the list area, reusing the folder list-row markup.
 function renderSearchResults(query: string, results: Message[]): void {
   currentIds = new Set(results.map((m) => m.id));
-  // The quick filter + date range also apply to search results; grouping does not
+  // The quick filter also applies to search results; grouping does not
   // (results keep their relevance/date order under the search header).
-  const visible = sortMessages(applyDateRange(applyFilter(results)));
+  const visible = sortMessages(applyFilter(results));
   const count =
     visible.length === results.length ? `${results.length}` : `${visible.length} of ${results.length}`;
   const header = `<div class="search-header">Search results for: ${esc(query)} (${count})</div>`;
@@ -1687,7 +1693,7 @@ function exitSearch(): void {
   searchInput.value = "";
   setSearchClearVisible(false);
   if (wasActive) {
-    if (rangeDays > 0) void loadMailboxRange();
+    if (viewingFilteredMail()) void loadMailboxRange();
     else void refreshFromCache().catch(() => {});
   }
 }
@@ -2874,7 +2880,7 @@ async function handlePossibleAuthError(e: unknown): Promise<boolean> {
     reauthRequired = false;
     statusEl.textContent = "Signed in.";
     await loadFolders();
-    if (rangeDays > 0) await loadMailboxRange();
+    if (viewingFilteredMail()) await loadMailboxRange();
     else {
       await refreshFromCache().catch(() => {});
       await syncFolder();
@@ -2908,9 +2914,13 @@ async function loadFolders(): Promise<void> {
 }
 
 function renderFolders(): void {
-  foldersEl.innerHTML = foldersForSidebar(folders, isFolderPinned)
+  const filteredActive = viewingFilteredMail() ? "active" : "";
+  const filteredLabel =
+    rangeDays > 0 ? `Filtered Mail · ${rangeDays}d` : "Filtered Mail";
+  const filteredRow = `<button class="folder folder-virtual ${filteredActive}" data-fid="${FILTERED_MAIL_ID}" title="Mailbox-wide date filter (every folder)"><span class="folder-name">${esc(filteredLabel)}</span></button>`;
+  const rows = foldersForSidebar(folders, isFolderPinned)
     .map((f) => {
-      const active = f.id === currentFolderId ? "active" : "";
+      const active = !viewingFilteredMail() && f.id === currentFolderId ? "active" : "";
       const color = folderColor(f.id);
       const pinned = isFolderPinned(f.id);
       const colorClass = color ? " has-color" : "";
@@ -2923,13 +2933,14 @@ function renderFolders(): void {
       return `<button class="folder ${active}${colorClass}${pinClass}" data-fid="${esc(f.id)}" title="${esc(f.name)}" style="${colorStyle}padding-left:${pad}px">${pin}${swatch}<span class="folder-name">${esc(f.name)}</span>${badge}</button>`;
     })
     .join("");
+  foldersEl.innerHTML = filteredRow + rows;
 }
 
 async function selectFolder(id: string): Promise<void> {
   // Clicking a folder always leaves search mode, even the current folder.
   if (id === currentFolderId) {
     if (searchActive) exitSearch();
-    // Finite range stays mailbox-wide; re-clicking the folder does not exit it.
+    if (isFilteredMailId(id)) void loadMailboxRange();
     return;
   }
   // Always drop any pending search debounce, even if search isn't "active" yet
@@ -2946,9 +2957,9 @@ async function selectFolder(id: string): Promise<void> {
   loadedCount = PAGE_SIZE; // start each folder at the first page
   reachedOldest = false; // re-enable server backfill for the new folder
   renderFolders();
-  // Date range is mailbox-wide — keep showing it; only All mail browses folders.
-  if (rangeDays > 0) {
-    void loadMailboxRange();
+  updateFilterUi();
+  if (isFilteredMailId(id)) {
+    await loadMailboxRange();
     return;
   }
   exitRangeMode();
@@ -3109,42 +3120,52 @@ async function refreshFromCache(preserveScroll = false): Promise<void> {
   // folder rows would repaint over live search results (with searchActive still
   // true, wedging the view). Mirrors reconcileAfterAction's search branch.
   if (searchActive) return;
-  // Mailbox-wide date range owns the list; don't paint the folder slice over it.
-  if (rangeActive) return;
+  // Filtered Mail owns the list while selected; don't paint a real folder over it.
+  if (viewingFilteredMail()) return;
   showSignedIn();
   renderInbox(inbox);
   if (preserveScroll) listEl.scrollTop = scroll;
 }
 
-// Mailbox-wide date-range list: every folder, read and unread, since the cutoff.
+// Mailbox-wide date-range list into the Filtered Mail virtual folder.
 async function loadMailboxRange(): Promise<void> {
   const since = rangeSinceIso(rangeDays);
   if (!since) {
-    exitRangeMode();
+    rangeMessages = [];
+    rangeActive = true;
+    currentIds = new Set();
+    listEl.innerHTML = `<div class="search-header">Filtered Mail</div><div class="p-6 text-center opacity-60">Choose a date range (Last 7 days, …) to list mail from every folder.</div>`;
+    statusEl.textContent = "Pick a date range for Filtered Mail";
     return;
   }
   if (searchActive) exitSearch();
+  // Ensure the virtual folder is selected so Inbox/etc. stay untouched.
+  if (!viewingFilteredMail()) {
+    currentFolderId = FILTERED_MAIL_ID;
+    renderFolders();
+    updateFilterUi();
+  }
   const seq = ++rangeSeq;
   rangeActive = true;
-  listEl.innerHTML = `<div class="search-header">Mailbox · last ${rangeDays} days</div><div class="p-6 text-center opacity-60">Loading…</div>`;
+  listEl.innerHTML = `<div class="search-header">Filtered Mail · last ${rangeDays} days</div><div class="p-6 text-center opacity-60">Loading…</div>`;
   statusEl.textContent = `Loading last ${rangeDays} days across the mailbox…`;
   try {
     const results = await invoke<{ messages: Message[]; fromCache: boolean }>(
       "list_messages_since",
       { since, top: RANGE_TOP },
     );
-    if (seq !== rangeSeq || !rangeActive || rangeDays <= 0) return;
+    if (seq !== rangeSeq || !viewingFilteredMail() || rangeDays <= 0) return;
     rangeMessages = results.messages;
     renderRangeResults();
     const where = results.fromCache ? " (local cache)" : "";
     const capped =
       results.messages.length >= RANGE_TOP ? ` · showing first ${RANGE_TOP}` : "";
-    statusEl.textContent = `${results.messages.length} message(s) in the last ${rangeDays} days${capped}${where}`;
+    statusEl.textContent = `${results.messages.length} message(s) in Filtered Mail (last ${rangeDays} days)${capped}${where}`;
   } catch (e) {
-    if (seq !== rangeSeq || !rangeActive) return;
+    if (seq !== rangeSeq || !viewingFilteredMail()) return;
     if (await handlePossibleAuthError(e)) return;
-    listEl.innerHTML = `<div class="search-header">Mailbox · last ${rangeDays} days</div><div class="p-6 text-center opacity-60">Could not load: ${esc(String(e))}</div>`;
-    statusEl.textContent = `Could not load date range: ${e}`;
+    listEl.innerHTML = `<div class="search-header">Filtered Mail · last ${rangeDays} days</div><div class="p-6 text-center opacity-60">Could not load: ${esc(String(e))}</div>`;
+    statusEl.textContent = `Could not load Filtered Mail: ${e}`;
   }
 }
 
@@ -3152,7 +3173,7 @@ function renderRangeResults(): void {
   currentIds = new Set(rangeMessages.map((m) => m.id));
   // Server already scoped by date; Unread is ignored while a range is active.
   const visible = sortMessages(applyFilter(rangeMessages));
-  const header = `<div class="search-header">Mailbox · last ${rangeDays} days (${visible.length}${
+  const header = `<div class="search-header">Filtered Mail · last ${rangeDays} days (${visible.length}${
     visible.length !== rangeMessages.length ? ` of ${rangeMessages.length}` : ""
   })</div>`;
   if (visible.length === 0) {
@@ -3172,10 +3193,6 @@ function renderRangeResults(): void {
 }
 
 function exitRangeMode(): void {
-  if (!rangeActive && rangeDays <= 0) {
-    rangeMessages = [];
-    return;
-  }
   rangeSeq++;
   rangeActive = false;
   rangeMessages = [];
@@ -3228,7 +3245,7 @@ async function backfillOlder(): Promise<boolean> {
 async function reconcileAfterAction(): Promise<void> {
   if (searchActive) {
     await loadFolders();
-  } else if (rangeDays > 0) {
+  } else if (viewingFilteredMail()) {
     await loadMailboxRange();
     await loadFolders();
   } else {
@@ -3242,7 +3259,7 @@ async function reconcileAfterAction(): Promise<void> {
 // with the cached folder; otherwise restore the row from the cache.
 async function revertOptimisticAction(): Promise<void> {
   if (searchActive) await runSearch(searchInput.value);
-  else if (rangeDays > 0) await loadMailboxRange();
+  else if (viewingFilteredMail()) await loadMailboxRange();
   else await refreshFromCache(true);
 }
 
@@ -3256,6 +3273,25 @@ async function syncFolder(quiet = false): Promise<void> {
     pendingSync = true;
     return;
   }
+  // Filtered Mail is virtual — refresh the mailbox-wide list, don't sync a fake id.
+  if (viewingFilteredMail()) {
+    if (!quiet) {
+      refreshBtn.disabled = true;
+      statusEl.textContent = "Refreshing…";
+    }
+    try {
+      await loadMailboxRange();
+      await loadFolders();
+      if (!searchActive) void checkInboxForNewMail();
+    } finally {
+      if (!quiet) refreshBtn.disabled = false;
+      if (pendingSync) {
+        pendingSync = false;
+        void syncFolder(quiet);
+      }
+    }
+    return;
+  }
   syncing = true;
   if (!quiet) {
     refreshBtn.disabled = true;
@@ -3263,8 +3299,7 @@ async function syncFolder(quiet = false): Promise<void> {
   }
   try {
     await invoke("sync_folder", { folderId: currentFolderId });
-    if (rangeDays > 0 && !searchActive) await loadMailboxRange();
-    else await refreshFromCache(quiet);
+    await refreshFromCache(quiet);
     await loadFolders(); // refresh unread counts
     // Check the Inbox for new mail regardless of which folder is open (the
     // notification setting promises alerts for Inbox arrivals), syncing the
@@ -3400,7 +3435,9 @@ async function loadActiveAccount(): Promise<void> {
   // A calendar-only account has no mailbox to load, cache from, or sync.
   if (mailSupported) {
     await loadFolders();
-    if (rangeDays > 0) await loadMailboxRange();
+    // Stay on the real folder (Inbox, …). Filtered Mail is opt-in via the sidebar
+    // or the date-range control — never hijack the list just because a range is set.
+    if (viewingFilteredMail()) await loadMailboxRange();
     else {
       await refreshFromCache().catch(() => {});
       await syncFolder();
@@ -4248,7 +4285,7 @@ let correspondentsLoadedFor = "";
 let correspondentAddresses: string[] = [];
 
 async function loadCorrespondentSuggestions(): Promise<void> {
-  if (correspondentsLoadedFor === accountEmail) return;
+  if (correspondentsLoadedFor === accountEmail && correspondentAddresses.length > 0) return;
   try {
     const addresses = await invoke<string[]>("correspondent_suggestions");
     correspondentAddresses = addresses.filter(
@@ -4257,6 +4294,11 @@ async function loadCorrespondentSuggestions(): Promise<void> {
     correspondentsLoadedFor = accountEmail;
   } catch {
     // Cache suggestions are optional; composing must remain available offline.
+  }
+  // If the user already focused To/Cc/Bcc while the fetch was in flight, paint now.
+  const active = document.activeElement;
+  if (active === cToInput || active === cCcInput || active === cBccInput) {
+    showCorrespondentSuggestions(active as HTMLInputElement);
   }
 }
 
@@ -4277,11 +4319,20 @@ function applyCorrespondentSuggestion(input: HTMLInputElement, address: string):
 }
 
 function showCorrespondentSuggestions(input: HTMLInputElement): void {
+  if (composeOverlay.classList.contains("hidden")) {
+    hideCorrespondentSuggestions();
+    return;
+  }
   const start = Math.max(input.value.lastIndexOf(","), input.value.lastIndexOf(";")) + 1;
   const query = input.value.slice(start).trim().toLowerCase();
   const existing = new Set(parseAddresses(input.value).map((a) => a.toLowerCase()));
+  // Empty query → show recent addresses (still useful on a blank To of a forward).
   const matches = correspondentAddresses
-    .filter((address) => !existing.has(address.toLowerCase()) && address.toLowerCase().includes(query))
+    .filter(
+      (address) =>
+        !existing.has(address.toLowerCase()) &&
+        (query.length === 0 || address.toLowerCase().includes(query)),
+    )
     .slice(0, 8);
   if (!matches.length) {
     hideCorrespondentSuggestions();
@@ -4430,6 +4481,8 @@ function openCompose(opts: {
   importance?: "low" | "normal" | "high";
   requestReadReceipt?: boolean;
   requestDeliveryReceipt?: boolean;
+  // Which field to focus after open. Default: body (above the quote).
+  focus?: "to" | "body";
 }): void {
   void loadCorrespondentSuggestions();
   composeSession += 1; // invalidate any in-flight save from a prior session
@@ -4465,7 +4518,16 @@ function openCompose(opts: {
   delete composeMsg.dataset.error;
   applyComposeSize();
   composeOverlay.classList.remove("hidden");
-  focusComposeBody();
+  // Forward / blank-To compose: land on To so autocomplete is one keystroke away.
+  // Reply already has recipients — keep caret in the body above the quote.
+  // Explicit focus:"to" always wins (draft resume with empty To, etc.).
+  const focusTo = opts.focus === "to" || (opts.focus !== "body" && opts.to.length === 0);
+  if (focusTo) {
+    cToInput.focus();
+    showCorrespondentSuggestions(cToInput);
+  } else {
+    focusComposeBody();
+  }
   // Snapshot the opened state so we can tell whether the user has since edited
   // anything (drives discard-confirm and autosave). The prefill — recipients,
   // subject, quoted original — is NOT "dirty".
@@ -4488,6 +4550,7 @@ function focusComposeBody(): void {
 function closeCompose(): void {
   cancelAutosave();
   composeSession += 1; // any save still in flight must not write back to this closed compose
+  hideCorrespondentSuggestions();
   composeOverlay.classList.add("hidden");
 }
 
@@ -5211,8 +5274,10 @@ function setMailDropTarget(btn: HTMLElement | null): void {
   clearMailDropTarget();
   if (!btn) return;
   mailDropFolderEl = btn;
-  const f = folders.find((x) => x.id === btn.dataset.fid);
-  btn.classList.add(f && folderAcceptsMove(f) ? "folder-drop" : "folder-drop-forbidden");
+  const fid = btn.dataset.fid;
+  const f = folders.find((x) => x.id === fid);
+  const ok = !!f && !isFilteredMailId(fid) && folderAcceptsMove(f);
+  btn.classList.add(ok ? "folder-drop" : "folder-drop-forbidden");
 }
 
 function endMailDrag(): void {
@@ -5274,7 +5339,8 @@ foldersEl.addEventListener("dragover", (e) => {
   e.preventDefault();
   const btn = (e.target as HTMLElement).closest<HTMLElement>(".folder");
   setMailDropTarget(btn);
-  const f = btn && folders.find((x) => x.id === btn.dataset.fid);
+  const fid = btn?.dataset.fid;
+  const f = fid && !isFilteredMailId(fid) ? folders.find((x) => x.id === fid) : undefined;
   if (e.dataTransfer) e.dataTransfer.dropEffect = f && folderAcceptsMove(f) ? "move" : "none";
 });
 
@@ -5297,10 +5363,12 @@ foldersEl.addEventListener("drop", (e) => {
     return;
   }
   const dest = folders.find((f) => f.id === destId);
-  if (!dest || !folderAcceptsMove(dest)) {
-    statusEl.textContent = dest && isOutgoingFolder(dest)
-      ? "Can't move messages into Drafts, Sent, or Outbox."
-      : "Already in this folder.";
+  if (isFilteredMailId(destId) || !dest || !folderAcceptsMove(dest)) {
+    statusEl.textContent = isFilteredMailId(destId)
+      ? "Filtered Mail isn't a real folder — pick Inbox or another folder."
+      : dest && isOutgoingFolder(dest)
+        ? "Can't move messages into Drafts, Sent, or Outbox."
+        : "Already in this folder.";
     endMailDrag();
     return;
   }
@@ -5681,6 +5749,18 @@ function hideFolderMenu(): void {
 function showFolderMenu(x: number, y: number, fid: string | null): void {
   hideCtxMenu(); // never leave the message menu open alongside this one
   folderMenuTargetId = fid;
+  // Virtual Filtered Mail: only offer creating a real top-level folder.
+  if (isFilteredMailId(fid)) {
+    folderMenu.innerHTML = `<button class="ctx-item" data-act="newFolder">New folder…</button>`;
+    folderMenu.classList.remove("hidden");
+    folderMenu.style.left = "0";
+    folderMenu.style.top = "0";
+    const left = Math.max(4, Math.min(x, window.innerWidth - folderMenu.offsetWidth - 4));
+    const top = Math.max(4, Math.min(y, window.innerHeight - folderMenu.offsetHeight - 4));
+    folderMenu.style.left = `${left}px`;
+    folderMenu.style.top = `${top}px`;
+    return;
+  }
   const items: Array<{ act: string; label: string; danger?: boolean } | "sep"> = [
     { act: "newFolder", label: "New folder…" },
   ];
@@ -6074,21 +6154,21 @@ refreshBtn.addEventListener("click", () => {
 // used when sort / filter / grouping changes.
 function rerenderList(): void {
   if (searchActive) void runSearch(searchInput.value);
-  else if (rangeActive || rangeDays > 0) void loadMailboxRange();
+  else if (viewingFilteredMail()) void loadMailboxRange();
   else void refreshFromCache(true);
 }
 function updateFilterUi(): void {
-  // Finite date ranges always show read + unread; reflect that in the seg UI.
-  const effective = rangeDays > 0 && filterMode === "unread" ? "all" : filterMode;
+  // Filtered Mail always shows read + unread; reflect that in the seg UI.
+  const filtered = viewingFilteredMail();
+  const effective = filtered && filterMode === "unread" ? "all" : filterMode;
   for (const b of filterSeg.querySelectorAll<HTMLButtonElement>("button")) {
     const isUnread = b.dataset.filter === "unread";
     b.classList.toggle("active", b.dataset.filter === effective);
-    b.disabled = isUnread && rangeDays > 0;
+    b.disabled = isUnread && filtered;
     if (isUnread) {
-      b.title =
-        rangeDays > 0
-          ? "Unread filter unavailable while a date range is active (shows read and unread)"
-          : "Unread only";
+      b.title = filtered
+        ? "Unread filter unavailable in Filtered Mail (shows read and unread)"
+        : "Unread only";
     }
   }
 }
@@ -6114,22 +6194,29 @@ rangeSelect.addEventListener("change", () => {
   rangeDays = (RANGE_CHOICES as readonly number[]).includes(v) ? (v as RangeDays) : 7;
   localStorage.setItem(RANGE_KEY, String(rangeDays));
   // Date ranges show every message in the window (read and unread).
-  if (rangeDays > 0 && filterMode === "unread") {
+  if (rangeDays > 0 && filterMode === "unread" && viewingFilteredMail()) {
     filterMode = "all";
     localStorage.setItem(FILTER_KEY, filterMode);
   }
   updateFilterUi();
-  if (rangeDays > 0) void loadMailboxRange();
-  else {
+  if (rangeDays > 0) {
+    // Opt into Filtered Mail when picking a finite range.
+    void loadMailboxRange();
+  } else {
     exitRangeMode();
-    void refreshFromCache(true);
+    if (viewingFilteredMail()) {
+      const inbox = folders.find((f) => f.role === "inbox");
+      void selectFolder(inbox?.id ?? folders[0]?.id ?? FILTERED_MAIL_ID);
+    } else {
+      void refreshFromCache(true);
+    }
   }
 });
 filterSeg.addEventListener("click", (e) => {
   const f = (e.target as HTMLElement).closest("button")?.dataset.filter as FilterMode | undefined;
   if (!f || f === filterMode) return;
-  // Ignore Unread while a date range is active — range always includes both.
-  if (f === "unread" && rangeDays > 0) return;
+  // Ignore Unread in Filtered Mail — range always includes both.
+  if (f === "unread" && viewingFilteredMail()) return;
   filterMode = f;
   localStorage.setItem(FILTER_KEY, filterMode);
   updateFilterUi();

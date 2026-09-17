@@ -5,7 +5,7 @@
 > new milestone state, a decision made/reversed, or an open question resolved.
 > Keep newest progress entries at the top of the log.
 >
-> **Last updated:** 2026-09-16 (mailbox-wide date-range list, v0.15.8)
+> **Last updated:** 2026-09-17 (Filtered Mail virtual folder + compose autocomplete)
 
 ---
 
@@ -101,6 +101,17 @@ Entra app registration (public, not secret):
 ---
 
 ## Progress log
+
+### 2026-09-17 — Filtered Mail folder + compose autocomplete everywhere
+
+- Date-range results move into a virtual sidebar folder **Filtered Mail**
+  (`FILTERED_MAIL_ID`); Inbox and other real folders keep normal cache lists
+  (no client-side `applyDateRange` clipping). Changing `#range` opens Filtered
+  Mail; **All mail** returns to Inbox. Unread quick-filter only disabled while
+  viewing Filtered Mail. Refresh/sync/drag/context-menu skip the virtual id.
+- Compose To/Cc/Bcc autocomplete: `#correspondents` is hosted on `document.body`
+  at z-index 80 so `.compose-panel { overflow: hidden }` cannot clip it. Blank
+  To (new/forward/empty draft) focuses To and shows recent addresses.
 
 ### 2026-09-16 — Mail list date-range control (v0.15.8)
 

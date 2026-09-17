@@ -25,7 +25,8 @@ is the single item WattMail keeps in the OS keychain (read once per process).
 
 - `src/folder-sidebar.ts` — sidebar folder order (pinned blocks, then unread, then tree)
 - `src/date-range.ts` — rolling N-day received cutoff helpers; mailbox-wide
-  range list via `list_messages_since` (`src/main.ts` `loadMailboxRange`)
+  range list via `list_messages_since` into virtual Filtered Mail
+  (`src/main.ts` `FILTERED_MAIL_ID` / `loadMailboxRange`)
 - `src-tauri/src/settings.rs` — `settings.json`; close-to-tray, notifications,
   signature, plus `folderPrefs` (`{accountId}:{folderId}` → color / pinned)
 - `src-tauri/src/lib.rs` — composition, tray branch (Linux ksni vs native)
@@ -64,9 +65,15 @@ aborts on that).
 
 ## Recent Context & Decisions
 
+- 2026-09-17: Filtered Mail virtual sidebar folder (`FILTERED_MAIL_ID`) — date-range
+  results live only there; Inbox/other folders keep normal cache contents. Range
+  control opens Filtered Mail; All mail returns to Inbox. Compose To/Cc/Bcc
+  autocomplete portals `#correspondents` onto `document.body` (z-index 80) so
+  `.compose-panel { overflow:hidden }` never clips it (new/reply/forward/draft).
 - 2026-09-16: v0.15.8 — Mailbox-wide date-range list — `#range` defaults to last
   7 days across **every folder** via `list_messages_since` / Graph `$filter`
-  (read + unread). Offline: `cached_for_search(None)`. All mail = per-folder.
+  (read + unread). Offline: `cached_for_search(None)`. Superseded UI placement
+  by Filtered Mail folder (above).
 - 2026-09-16: v0.15.7 — Mail list date-range control (folder-scoped; superseded).
 - 2026-09-11: v0.15.6 — Sidebar folder pin/swatch — `.folder` is a 2-slot grid so the
   colour pill sits next to the pin; unpinned pills use the pin column. Sorter
