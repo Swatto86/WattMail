@@ -24,6 +24,7 @@ is the single item WattMail keeps in the OS keychain (read once per process).
 ## Component Map
 
 - `src/folder-sidebar.ts` — sidebar folder order (pinned blocks, then unread, then tree)
+  plus `filterFoldersByName` for the sidebar filter input
 - `src/date-range.ts` — rolling N-day received cutoff helpers; mailbox-wide
   range list via `list_messages_since` into virtual Filtered Mail
   (`src/main.ts` `FILTERED_MAIL_ID` / `loadMailboxRange`)
@@ -65,6 +66,9 @@ aborts on that).
 
 ## Recent Context & Decisions
 
+- 2026-09-17: Sidebar folder filter (`#folder-filter`) + faster folder switches —
+  paint from SQLite first; skip Graph sync when that folder was synced within
+  the last 60s; remember `loadedCount` / `reachedOldest` per folder.
 - 2026-09-17: v0.15.9 — Filtered Mail virtual sidebar folder + compose To/Cc/Bcc
   autocomplete portals onto `document.body` (works for new/reply/forward/draft).
 - 2026-09-17: Filtered Mail virtual sidebar folder (`FILTERED_MAIL_ID`) — date-range

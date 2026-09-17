@@ -1,4 +1,4 @@
-import { foldersForSidebar } from "../src/folder-sidebar.ts";
+import { filterFoldersByName, foldersForSidebar } from "../src/folder-sidebar.ts";
 
 function f(id, unreadCount, depth) {
   return { id, unreadCount, depth };
@@ -74,6 +74,27 @@ assertEq(
   ids([f("work", 2, 0), f("starred", 0, 1), f("leaf", 0, 2), f("inbox", 1, 0)], ["starred"]),
   ["starred", "leaf", "work", "inbox"],
   "nested pin still wins; unread parent is not re-lifted with the pinned child",
+);
+
+const named = [
+  { id: "1", name: "Inbox" },
+  { id: "2", name: "Projects / Alpha" },
+  { id: "3", name: "Archive" },
+];
+assertEq(
+  filterFoldersByName(named, "").map((x) => x.id),
+  ["1", "2", "3"],
+  "empty filter keeps all folders",
+);
+assertEq(
+  filterFoldersByName(named, "pro").map((x) => x.id),
+  ["2"],
+  "substring match is case-insensitive",
+);
+assertEq(
+  filterFoldersByName(named, "ZZZ").map((x) => x.id),
+  [],
+  "no match yields empty list",
 );
 
 console.log("folder-sidebar order checks OK");

@@ -1,6 +1,16 @@
 /** Folder row the sidebar sorter needs. Extra fields pass through unchanged. */
 export type SidebarFolder = { id: string; unreadCount: number; depth: number };
 
+/** Case-insensitive substring match on folder display name; empty query keeps all. */
+export function filterFoldersByName<T extends { name: string }>(
+  list: T[],
+  query: string,
+): T[] {
+  const q = query.trim().toLowerCase();
+  if (!q) return list;
+  return list.filter((f) => f.name.toLowerCase().includes(q));
+}
+
 /**
  * Pinned blocks first (folder + descendants, indent reset), then unpinned
  * folders with unread — same block lift — then the rest in original tree order.

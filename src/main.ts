@@ -26,7 +26,7 @@ import {
   startEventReminders,
 } from "./calendar";
 import { showConfirm, showPrompt, isDialogOpen } from "./dialog";
-import { foldersForSidebar } from "./folder-sidebar";
+import { filterFoldersByName, foldersForSidebar } from "./folder-sidebar";
 import {
   adaptPlainEmail,
   EMAIL_FRAME_SANDBOX,
@@ -158,14 +158,22 @@ interface NewMailBatch {
 
 // The delta sync caches only a bounded recent window of each folder. The list
 // reads a growing window of the cache; "Load more" grows it by PAGE_SIZE and,
-// once the cache is exhausted, backfills older history from the server. Switching
-// folders resets both the window and the "reached the folder's start" flag.
+// once the cache is exhausted, backfills older history from the server. Per-folder
+// window size is remembered so switching back reuses the SQLite cache without
+// shrinking to the first page.
 const PAGE_SIZE = 50;
 let loadedCount = PAGE_SIZE;
 let currentTotal = 0;
 // Set once a server backfill returns nothing older — the folder's start is cached
-// and "Load more" should stop offering. Reset on every folder switch.
+// and "Load more" should stop offering. Remembered per folder across switches.
 let reachedOldest = false;
+const loadedCountByFolder = new Map<string, number>();
+const reachedOldestByFolder = new Map<string, boolean>();
+// Last successful Graph sync per folder — skip a network pull when switching
+// back within the auto-sync window (list already comes from SQLite).
+const lastFolderSyncAt = new Map<string, number>();
+const AUTO_SYNC_MS = 60_000;
+const FOLDER_SYNC_FRESH_MS = AUTO_SYNC_MS;
 // Guards against overlapping backfills from rapid "Load more" clicks.
 let backfilling = false;
 
@@ -575,7 +583,13 @@ appRoot.innerHTML = /* html */ `
     </div>
 
     <div id="main" class="flex flex-1 min-h-0">
-      <div id="folders" class="w-[200px] shrink-0 overflow-y-auto scroll-thin border-r border-base-300 py-1"></div>
+      <div id="folder-pane" class="folder-pane w-[200px] shrink-0 border-r border-base-300">
+        <div class="folder-filter-wrap">
+          <input id="folder-filter" class="input input-bordered input-xs" type="search" placeholder="Filter folders…" autocomplete="off" />
+          <button id="folder-filter-clear" class="search-clear hidden" type="button" title="Clear folder filter">&times;</button>
+        </div>
+        <div id="folders" class="folder-list overflow-y-auto scroll-thin py-1"></div>
+      </div>
       <div id="list" class="shrink-0 overflow-y-auto scroll-thin border-r border-base-300"></div>
       <div id="splitter" class="splitter" title="Drag to resize" role="separator" aria-orientation="vertical" aria-label="Resize message list" tabindex="0"></div>
       <div id="reader" class="flex-1 flex flex-col min-w-0"></div>
@@ -875,6 +889,8 @@ const viewNav = document.querySelector<HTMLDivElement>("#view-nav")!;
 const viewCalendarBtn = document.querySelector<HTMLButtonElement>("#view-calendar-btn")!;
 const viewMailBtn = document.querySelector<HTMLButtonElement>("#view-mail-btn")!;
 const foldersEl = document.querySelector<HTMLDivElement>("#folders")!;
+const folderFilterInput = document.querySelector<HTMLInputElement>("#folder-filter")!;
+const folderFilterClearBtn = document.querySelector<HTMLButtonElement>("#folder-filter-clear")!;
 const listEl = document.querySelector<HTMLDivElement>("#list")!;
 const splitter = document.querySelector<HTMLDivElement>("#splitter")!;
 const readerEl = document.querySelector<HTMLDivElement>("#reader")!;
@@ -1060,6 +1076,11 @@ function showSignedOut(): void {
   currentFolderId = null;
   folders = [];
   foldersEl.innerHTML = "";
+  folderFilterInput.value = "";
+  folderFilterClearBtn.classList.add("hidden");
+  loadedCountByFolder.clear();
+  reachedOldestByFolder.clear();
+  lastFolderSyncAt.clear();
   searchActive = false;
   searchSeq++;
   clearSearchTimer();
@@ -2914,11 +2935,17 @@ async function loadFolders(): Promise<void> {
 }
 
 function renderFolders(): void {
+  const q = folderFilterInput.value;
+  const qLower = q.trim().toLowerCase();
   const filteredActive = viewingFilteredMail() ? "active" : "";
   const filteredLabel =
     rangeDays > 0 ? `Filtered Mail · ${rangeDays}d` : "Filtered Mail";
-  const filteredRow = `<button class="folder folder-virtual ${filteredActive}" data-fid="${FILTERED_MAIL_ID}" title="Mailbox-wide date filter (every folder)"><span class="folder-name">${esc(filteredLabel)}</span></button>`;
-  const rows = foldersForSidebar(folders, isFolderPinned)
+  const showFiltered =
+    !qLower || filteredLabel.toLowerCase().includes(qLower) || "filtered mail".includes(qLower);
+  const filteredRow = showFiltered
+    ? `<button class="folder folder-virtual ${filteredActive}" data-fid="${FILTERED_MAIL_ID}" title="Mailbox-wide date filter (every folder)"><span class="folder-name">${esc(filteredLabel)}</span></button>`
+    : "";
+  const rows = filterFoldersByName(foldersForSidebar(folders, isFolderPinned), q)
     .map((f) => {
       const active = !viewingFilteredMail() && f.id === currentFolderId ? "active" : "";
       const color = folderColor(f.id);
@@ -2933,7 +2960,27 @@ function renderFolders(): void {
       return `<button class="folder ${active}${colorClass}${pinClass}" data-fid="${esc(f.id)}" title="${esc(f.name)}" style="${colorStyle}padding-left:${pad}px">${pin}${swatch}<span class="folder-name">${esc(f.name)}</span>${badge}</button>`;
     })
     .join("");
-  foldersEl.innerHTML = filteredRow + rows;
+  const empty =
+    !filteredRow && !rows
+      ? `<div class="folder-filter-empty">No folders match</div>`
+      : "";
+  foldersEl.innerHTML = filteredRow + rows + empty;
+}
+
+function rememberFolderWindow(id: string | null): void {
+  if (!id || isFilteredMailId(id)) return;
+  loadedCountByFolder.set(id, loadedCount);
+  reachedOldestByFolder.set(id, reachedOldest);
+}
+
+function restoreFolderWindow(id: string): void {
+  loadedCount = loadedCountByFolder.get(id) ?? PAGE_SIZE;
+  reachedOldest = reachedOldestByFolder.get(id) ?? false;
+}
+
+function folderSyncIsFresh(id: string): boolean {
+  const last = lastFolderSyncAt.get(id) ?? 0;
+  return Date.now() - last < FOLDER_SYNC_FRESH_MS;
 }
 
 async function selectFolder(id: string): Promise<void> {
@@ -2953,9 +3000,9 @@ async function selectFolder(id: string): Promise<void> {
     searchInput.value = "";
     setSearchClearVisible(false);
   }
+  rememberFolderWindow(currentFolderId);
   currentFolderId = id;
-  loadedCount = PAGE_SIZE; // start each folder at the first page
-  reachedOldest = false; // re-enable server backfill for the new folder
+  restoreFolderWindow(id);
   renderFolders();
   updateFilterUi();
   if (isFilteredMailId(id)) {
@@ -2963,8 +3010,17 @@ async function selectFolder(id: string): Promise<void> {
     return;
   }
   exitRangeMode();
+  // Paint from SQLite immediately — don't wait on Graph for a folder we've
+  // already synced recently (auto-sync / Refresh still pull when needed).
   await refreshFromCache().catch(() => {});
-  await syncFolder();
+  if (folderSyncIsFresh(id)) {
+    statusEl.textContent =
+      currentTotal > currentIds.size
+        ? `${currentIds.size} of ${currentTotal} messages`
+        : `${currentIds.size} message(s)`;
+    return;
+  }
+  void syncFolder(true);
 }
 
 // ---- Desktop notifications for new mail ----
@@ -3299,6 +3355,7 @@ async function syncFolder(quiet = false): Promise<void> {
   }
   try {
     await invoke("sync_folder", { folderId: currentFolderId });
+    if (currentFolderId) lastFolderSyncAt.set(currentFolderId, Date.now());
     await refreshFromCache(quiet);
     await loadFolders(); // refresh unread counts
     // Check the Inbox for new mail regardless of which folder is open (the
@@ -3393,6 +3450,11 @@ async function loadActiveAccount(): Promise<void> {
   folders = [];
   loadedCount = PAGE_SIZE;
   reachedOldest = false;
+  loadedCountByFolder.clear();
+  reachedOldestByFolder.clear();
+  lastFolderSyncAt.clear();
+  folderFilterInput.value = "";
+  folderFilterClearBtn.classList.add("hidden");
   searchActive = false;
   searchSeq++;
   clearSearchTimer();
@@ -6255,6 +6317,19 @@ searchClearBtn.addEventListener("click", () => {
   exitSearch();
   searchInput.focus();
 });
+function setFolderFilterClearVisible(visible: boolean): void {
+  folderFilterClearBtn.classList.toggle("hidden", !visible);
+}
+folderFilterInput.addEventListener("input", () => {
+  setFolderFilterClearVisible(folderFilterInput.value.trim().length > 0);
+  renderFolders();
+});
+folderFilterClearBtn.addEventListener("click", () => {
+  folderFilterInput.value = "";
+  setFolderFilterClearVisible(false);
+  renderFolders();
+  folderFilterInput.focus();
+});
 gear.addEventListener("click", openSettings);
 signinBtn.addEventListener("click", () => void addAccount());
 settingsClose.addEventListener("click", closeSettings);
@@ -7053,7 +7128,6 @@ invoke<boolean>("started_hidden")
 void boot();
 
 // Pick up new mail in the current folder automatically (quietly, every 60s).
-const AUTO_SYNC_MS = 60_000;
 setInterval(() => {
   // Only while the mail view is active: no point spending a Graph sync_folder
   // call + mail-DOM rebuild on a hidden list while the calendar tab is open.

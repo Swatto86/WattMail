@@ -98,6 +98,33 @@ body,
   background: oklch(var(--bc) / 0.12);
 }
 
+/* Folder sidebar: filter above the scrollable list */
+.folder-pane {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+.folder-filter-wrap {
+  position: relative;
+  flex-shrink: 0;
+  padding: 6px 6px 4px;
+  border-bottom: 1px solid oklch(var(--bc) / 0.12);
+}
+.folder-filter-wrap .input {
+  width: 100%;
+  padding-right: 22px;
+}
+.folder-list {
+  flex: 1;
+  min-height: 0;
+}
+.folder-filter-empty {
+  padding: 12px 10px;
+  font-size: 12px;
+  opacity: 0.55;
+  text-align: center;
+}
+
 /* Search results header */
 .search-header {
   padding: 8px 12px;

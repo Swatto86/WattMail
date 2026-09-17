@@ -5,7 +5,7 @@
 > new milestone state, a decision made/reversed, or an open question resolved.
 > Keep newest progress entries at the top of the log.
 >
-> **Last updated:** 2026-09-17 (v0.15.9 — Filtered Mail + compose autocomplete)
+> **Last updated:** 2026-09-17 (folder filter + cache-first folder switches)
 
 ---
 
@@ -101,6 +101,14 @@ Entra app registration (public, not secret):
 ---
 
 ## Progress log
+
+### 2026-09-17 — Folder filter + cache-first folder switches
+
+- Sidebar `#folder-filter` above the folder list (client-side name substring).
+- Folder switches paint from SQLite immediately; Graph sync is skipped when that
+  folder was synced within the last 60s. Per-folder `loadedCount` /
+  `reachedOldest` remembered so returning to a folder keeps the cached window.
+- Refresh still force-syncs. Auto-sync every 60s unchanged.
 
 ### 2026-09-17 — Filtered Mail folder + compose autocomplete everywhere (v0.15.9)
 
