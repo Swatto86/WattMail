@@ -3020,7 +3020,9 @@ async function selectFolder(id: string): Promise<void> {
         : `${currentIds.size} message(s)`;
     return;
   }
-  void syncFolder(true);
+  // Background sync: quiet when the list already came from cache; otherwise
+  // show "Syncing…" so a cold folder isn't a silent blank pane.
+  void syncFolder(currentIds.size > 0);
 }
 
 // ---- Desktop notifications for new mail ----
