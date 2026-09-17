@@ -5,7 +5,7 @@
 > new milestone state, a decision made/reversed, or an open question resolved.
 > Keep newest progress entries at the top of the log.
 >
-> **Last updated:** 2026-09-17 (Filtered Mail virtual folder + compose autocomplete)
+> **Last updated:** 2026-09-17 (v0.15.9 — Filtered Mail + compose autocomplete)
 
 ---
 
@@ -102,7 +102,7 @@ Entra app registration (public, not secret):
 
 ## Progress log
 
-### 2026-09-17 — Filtered Mail folder + compose autocomplete everywhere
+### 2026-09-17 — Filtered Mail folder + compose autocomplete everywhere (v0.15.9)
 
 - Date-range results move into a virtual sidebar folder **Filtered Mail**
   (`FILTERED_MAIL_ID`); Inbox and other real folders keep normal cache lists

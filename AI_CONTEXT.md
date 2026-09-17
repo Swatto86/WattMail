@@ -65,6 +65,8 @@ aborts on that).
 
 ## Recent Context & Decisions
 
+- 2026-09-17: v0.15.9 — Filtered Mail virtual sidebar folder + compose To/Cc/Bcc
+  autocomplete portals onto `document.body` (works for new/reply/forward/draft).
 - 2026-09-17: Filtered Mail virtual sidebar folder (`FILTERED_MAIL_ID`) — date-range
   results live only there; Inbox/other folders keep normal cache contents. Range
   control opens Filtered Mail; All mail returns to Inbox. Compose To/Cc/Bcc
